@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@sinclair/typebox": "^0.34.48",
-    "better-sqlite3": "^11.0.0",
+    "better-sqlite3": "^9.6.0",
     "openai": "^4.47.0"
   },
   "devDependencies": {
