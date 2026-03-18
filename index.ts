@@ -689,13 +689,27 @@ function sliceLastTurn(
   const TOOL_MAX = 6000;
   kept = kept.map((msg: any) => {
     if (msg.role !== "tool" && msg.role !== "toolResult") return msg;
-    const text = typeof msg.content === "string"
-      ? msg.content
-      : JSON.stringify(msg.content ?? "");
-    if (text.length <= TOOL_MAX) return msg;
+    // Extract text from both string and array content formats
+    let text: string;
+    if (typeof msg.content === "string") {
+      text = msg.content;
+    } else if (Array.isArray(msg.content)) {
+      text = msg.content
+        .filter((b: any) => b && typeof b === "object" && typeof b.text === "string")
+        .map((b: any) => b.text)
+        .join("\n");
+    } else {
+      text = JSON.stringify(msg.content ?? "");
+    }
+    if (text.length <= TOOL_MAX) {
+      // Ensure content is always in array format for OpenClaw core compatibility
+      if (Array.isArray(msg.content)) return msg;
+      return { ...msg, content: [{ type: "text", text }] };
+    }
     const head = Math.floor(TOOL_MAX * 0.6);
     const tail = Math.floor(TOOL_MAX * 0.3);
-    return { ...msg, content: text.slice(0, head) + `\n...[truncated ${text.length - head - tail} chars]...\n` + text.slice(-tail) };
+    const truncated = text.slice(0, head) + `\n...[truncated ${text.length - head - tail} chars]...\n` + text.slice(-tail);
+    return { ...msg, content: [{ type: "text", text: truncated }] };
   });
 
   let tokens = 0;
