@@ -1,7 +1,7 @@
 {
   "id": "graph-memory",
   "name": "Graph Memory",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "description": "知识图谱记忆引擎：从对话提取三元组，FTS5+图遍历+PageRank 跨对话召回，社区聚类+向量去重自动维护",
   "configSchema": {
     "type": "object",
@@ -29,7 +29,7 @@
       "freshTailCount": {
         "type": "integer",
         "default": 10,
-        "description": "assemble 时保留最近几条原始消息"
+        "description": "(deprecated) 已改为按用户轮次切分，此参数不再使用"
       },
       "dedupThreshold": {
         "type": "number",

@@ -170,12 +170,11 @@ import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn } from "../engine/embed.ts";
 import { upsertCommunitySummary, pruneCommunitySummaries } from "../store/store.ts";
 
-const COMMUNITY_SUMMARY_SYS = `你是知识图谱社区摘要引擎。根据社区内的节点列表，生成一句话描述该社区的主题领域。
+const COMMUNITY_SUMMARY_SYS = `你是知识图谱摘要引擎。根据节点列表，用简短的描述概括这组节点的主题领域。
 要求：
-- 只返回一句话，不超过 30 个字
-- 描述该社区涵盖的工具/技术/任务领域
-- 不要使用"社区"这个词
-- 不要加引号或标点以外的格式`;
+- 只返回短语本身，不要解释
+- 描述涵盖的工具/技术/任务领域
+- 不要使用"社区"这个词`;
 
 /**
  * 为所有社区生成 LLM 摘要描述 + embedding 向量

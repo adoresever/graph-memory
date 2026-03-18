@@ -42,7 +42,6 @@ export function createCompleteFn(
             ...(system.trim() ? [{ role: "system", content: system.trim() }] : []),
             { role: "user", content: user },
           ],
-          max_tokens: 2000,
           temperature: 0.1,
         }),
       });
@@ -66,7 +65,7 @@ export function createCompleteFn(
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model, max_tokens: 2000, system, messages: [{ role: "user", content: user }] }),
+      body: JSON.stringify({ model, max_tokens: 4096, system, messages: [{ role: "user", content: user }] }),
     });
     if (!res.ok) throw new Error(`[graph-memory] Anthropic API ${res.status}`);
     return ((await res.json() as any).content?.[0]?.text) ?? "";

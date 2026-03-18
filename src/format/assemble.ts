@@ -88,9 +88,7 @@ export function assembleContext(
     recalledEdges: GmEdge[];
   },
 ): { xml: string | null; systemPrompt: string; tokens: number } {
-  const maxChars = params.tokenBudget * 0.15 * CHARS_PER_TOKEN;
-
-  // 合并去重
+  // 合并去重（recall 已经用 PPR 排好序了，全量放入）
   const map = new Map<string, GmNode & { src: "active" | "recalled" }>();
   for (const n of params.recalledNodes) map.set(n.id, { ...n, src: "recalled" });
   for (const n of params.activeNodes) map.set(n.id, { ...n, src: "active" });
@@ -106,15 +104,8 @@ export function assembleContext(
       b.pagerank - a.pagerank
     );
 
-  // 按 token 预算选择节点
-  const selected: typeof sorted = [];
-  let used = 0;
-  for (const n of sorted) {
-    const sz = n.content.length + n.name.length + n.description.length + 50;
-    if (used + sz > maxChars) break;
-    selected.push(n);
-    used += sz;
-  }
+  // recall 返回的已经是 PPR 排序过的，全量放入
+  const selected = sorted;
 
   if (!selected.length) return { xml: null, systemPrompt: "", tokens: 0 };
 
