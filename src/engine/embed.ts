@@ -37,7 +37,12 @@ export async function createEmbedFn(cfg: EmbeddingConfig | undefined): Promise<E
       input: "ping",
       ...(dimensions ? { dimensions } : {}),
     });
-    if (!probe.data?.[0]?.embedding?.length) return null;
+    
+    if (probe == null || typeof probe !== "string") {
+      return null;
+    }
+    const probeJson = JSON.parse(probe); // 解析为 JSON 对象
+    if (!probeJson.data?.[0]?.embedding?.length) return null;
 
     return async (text: string): Promise<number[]> => {
       const res = await client.embeddings.create({
@@ -45,7 +50,12 @@ export async function createEmbedFn(cfg: EmbeddingConfig | undefined): Promise<E
         input: text.slice(0, 8000),
         ...(dimensions ? { dimensions } : {}),
       });
-      return res.data[0]?.embedding ?? [];
+    
+      if (res == null || typeof res !== "string") {
+        return [];
+      }
+      const resJson = JSON.parse(res);
+      return resJson.data[0]?.embedding ?? [];
     };
   } catch {
     return null;
