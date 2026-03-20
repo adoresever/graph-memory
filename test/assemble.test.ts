@@ -108,7 +108,7 @@ describe("assembleContext", () => {
     expect(xml).toContain('source="recalled"');
   });
 
-  it("token 预算限制节点数量", () => {
+  it("token 预算不截断节点（全量放入）", () => {
     // 插入很多大节点
     const nodes: GmNode[] = [];
     for (let i = 0; i < 20; i++) {
@@ -131,7 +131,7 @@ describe("assembleContext", () => {
     // 不应该包含所有 20 个节点
     if (xml) {
       const matches = xml.match(/name="skill-/g);
-      expect(matches!.length).toBeLessThan(20);
+      expect(matches!.length).toBe(20);
     }
   });
 });

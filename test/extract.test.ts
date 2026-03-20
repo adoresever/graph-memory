@@ -41,7 +41,7 @@ describe("边类型自动修正（核心 bug 修复）", () => {
       ],
     }));
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     expect(result.edges).toHaveLength(1);
     expect(result.edges[0].type).toBe("USED_SKILL");
@@ -58,7 +58,7 @@ describe("边类型自动修正（核心 bug 修复）", () => {
       ],
     }));
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     expect(result.edges).toHaveLength(1);
     expect(result.edges[0].type).toBe("SOLVED_BY");
@@ -75,7 +75,7 @@ describe("边类型自动修正（核心 bug 修复）", () => {
       ],
     }));
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     expect(result.edges).toHaveLength(1);
     expect(result.edges[0].type).toBe("USED_SKILL");
@@ -92,7 +92,7 @@ describe("边类型自动修正（核心 bug 修复）", () => {
       ],
     }));
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     expect(result.edges).toHaveLength(1);
     expect(result.edges[0].type).toBe("SOLVED_BY");
@@ -110,7 +110,7 @@ describe("边类型自动修正（核心 bug 修复）", () => {
       ],
     }));
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     expect(result.edges).toHaveLength(1);
     expect(result.edges[0].type).toBe("REQUIRES");
@@ -133,7 +133,7 @@ describe("非法方向的边被丢弃", () => {
       ],
     }));
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     expect(result.edges).toHaveLength(0);
   });
@@ -149,7 +149,7 @@ describe("非法方向的边被丢弃", () => {
       ],
     }));
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     // SOLVED_BY 的 to 必须是 SKILL，不能是 TASK
     expect(result.edges).toHaveLength(0);
@@ -166,7 +166,7 @@ describe("非法方向的边被丢弃", () => {
       ],
     }));
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     // REQUIRES 的 to 必须是 SKILL
     expect(result.edges).toHaveLength(0);
@@ -188,7 +188,7 @@ describe("节点验证", () => {
       edges: [],
     }));
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     expect(result.nodes).toHaveLength(1);
     expect(result.nodes[0].name).toBe("valid-skill");
@@ -205,7 +205,7 @@ describe("节点验证", () => {
       edges: [],
     }));
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     expect(result.nodes).toHaveLength(1);
     expect(result.nodes[0].name).toBe("has-all-fields");
@@ -220,7 +220,7 @@ describe("节点验证", () => {
       edges: [],
     }));
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     expect(result.nodes[0].name).toBe("docker-port-expose");
     expect(result.nodes[1].name).toBe("extract-pdf-tables");
@@ -234,7 +234,7 @@ describe("节点验证", () => {
       edges: [],
     }));
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     expect(result.nodes).toHaveLength(1);
     expect(result.nodes[0].description).toBe("");
@@ -259,7 +259,7 @@ describe("边验证", () => {
       ],
     }));
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     // 前两条缺少/空 instruction，只保留第三条
     expect(result.edges).toHaveLength(1);
@@ -279,7 +279,7 @@ describe("边验证", () => {
       ],
     }));
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     expect(result.edges).toHaveLength(1);
     expect(result.edges[0].type).toBe("REQUIRES");
@@ -296,7 +296,7 @@ describe("边验证", () => {
       ],
     }));
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     // Deploy MCP → deploy-mcp (TASK), Docker_Run → docker-run (SKILL)
     // TASK→SKILL + SOLVED_BY → 修正为 USED_SKILL
@@ -315,7 +315,7 @@ describe("LLM 输出格式容错", () => {
   it("处理 markdown 代码块包裹", async () => {
     const ext = createExtractor('```json\n{"nodes":[{"type":"SKILL","name":"test-skill","description":"测试","content":"## test"}],"edges":[]}\n```');
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     expect(result.nodes).toHaveLength(1);
   });
@@ -323,7 +323,7 @@ describe("LLM 输出格式容错", () => {
   it("处理 JSON 前有额外文字", async () => {
     const ext = createExtractor('好的，以下是提取结果：\n{"nodes":[{"type":"SKILL","name":"test-skill","description":"测试","content":"## test"}],"edges":[]}');
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     expect(result.nodes).toHaveLength(1);
   });
@@ -331,7 +331,7 @@ describe("LLM 输出格式容错", () => {
   it("完全无效的输出返回空结果", async () => {
     const ext = createExtractor("这不是 JSON，我不知道该怎么提取。");
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     expect(result.nodes).toHaveLength(0);
     expect(result.edges).toHaveLength(0);
@@ -340,7 +340,7 @@ describe("LLM 输出格式容错", () => {
   it("空 JSON 返回空结果", async () => {
     const ext = createExtractor('{"nodes":[],"edges":[]}');
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     expect(result.nodes).toHaveLength(0);
     expect(result.edges).toHaveLength(0);
@@ -370,7 +370,7 @@ describe("完整场景模拟", () => {
       ],
     }));
 
-    const result = await ext.extract({ messages: [], signals: [], existingNames: [] });
+    const result = await ext.extract({ messages: [], existingNames: [] });
 
     expect(result.nodes).toHaveLength(4);
     expect(result.edges).toHaveLength(3);

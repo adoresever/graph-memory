@@ -10,9 +10,15 @@
  *
  * 可选模块：配了 embedding.apiKey 才启用，否则返回 null → 降级 FTS5
  *
+ * 使用 fetch 直接调 OpenAI 兼容 /embeddings 接口（不依赖 openai SDK），
+ * 兼容 OpenAI、阿里云 DashScope、MiniMax、Ollama、llama.cpp 等。
+ *
  * 支持：
- *   OpenAI     baseURL=https://api.openai.com/v1  model=text-embedding-3-small
- *   Ollama     baseURL=http://localhost:11434/v1   model=nomic-embed-text
+ *   OpenAI       baseURL=https://api.openai.com/v1           model=text-embedding-3-small
+ *   DashScope    baseURL=https://dashscope.aliyuncs.com/compatible-mode/v1  model=text-embedding-v4
+ *   MiniMax      baseURL=https://api.minimax.chat/v1         model=embo-01
+ *   Ollama       baseURL=http://localhost:11434/v1            model=nomic-embed-text
+ *   llama.cpp    baseURL=http://127.0.0.1:8080/v1            model=your-model
  *   任意 OpenAI 兼容端点
  */
 
@@ -23,31 +29,54 @@ export type EmbedFn = (text: string) => Promise<number[]>;
 export async function createEmbedFn(cfg: EmbeddingConfig | undefined): Promise<EmbedFn | null> {
   if (!cfg?.apiKey) return null;
 
-  const baseURL    = cfg.baseURL    ?? "https://api.openai.com/v1";
-  const model      = cfg.model      ?? "text-embedding-3-small";
-  const dimensions = cfg.dimensions ?? 512;
+  const baseURL    = (cfg.baseURL ?? "https://api.openai.com/v1").replace(/\/+$/, "");
+  const model      = cfg.model ?? "text-embedding-3-small";
+  const dimensions = cfg.dimensions && cfg.dimensions > 0 ? cfg.dimensions : undefined;
 
-  try {
-    const { default: OpenAI } = await import("openai");
-    const client = new OpenAI({ apiKey: cfg.apiKey, baseURL });
+  // ── 构建请求体的辅助函数 ──────────────────────────────────
+  function buildBody(input: string): Record<string, unknown> {
+    const body: Record<string, unknown> = { model, input };
+    if (dimensions) body.dimensions = dimensions;
+    return body;
+  }
 
-    // 验证连通性
-    const probe = await client.embeddings.create({
-      model,
-      input: "ping",
-      ...(dimensions ? { dimensions } : {}),
+  async function callEmbedding(input: string): Promise<number[]> {
+    const res = await fetch(`${baseURL}/embeddings`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${cfg!.apiKey}`,
+      },
+      body: JSON.stringify(buildBody(input)),
     });
-    if (!probe.data?.[0]?.embedding?.length) return null;
 
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(`[graph-memory] Embedding API ${res.status}: ${errText.slice(0, 200)}`);
+    }
+
+    const data = await res.json() as any;
+    const embedding = data?.data?.[0]?.embedding;
+    if (!Array.isArray(embedding) || !embedding.length) {
+      throw new Error("[graph-memory] Embedding API returned empty embedding");
+    }
+    return embedding;
+  }
+
+  // ── 验证连通性 ────────────────────────────────────────────
+  try {
+    const probe = await callEmbedding("ping");
+    if (!probe.length) return null;
+
+    // 返回实际的 embed 函数
     return async (text: string): Promise<number[]> => {
-      const res = await client.embeddings.create({
-        model,
-        input: text.slice(0, 8000),
-        ...(dimensions ? { dimensions } : {}),
-      });
-      return res.data[0]?.embedding ?? [];
+      return callEmbedding(text.slice(0, 8000));
     };
-  } catch {
+  } catch (err) {
+    // 连通性检查失败，降级到 FTS5
+    if (process.env.GM_DEBUG) {
+      console.error(`[graph-memory] embedding probe failed:`, err);
+    }
     return null;
   }
 }

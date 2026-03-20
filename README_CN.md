@@ -34,6 +34,45 @@
 
 **graph-memory 用一个方案同时解决这三个问题。**
 
+<p align="center">
+  <img src="docs/images/graph-ui.png" alt="graph-memory 知识图谱可视化与社区检测" width="95%" />
+</p>
+
+> *58 个节点、40 条边、3 个社区——全部从对话中自动提取。右侧面板展示知识图谱的社区聚类（GitHub 操作、B站 MCP、会话管理）。左侧面板展示 Agent 使用 `gm_stats` 和 `gm_search` 工具查询图谱。*
+
+## v2.0 新特性
+
+### 社区感知召回（双路径并行）
+
+召回现在有**两条并行路径**，结果合并去重：
+
+- **精确路径**：向量/FTS5 搜索 → 社区扩展 → 图遍历 → 个性化 PageRank 排序
+- **泛化路径**：查询向量 vs 社区摘要 embedding → 匹配社区成员 → 个性化 PageRank 排序
+
+社区摘要在每次社区检测（每 7 轮）后**立即生成**，泛化路径从第一个维护窗口开始就可用。
+
+### 溯源片段（Episodic Context）
+
+PPR 排名前 3 的节点会拉取**原始 user/assistant 对话片段**注入上下文。Agent 不仅看到结构化的三元组，还能看到产生这些知识的实际对话——提高复用过去方案时的准确性。
+
+### 通用 Embedding 兼容
+
+Embedding 模块改用原生 `fetch` 替代 `openai` SDK，开箱即用兼容**所有 OpenAI 兼容端点**：
+
+- OpenAI、Azure OpenAI
+- 阿里云 DashScope（`text-embedding-v4`）
+- MiniMax（`embo-01`）
+- Ollama、llama.cpp、vLLM（本地模型）
+- 任何实现了 `POST /embeddings` 的端点
+
+### Windows 一键安装包
+
+v2.0 提供 **Windows 安装包**（`.exe`）。从 [Releases](https://github.com/adoresever/graph-memory/releases) 页面下载：
+
+1. 下载 `graph-memory-installer-win-x64.exe`
+2. 运行安装包——自动检测 OpenClaw 安装路径
+3. 安装包自动配置 `plugins.slots.contextEngine`、添加插件条目、重启 gateway
+
 ## 实测数据
 
 <p align="center">
@@ -50,6 +89,10 @@
 
 **压缩 75%。** 红色 = 无 graph-memory（线性增长）。蓝色 = 有 graph-memory（图谱替代后收敛）。
 
+<p align="center">
+  <img src="docs/images/token-sessions.png" alt="跨对话召回" width="85%" />
+</p>
+
 ## 工作原理
 
 ### 知识图谱
@@ -60,33 +103,57 @@ graph-memory 从对话中构建类型化属性图：
 - **5 种边**: `USED_SKILL`、`SOLVED_BY`、`REQUIRES`、`PATCHES`、`CONFLICTS_WITH`
 - **个性化 PageRank**: 根据当前查询动态排序，不是全局固定排名
 - **社区检测**: 自动将相关技能分组（Docker 集群、Python 集群等）
+- **社区摘要**: LLM 生成每个社区的描述 + embedding，实现语义级社区召回
+- **溯源片段**: 链接到图谱节点的原始对话片段，忠实还原上下文
 - **向量去重**: 通过余弦相似度合并语义重复的节点
+
+### 双路径召回
+
+```
+用户查询
+  │
+  ├─ 精确路径（实体级）
+  │    向量/FTS5 搜索 → 种子节点
+  │    → 社区同伴扩展
+  │    → 图遍历（N 跳）
+  │    → 个性化 PageRank 排序
+  │
+  ├─ 泛化路径（社区级）
+  │    查询 embedding vs 社区摘要 embedding
+  │    → 匹配社区的成员节点
+  │    → 图遍历（1 跳）
+  │    → 个性化 PageRank 排序
+  │
+  └─ 合并去重 → 最终上下文
+```
+
+两条路径并行执行。精确路径结果优先，泛化路径补充精确路径未覆盖的知识域。
 
 ### 数据流
 
 ```
 消息进入 → ingest（零 LLM）
   ├─ 所有消息存入 gm_messages
-  └─ 信号检测 → 报错/纠正/完成 → gm_signals
+  └─ turn_index 从数据库最大值续接（重启不归零）
 
 assemble（零 LLM）
-  ├─ 图谱节点 → XML 注入 systemPrompt
+  ├─ 图谱节点 → 按社区分组的 XML 注入 systemPrompt
   ├─ PPR 排序决定注入优先级
-  └─ 保留最近 N 条原始消息（fresh tail）
+  ├─ PPR Top 3 节点拉取溯源片段
+  ├─ Content 规范化（防止 OpenClaw content.filter 崩溃）
+  └─ 保留最后一轮完整对话
 
-compact（后台异步，不阻塞用户对话）
-  ├─ 读取 gm_signals + gm_messages
+afterTurn（后台异步，不阻塞用户对话）
   ├─ LLM 提取三元组 → gm_nodes + gm_edges
-  └─ 用户发新消息时自动让路
+  ├─ 每 7 轮：PageRank + 社区检测 + 社区摘要生成
+  └─ 用户发新消息时自动中断提取
 
 session_end
   ├─ finalize（LLM）：EVENT → SKILL 升级
-  └─ maintenance（零 LLM）：去重 → PageRank → 社区检测
+  └─ maintenance：去重 → PageRank → 社区检测
 
 下次新对话 → before_agent_start
-  ├─ FTS5/向量搜索种子节点
-  ├─ 社区扩展（同社区节点补充）
-  ├─ 递归 CTE 图遍历
+  ├─ 双路径召回（精确 + 泛化）
   └─ 个性化 PageRank 排序 → 注入上下文
 ```
 
@@ -106,18 +173,42 @@ session_end
 - [OpenClaw](https://github.com/openclaw/openclaw)（v2026.3.x+）
 - Node.js 22+
 
+### Windows 用户
+
+从 [Releases](https://github.com/adoresever/graph-memory/releases) 下载安装包：
+
+```
+graph-memory-installer-win-x64.exe
+```
+
+安装包自动完成：插件安装、上下文引擎激活、gateway 重启。运行后直接跳到[第三步：配置 LLM 和 Embedding](#第三步配置-llm-和-embedding)。
+
 ### 第一步：安装插件
+
+三种方式任选：
+
+**方式 A — 从 npm 仓库安装**（推荐）：
 
 ```bash
 pnpm openclaw plugins install graph-memory
 ```
 
-就这一条命令。不需要 `node-gyp`，不需要手动编译。SQLite 驱动（`@photostructure/sqlite`）将预编译二进制打包在 npm tarball 内，完全兼容 OpenClaw 的 `--ignore-scripts` 安装机制。
+不需要 `node-gyp`，不需要手动编译。SQLite 驱动（`@photostructure/sqlite`）将预编译二进制打包在 npm tarball 内。
 
-也可以从 GitHub 安装：
+**方式 B — 从 GitHub 安装**：
 
 ```bash
 pnpm openclaw plugins install github:adoresever/graph-memory
+```
+
+**方式 C — 从源码安装**（开发或自定义修改时使用）：
+
+```bash
+git clone https://github.com/adoresever/graph-memory.git
+cd graph-memory
+npm install
+npx vitest run   # 验证 80 个测试通过
+pnpm openclaw plugins install .
 ```
 
 ### 第二步：激活上下文引擎（关键！）
@@ -175,74 +266,25 @@ pnpm openclaw plugins install github:adoresever/graph-memory
 }
 ```
 
-**LLM**（`config.llm`）— 必填。用于 `compact` 阶段的知识提取。支持任何 OpenAI 兼容端点。建议用便宜/快速的模型。
+**LLM**（`config.llm`）— 必填。用于知识提取和社区摘要生成。支持任何 OpenAI 兼容端点。建议用便宜/快速的模型。
 
-**Embedding**（`config.embedding`）— 可选。启用语义向量搜索 + 向量去重。不配则降级为 FTS5 全文搜索（仍然可用，只是基于关键词匹配）。
+**Embedding**（`config.embedding`）— 可选但推荐。启用语义向量搜索、社区级召回和向量去重。不配则降级为 FTS5 全文搜索（仍然可用，只是基于关键词匹配）。
+
+> **⚠️ 注意**：`pnpm openclaw plugins install` 可能会重置你的配置。每次重装插件后请检查 `config.llm` 和 `config.embedding` 是否还在。
 
 如果不配 `config.llm`，graph-memory 会回退到环境变量 `ANTHROPIC_API_KEY` + Anthropic API。
 
-### 完整 openclaw.json 示例
+### 支持的 Embedding 服务商
 
-以下是一个使用自定义 OpenAI 兼容 provider 的完整配置：
+| 服务商 | baseURL | 模型 | dimensions |
+|--------|---------|------|------------|
+| OpenAI | `https://api.openai.com/v1` | `text-embedding-3-small` | 512 |
+| 阿里云 DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `text-embedding-v4` | 1024 |
+| MiniMax | `https://api.minimax.chat/v1` | `embo-01` | 1024 |
+| Ollama | `http://localhost:11434/v1` | `nomic-embed-text` | 768 |
+| llama.cpp | `http://127.0.0.1:8080/v1` | 你的模型名 | 视模型而定 |
 
-```json
-{
-  "models": {
-    "providers": {
-      "my-provider": {
-        "baseUrl": "https://api.example.com/v1",
-        "apiKey": "你的主模型API密钥",
-        "api": "openai-completions",
-        "models": [
-          {
-            "id": "my-model",
-            "name": "My Model",
-            "reasoning": false,
-            "input": ["text"],
-            "contextWindow": 128000,
-            "maxTokens": 8192
-          }
-        ]
-      }
-    }
-  },
-  "agents": {
-    "defaults": {
-      "model": {
-        "primary": "my-provider/my-model"
-      },
-      "compaction": {
-        "mode": "safeguard"
-      }
-    }
-  },
-  "plugins": {
-    "slots": {
-      "contextEngine": "graph-memory"
-    },
-    "entries": {
-      "graph-memory": {
-        "enabled": true,
-        "config": {
-          "llm": {
-            "apiKey": "你的LLM密钥",
-            "baseURL": "https://api.example.com/v1",
-            "model": "my-model"
-          },
-          "embedding": {
-            "apiKey": "你的Embedding密钥",
-            "baseURL": "https://api.embedding-provider.com/v1",
-            "model": "text-embedding-model",
-            "dimensions": 1024
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-> **注意**：`config.llm.baseURL` 是大写 `URL`（OpenAI SDK 格式），而 OpenClaw provider 的 `baseUrl` 是小写 `l`。不要搞混。
+模型不支持 `dimensions` 参数时，设为 `0` 或直接不填。
 
 ### 重启并验证
 
@@ -259,7 +301,7 @@ pnpm openclaw gateway --verbose
 
 如果看到 `FTS5 search mode` 而不是 `vector search ready`，说明 embedding 配置缺失或 API Key 无效。
 
-对话几轮后验证知识提取：
+对话几轮后验证：
 
 ```bash
 # 检查消息是否入库
@@ -268,8 +310,12 @@ sqlite3 ~/.openclaw/graph-memory.db "SELECT COUNT(*) FROM gm_messages;"
 # 检查知识三元组是否提取成功
 sqlite3 ~/.openclaw/graph-memory.db "SELECT type, name, description FROM gm_nodes LIMIT 10;"
 
-# 在 gateway 日志中检查跨对话召回
-# 看是否有: [graph-memory] recalled N nodes, M edges
+# 检查社区是否被检测和描述
+sqlite3 ~/.openclaw/graph-memory.db "SELECT id, summary FROM gm_communities;"
+
+# 在 gateway 日志中确认：
+# [graph-memory] extracted N nodes, M edges
+# [graph-memory] recalled N nodes, M edges
 ```
 
 ### 常见问题
@@ -278,8 +324,10 @@ sqlite3 ~/.openclaw/graph-memory.db "SELECT type, name, description FROM gm_node
 |------|------|------|
 | `recall` 正常但 `gm_messages` 为空 | 没设置 `plugins.slots.contextEngine` | 在 `plugins.slots` 中添加 `"contextEngine": "graph-memory"` |
 | 显示 `FTS5 search mode` | Embedding 未配置或 API Key 无效 | 检查 `config.embedding` 的密钥和地址 |
-| 启动报 `Database is not defined` | 安装了旧版本 | 升级到 v1.1.1+：`pnpm openclaw plugins install graph-memory` |
-| 对话很多轮但节点为空 | 消息数未达到 `compactTurnCount` | 默认需要 7 条消息。继续对话或调低该值 |
+| `No LLM available` 错误 | 重装插件后 LLM 配置丢失 | 重新添加 `config.llm` 到 `plugins.entries.graph-memory` |
+| `afterTurn` 后没有 `extracted` 日志 | 重启导致 turn_index 重叠 | 升级到 v2.0（修复了 msgSeq 持久化） |
+| `content.filter is not a function` | OpenClaw 要求 content 为数组 | 升级到 v2.0（添加了 content 规范化） |
+| 对话很多轮但节点为空 | 消息数未达到提取阈值 | 默认需要积累消息。继续对话或调低 `compactTurnCount` |
 
 ## Agent 工具
 
@@ -288,7 +336,7 @@ sqlite3 ~/.openclaw/graph-memory.db "SELECT type, name, description FROM gm_node
 | `gm_search` | 搜索图谱中的相关经验、技能和解决方案 |
 | `gm_record` | 手动记录经验到图谱 |
 | `gm_stats` | 查看图谱统计：节点数、边数、社区数、PageRank Top 节点 |
-| `gm_maintain` | 手动触发图维护：去重 → PageRank → 社区检测 |
+| `gm_maintain` | 手动触发图维护：去重 → PageRank → 社区检测 + 摘要生成 |
 
 ## 配置参数
 
@@ -297,23 +345,37 @@ sqlite3 ~/.openclaw/graph-memory.db "SELECT type, name, description FROM gm_node
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `dbPath` | `~/.openclaw/graph-memory.db` | 数据库路径 |
-| `compactTurnCount` | `7` | 触发知识提取所需的消息数 |
+| `compactTurnCount` | `7` | 维护周期（每隔多少轮触发 PageRank + 社区检测 + 摘要） |
 | `recallMaxNodes` | `6` | 每次召回最多注入的节点数 |
 | `recallMaxDepth` | `2` | 图遍历跳数 |
-| `freshTailCount` | `10` | 保留的最近消息数（不压缩） |
 | `dedupThreshold` | `0.90` | 向量去重的余弦相似度阈值 |
 | `pagerankDamping` | `0.85` | PPR 阻尼系数 |
 | `pagerankIterations` | `20` | PPR 迭代次数 |
+
+## 数据库
+
+SQLite 通过 `@photostructure/sqlite`（预编译二进制，零编译）。默认路径：`~/.openclaw/graph-memory.db`。
+
+| 表 | 用途 |
+|----|------|
+| `gm_nodes` | 知识节点（含 pagerank + community_id） |
+| `gm_edges` | 类型化关系 |
+| `gm_nodes_fts` | FTS5 全文索引 |
+| `gm_messages` | 原始对话消息 |
+| `gm_signals` | 检测到的信号 |
+| `gm_vectors` | Embedding 向量（可选） |
+| `gm_communities` | 社区摘要 + embedding |
 
 ## 与 lossless-claw 的对比
 
 | | lossless-claw | graph-memory |
 |--|---|---|
 | **方法** | 摘要 DAG | 知识图谱（三元组） |
-| **召回** | FTS grep + 子代理展开 | FTS5/向量 → PPR → 图遍历 |
+| **召回** | FTS grep + 子代理展开 | 双路径：实体 PPR + 社区向量匹配 |
 | **跨会话** | 仅当前对话 | 自动跨会话召回 |
 | **压缩** | 摘要（有损文本） | 结构化三元组（无损语义） |
 | **图算法** | 无 | PageRank、社区检测、向量去重 |
+| **上下文溯源** | 无 | 溯源片段（原始对话片段） |
 
 ## 开发
 
@@ -321,8 +383,25 @@ sqlite3 ~/.openclaw/graph-memory.db "SELECT type, name, description FROM gm_node
 git clone https://github.com/adoresever/graph-memory.git
 cd graph-memory
 npm install
-npm test        # 53 个测试
+npm test        # 80 个测试
 npx vitest      # 监听模式
+```
+
+### 项目结构
+
+```
+graph-memory/
+├── index.ts                     # 插件入口
+├── openclaw.plugin.json         # 插件清单
+├── src/
+│   ├── types.ts                 # 类型定义
+│   ├── store/                   # SQLite CRUD / FTS5 / CTE 遍历 / 社区 CRUD
+│   ├── engine/                  # LLM（fetch）+ Embedding（fetch，无 SDK 依赖）
+│   ├── extractor/               # 知识提取 prompt
+│   ├── recaller/                # 双路径召回（精确 + 泛化 + PPR）
+│   ├── format/                  # 上下文组装 + 消息修复 + content 规范化
+│   └── graph/                   # PageRank、社区检测 + 摘要、去重、维护
+└── test/                        # 80 个 vitest 测试
 ```
 
 ## 许可证

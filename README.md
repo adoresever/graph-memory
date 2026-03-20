@@ -32,6 +32,45 @@ When conversations grow long, agents lose track of what happened. graph-memory s
 
 **It feels like talking to an agent that learns from experience. Because it does.**
 
+<p align="center">
+  <img src="docs/images/graph-ui.png" alt="graph-memory knowledge graph visualization with community detection" width="95%" />
+</p>
+
+> *58 nodes, 40 edges, 3 communities — automatically extracted from conversations. Right panel shows the knowledge graph with community clusters (GitHub ops, B站 MCP, session management). Left panel shows agent using `gm_stats` and `gm_search` tools.*
+
+## What's new in v2.0
+
+### Community-aware recall
+
+Recall now runs **two parallel paths** that merge results:
+
+- **Precise path**: vector/FTS5 search → community expansion → graph walk → PPR ranking
+- **Generalized path**: query vector vs community summary embeddings → community members → PPR ranking
+
+Community summaries are generated immediately after each community detection cycle (every 7 turns), so the generalized path is available from the first maintenance window.
+
+### Episodic context (conversation traces)
+
+The top 3 PPR-ranked nodes now pull their **original user/assistant conversation snippets** into the context. The agent sees not just structured triples, but the actual dialogue that produced them — improving accuracy when reapplying past solutions.
+
+### Universal embedding support
+
+The embedding module now uses raw `fetch` instead of the `openai` SDK, making it compatible with **any OpenAI-compatible endpoint** out of the box:
+
+- OpenAI, Azure OpenAI
+- Alibaba DashScope (`text-embedding-v4`)
+- MiniMax (`embo-01`)
+- Ollama, llama.cpp, vLLM (local models)
+- Any endpoint that implements `POST /embeddings`
+
+### Windows one-click installer
+
+v2.0 ships a **Windows installer** (`.exe`). Download from [Releases](https://github.com/adoresever/graph-memory/releases):
+
+1. Download `graph-memory-installer-win-x64.exe`
+2. Run the installer — it auto-detects your OpenClaw installation
+3. The installer configures `plugins.slots.contextEngine`, adds the plugin entry, and restarts the gateway
+
 ## Real-world results
 
 <p align="center">
@@ -48,6 +87,10 @@ When conversations grow long, agents lose track of what happened. graph-memory s
 
 **75% compression.** Red = linear growth without graph-memory. Blue = stabilized with graph-memory.
 
+<p align="center">
+  <img src="docs/images/token-sessions.png" alt="Cross-session recall" width="85%" />
+</p>
+
 ## How it works
 
 ### The Knowledge Graph
@@ -58,33 +101,57 @@ graph-memory builds a typed property graph from conversations:
 - **5 edge types**: `USED_SKILL`, `SOLVED_BY`, `REQUIRES`, `PATCHES`, `CONFLICTS_WITH`
 - **Personalized PageRank**: ranks nodes by relevance to the current query, not global popularity
 - **Community detection**: automatically groups related skills (Docker cluster, Python cluster, etc.)
+- **Community summaries**: LLM-generated descriptions + embeddings for each community, enabling semantic community-level recall
+- **Episodic traces**: original conversation snippets linked to graph nodes for faithful context reconstruction
 - **Vector dedup**: merges semantically duplicate nodes via cosine similarity
+
+### Dual-path recall
+
+```
+User query
+  │
+  ├─ Precise path (entity-level)
+  │    vector/FTS5 search → seed nodes
+  │    → community peer expansion
+  │    → graph walk (N hops)
+  │    → Personalized PageRank ranking
+  │
+  ├─ Generalized path (community-level)
+  │    query embedding vs community summary embeddings
+  │    → matched community members
+  │    → graph walk (1 hop)
+  │    → Personalized PageRank ranking
+  │
+  └─ Merge & deduplicate → final context
+```
+
+Both paths run in parallel. Precise results take priority; generalized results fill gaps from uncovered knowledge domains.
 
 ### Data flow
 
 ```
 Message in → ingest (zero LLM)
   ├─ All messages saved to gm_messages
-  └─ Signal detection → errors/corrections/completions → gm_signals
+  └─ turn_index continues from DB max (survives gateway restart)
 
 assemble (zero LLM)
-  ├─ Graph nodes → XML (systemPromptAddition)
+  ├─ Graph nodes → XML with community grouping (systemPromptAddition)
   ├─ PPR ranking decides injection priority
-  └─ Keep last N raw messages (fresh tail)
+  ├─ Episodic traces for top 3 nodes
+  ├─ Content normalization (prevents OpenClaw content.filter crash)
+  └─ Keep last turn raw messages
 
-compact (background, async, non-blocking)
-  ├─ Read gm_signals + gm_messages
+afterTurn (async, non-blocking)
   ├─ LLM extracts triples → gm_nodes + gm_edges
-  └─ Does NOT block user messages (fire-and-forget)
+  ├─ Every 7 turns: PageRank + community detection + community summaries
+  └─ User sends new message → extract auto-interrupted
 
 session_end
   ├─ finalize (LLM): EVENT → SKILL promotion
-  └─ maintenance (zero LLM): dedup → PageRank → community detection
+  └─ maintenance: dedup → PageRank → community detection
 
 Next session → before_agent_start
-  ├─ FTS5/vector search for seed nodes
-  ├─ Community expansion (same-cluster peers)
-  ├─ Recursive CTE graph traversal
+  ├─ Dual-path recall (precise + generalized)
   └─ Personalized PageRank ranking → inject into context
 ```
 
@@ -104,18 +171,42 @@ Unlike global PageRank, PPR ranks nodes **relative to your current query**:
 - [OpenClaw](https://github.com/openclaw/openclaw) (v2026.3.x+)
 - Node.js 22+
 
+### Windows users
+
+Download the installer from [Releases](https://github.com/adoresever/graph-memory/releases):
+
+```
+graph-memory-installer-win-x64.exe
+```
+
+The installer handles everything: plugin installation, context engine activation, and gateway restart. After running, skip to [Step 3: Configure LLM and Embedding](#step-3-configure-llm-and-embedding).
+
 ### Step 1: Install the plugin
+
+Choose one of three methods:
+
+**Option A — From npm registry** (recommended):
 
 ```bash
 pnpm openclaw plugins install graph-memory
 ```
 
-That's it. No `node-gyp`, no manual compilation. The SQLite driver (`@photostructure/sqlite`) ships prebuilt binaries inside the npm tarball — works with OpenClaw's `--ignore-scripts` install.
+No `node-gyp`, no manual compilation. The SQLite driver (`@photostructure/sqlite`) ships prebuilt binaries — works with OpenClaw's `--ignore-scripts` install.
 
-You can also install from GitHub:
+**Option B — From GitHub**:
 
 ```bash
 pnpm openclaw plugins install github:adoresever/graph-memory
+```
+
+**Option C — From source** (for development or custom modifications):
+
+```bash
+git clone https://github.com/adoresever/graph-memory.git
+cd graph-memory
+npm install
+npx vitest run   # verify 80 tests pass
+pnpm openclaw plugins install .
 ```
 
 ### Step 2: Activate context engine
@@ -173,74 +264,25 @@ Add your API credentials inside `plugins.entries.graph-memory.config`:
 }
 ```
 
-**LLM** (`config.llm`) — Required. Used for knowledge extraction during `compact`. Any OpenAI-compatible endpoint works. Use a cheap/fast model.
+**LLM** (`config.llm`) — Required. Used for knowledge extraction and community summaries. Any OpenAI-compatible endpoint works. Use a cheap/fast model.
 
-**Embedding** (`config.embedding`) — Optional. Enables semantic vector search + vector dedup. Without it, falls back to FTS5 full-text search (still works, just keyword-based).
+**Embedding** (`config.embedding`) — Optional but recommended. Enables semantic vector search, community-level recall, and vector dedup. Without it, falls back to FTS5 full-text search (still works, just keyword-based).
+
+> **⚠️ Important**: `pnpm openclaw plugins install` may reset your config. Always verify `config.llm` and `config.embedding` are present after reinstalling.
 
 If `config.llm` is not set, graph-memory falls back to the `ANTHROPIC_API_KEY` environment variable + Anthropic API.
 
-### Full openclaw.json example
+### Supported embedding providers
 
-Here's a complete working configuration with a custom OpenAI-compatible provider:
+| Provider | baseURL | Model | dimensions |
+|----------|---------|-------|------------|
+| OpenAI | `https://api.openai.com/v1` | `text-embedding-3-small` | 512 |
+| Alibaba DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `text-embedding-v4` | 1024 |
+| MiniMax | `https://api.minimax.chat/v1` | `embo-01` | 1024 |
+| Ollama | `http://localhost:11434/v1` | `nomic-embed-text` | 768 |
+| llama.cpp | `http://127.0.0.1:8080/v1` | your model name | varies |
 
-```json
-{
-  "models": {
-    "providers": {
-      "my-provider": {
-        "baseUrl": "https://api.example.com/v1",
-        "apiKey": "your-main-api-key",
-        "api": "openai-completions",
-        "models": [
-          {
-            "id": "my-model",
-            "name": "My Model",
-            "reasoning": false,
-            "input": ["text"],
-            "contextWindow": 128000,
-            "maxTokens": 8192
-          }
-        ]
-      }
-    }
-  },
-  "agents": {
-    "defaults": {
-      "model": {
-        "primary": "my-provider/my-model"
-      },
-      "compaction": {
-        "mode": "safeguard"
-      }
-    }
-  },
-  "plugins": {
-    "slots": {
-      "contextEngine": "graph-memory"
-    },
-    "entries": {
-      "graph-memory": {
-        "enabled": true,
-        "config": {
-          "llm": {
-            "apiKey": "your-llm-api-key",
-            "baseURL": "https://api.example.com/v1",
-            "model": "my-model"
-          },
-          "embedding": {
-            "apiKey": "your-embedding-api-key",
-            "baseURL": "https://api.embedding-provider.com/v1",
-            "model": "text-embedding-model",
-            "dimensions": 1024
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-> **Note**: `config.llm.baseURL` uses uppercase `URL` (OpenAI SDK format). This is different from the OpenClaw provider's `baseUrl` (lowercase `l`). Don't mix them up.
+Set `dimensions: 0` or omit it entirely if the model doesn't support the `dimensions` parameter.
 
 ### Restart and verify
 
@@ -257,7 +299,7 @@ You should see these two lines in the startup log:
 
 If you see `FTS5 search mode` instead of `vector search ready`, your embedding config is missing or the API key is invalid.
 
-After a few rounds of conversation, verify knowledge extraction:
+After a few rounds of conversation, verify:
 
 ```bash
 # Check messages are being ingested
@@ -266,8 +308,12 @@ sqlite3 ~/.openclaw/graph-memory.db "SELECT COUNT(*) FROM gm_messages;"
 # Check knowledge triples are being extracted
 sqlite3 ~/.openclaw/graph-memory.db "SELECT type, name, description FROM gm_nodes LIMIT 10;"
 
-# Check cross-session recall is working (in gateway logs)
-# Look for: [graph-memory] recalled N nodes, M edges
+# Check communities are detected
+sqlite3 ~/.openclaw/graph-memory.db "SELECT id, summary FROM gm_communities;"
+
+# In gateway logs, look for:
+# [graph-memory] extracted N nodes, M edges
+# [graph-memory] recalled N nodes, M edges
 ```
 
 ### Troubleshooting
@@ -276,7 +322,9 @@ sqlite3 ~/.openclaw/graph-memory.db "SELECT type, name, description FROM gm_node
 |---------|-------|-----|
 | `recall` works but `gm_messages` is empty | `plugins.slots.contextEngine` not set | Add `"contextEngine": "graph-memory"` to `plugins.slots` |
 | `FTS5 search mode` instead of `vector search ready` | Embedding not configured or API key invalid | Check `config.embedding` credentials |
-| `Database is not defined` error on startup | Old version installed | Update to v1.1.1+: `pnpm openclaw plugins install graph-memory` |
+| `No LLM available` error | LLM config missing after plugin reinstall | Re-add `config.llm` to `plugins.entries.graph-memory` |
+| No `extracted` log after `afterTurn` | Gateway restart caused turn_index overlap | Update to v2.0 (fixes msgSeq persistence) |
+| `content.filter is not a function` | OpenClaw expects array content | Update to v2.0 (adds content normalization) |
 | Nodes are empty after many messages | `compactTurnCount` not reached | Default is 7 messages. Keep chatting or set a lower value |
 
 ## Agent tools
@@ -286,7 +334,7 @@ sqlite3 ~/.openclaw/graph-memory.db "SELECT type, name, description FROM gm_node
 | `gm_search` | Search the knowledge graph for relevant skills, events, and solutions |
 | `gm_record` | Manually record knowledge to the graph |
 | `gm_stats` | View graph statistics: nodes, edges, communities, PageRank top nodes |
-| `gm_maintain` | Manually trigger graph maintenance: dedup → PageRank → community detection |
+| `gm_maintain` | Manually trigger graph maintenance: dedup → PageRank → community detection + summaries |
 
 ## Configuration
 
@@ -295,10 +343,9 @@ All parameters have defaults. Only set what you want to override.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `dbPath` | `~/.openclaw/graph-memory.db` | SQLite database path |
-| `compactTurnCount` | `7` | Messages needed to trigger knowledge extraction |
+| `compactTurnCount` | `7` | Turns between maintenance cycles (PageRank + community + summaries) |
 | `recallMaxNodes` | `6` | Max nodes injected per recall |
 | `recallMaxDepth` | `2` | Graph traversal hops from seed nodes |
-| `freshTailCount` | `10` | Recent messages kept as-is (not compressed) |
 | `dedupThreshold` | `0.90` | Cosine similarity threshold for node dedup |
 | `pagerankDamping` | `0.85` | PPR damping factor |
 | `pagerankIterations` | `20` | PPR iteration count |
@@ -315,22 +362,26 @@ SQLite via `@photostructure/sqlite` (prebuilt binaries, zero native compilation)
 | `gm_messages` | Raw conversation messages |
 | `gm_signals` | Detected signals |
 | `gm_vectors` | Embedding vectors (optional) |
+| `gm_communities` | Community summaries + embeddings |
 
 ## vs lossless-claw
 
 | | lossless-claw | graph-memory |
 |--|---|---|
 | **Approach** | DAG of summaries | Knowledge graph (triples) |
-| **Recall** | FTS grep + sub-agent expansion | FTS5/vector → PPR → graph traversal |
+| **Recall** | FTS grep + sub-agent expansion | Dual-path: entity PPR + community vector matching |
 | **Cross-session** | Per-conversation only | Automatic cross-session recall |
 | **Compression** | Summaries (lossy text) | Structured triples (lossless semantics) |
 | **Graph algorithms** | None | PageRank, community detection, vector dedup |
+| **Context traces** | None | Episodic snippets from source conversations |
 
 ## Development
 
 ```bash
+git clone https://github.com/adoresever/graph-memory.git
+cd graph-memory
 npm install
-npm test        # 53 tests
+npm test        # 80 tests
 npx vitest      # watch mode
 ```
 
@@ -342,13 +393,13 @@ graph-memory/
 ├── openclaw.plugin.json         # Plugin manifest
 ├── src/
 │   ├── types.ts                 # Type definitions
-│   ├── store/                   # SQLite CRUD / FTS5 / CTE traversal
-│   ├── engine/                  # Signal detection, LLM, Embedding
+│   ├── store/                   # SQLite CRUD / FTS5 / CTE traversal / community CRUD
+│   ├── engine/                  # LLM (fetch-based) + Embedding (fetch-based, SDK-free)
 │   ├── extractor/               # Knowledge extraction prompts
-│   ├── recaller/                # Cross-session recall (PPR)
-│   ├── format/                  # Context assembly + transcript repair
-│   └── graph/                   # PageRank, community, dedup, maintenance
-└── test/                        # 53 vitest tests
+│   ├── recaller/                # Dual-path recall (precise + generalized + PPR)
+│   ├── format/                  # Context assembly + transcript repair + content normalization
+│   └── graph/                   # PageRank, community detection + summaries, dedup, maintenance
+└── test/                        # 80 vitest tests
 ```
 
 ## License

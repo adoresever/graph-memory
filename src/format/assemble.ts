@@ -7,7 +7,7 @@
 
 import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
 import type { GmNode, GmEdge } from "../types.ts";
-import { getCommunitySummary } from "../store/store.ts";
+import { getCommunitySummary, getEpisodicMessages } from "../store/store.ts";
 
 const CHARS_PER_TOKEN = 3;
 
@@ -87,8 +87,8 @@ export function assembleContext(
     recalledNodes: GmNode[];
     recalledEdges: GmEdge[];
   },
-): { xml: string | null; systemPrompt: string; tokens: number } {
-  // 合并去重（recall 已经用 PPR 排好序了，全量放入）
+): { xml: string | null; systemPrompt: string; tokens: number; episodicXml: string; episodicTokens: number } {
+  // recall 返回多少节点就放多少，不截断
   const map = new Map<string, GmNode & { src: "active" | "recalled" }>();
   for (const n of params.recalledNodes) map.set(n.id, { ...n, src: "recalled" });
   for (const n of params.activeNodes) map.set(n.id, { ...n, src: "active" });
@@ -107,7 +107,7 @@ export function assembleContext(
   // recall 返回的已经是 PPR 排序过的，全量放入
   const selected = sorted;
 
-  if (!selected.length) return { xml: null, systemPrompt: "", tokens: 0 };
+  if (!selected.length) return { xml: null, systemPrompt: "", tokens: 0, episodicXml: "", episodicTokens: 0 };
 
   const idToName = new Map<string, string>();
   for (const n of selected) idToName.set(n.id, n.name);
@@ -173,8 +173,35 @@ export function assembleContext(
     edgeCount: edges.length,
   });
 
-  const fullContent = systemPrompt + "\n\n" + xml;
-  return { xml, systemPrompt, tokens: Math.ceil(fullContent.length / CHARS_PER_TOKEN) };
+  // ── 溯源选拉：PPR top 3 节点 → 拉原始 user/assistant 对话 ──
+  const topNodes = selected.slice(0, 3);
+  const episodicParts: string[] = [];
+
+  for (const node of topNodes) {
+    if (!node.sourceSessions?.length) continue;
+    // 取最近的 2 个 session
+    const recentSessions = node.sourceSessions.slice(-2);
+    const msgs = getEpisodicMessages(db, recentSessions, node.updatedAt, 500);
+    if (!msgs.length) continue;
+
+    const lines = msgs.map(m =>
+      `    [${m.role.toUpperCase()}] ${escapeXml(m.text.slice(0, 200))}`
+    ).join("\n");
+    episodicParts.push(`  <trace node="${node.name}">\n${lines}\n  </trace>`);
+  }
+
+  const episodicXml = episodicParts.length
+    ? `<episodic_context>\n${episodicParts.join("\n")}\n</episodic_context>`
+    : "";
+
+  const fullContent = systemPrompt + "\n\n" + xml + (episodicXml ? "\n\n" + episodicXml : "");
+  return {
+    xml,
+    systemPrompt,
+    tokens: Math.ceil(fullContent.length / CHARS_PER_TOKEN),
+    episodicXml,
+    episodicTokens: Math.ceil(episodicXml.length / CHARS_PER_TOKEN),
+  };
 }
 
 function escapeXml(s: string): string {

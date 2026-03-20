@@ -26,7 +26,8 @@ import { Extractor } from "./src/extractor/extract.ts";
 import { assembleContext } from "./src/format/assemble.ts";
 import { sanitizeToolUseResultPairing } from "./src/format/transcript-repair.ts";
 import { runMaintenance } from "./src/graph/maintenance.ts";
-import { invalidateGraphCache } from "./src/graph/pagerank.ts";
+import { invalidateGraphCache, computeGlobalPageRank } from "./src/graph/pagerank.ts";
+import { detectCommunities } from "./src/graph/community.ts";
 import { DEFAULT_CONFIG, type GmConfig } from "./src/types.ts";
 
 // ─── 从 OpenClaw config 读 provider/model ────────────────────
@@ -84,6 +85,35 @@ function cleanPrompt(raw: string): string {
   return prompt;
 }
 
+// ─── 规范化消息 content，确保 OpenClaw 对 content.filter() 不崩 ──
+
+function normalizeMessageContent(messages: any[]): any[] {
+  return messages.map((msg: any) => {
+    if (!msg || typeof msg !== "object") return msg;
+    const c = msg.content;
+    // 已经是数组 → 修复畸形 block（如 { type: "text" } 缺 text 属性）
+    if (Array.isArray(c)) {
+      const fixed = c.map((block: any) => {
+        if (block && typeof block === "object" && block.type === "text" && !("text" in block)) {
+          return { ...block, text: "" };
+        }
+        return block;
+      });
+      if (fixed !== c) return { ...msg, content: fixed };
+      return msg;
+    }
+    // string → 包装成标准 content block 数组
+    if (typeof c === "string") {
+      return { ...msg, content: [{ type: "text", text: c }] };
+    }
+    // undefined/null → 空 text block
+    if (c == null) {
+      return { ...msg, content: [{ type: "text", text: "" }] };
+    }
+    return msg;
+  });
+}
+
 // ─── 插件对象 ─────────────────────────────────────────────────
 
 const graphMemoryPlugin = {
@@ -124,6 +154,7 @@ const graphMemoryPlugin = {
     // ── Session 运行时状态 ──────────────────────────────────
     const msgSeq = new Map<string, number>();
     const recalled = new Map<string, { nodes: any[]; edges: any[] }>();
+    const turnCounter = new Map<string, number>(); // 社区维护计数器
 
     // ── 提取中断机制：用户对话第一优先级 ────────────────────
     const extractAbort = new Map<string, boolean>();
@@ -137,7 +168,15 @@ const graphMemoryPlugin = {
 
     /** 存一条消息到 gm_messages（同步，零 LLM） */
     function ingestMessage(sessionId: string, message: any): void {
-      const seq = (msgSeq.get(sessionId) ?? 0) + 1;
+      let seq = msgSeq.get(sessionId);
+      if (seq === undefined) {
+        // 首次入库：从数据库读取当前最大 turn_index，避免重启后 turn_index 重叠
+        const row = db.prepare(
+          "SELECT MAX(turn_index) as maxTurn FROM gm_messages WHERE session_id=?"
+        ).get(sessionId) as any;
+        seq = Number(row?.maxTurn ?? 0);
+      }
+      seq += 1;
       msgSeq.set(sessionId, seq);
       saveMessage(db, sessionId, seq, message.role ?? "unknown", message);
     }
@@ -280,37 +319,39 @@ const graphMemoryPlugin = {
         const totalGmNodes = activeNodes.length + rec.nodes.length;
 
         if (totalGmNodes === 0) {
-          return { messages, estimatedTokens: 0 };
+          return { messages: normalizeMessageContent(messages), estimatedTokens: 0 };
         }
 
-        // ── 1. 最后一轮完整对话（从最后一个 user 到末尾）──
+        // ── 1. 最后一轮完整对话 ─────────────────────────
         const lastTurn = sliceLastTurn(messages);
         const repaired = sanitizeToolUseResultPairing(lastTurn.messages);
 
-        // ── 2. 图谱召回全量放入（recall 已 PPR 排序）──
-        const { xml, systemPrompt, tokens: gmTokens } = assembleContext(db, {
-          tokenBudget: 0, // 不再用于截断
+        // ── 2. 图谱 + 溯源 ─────────────────────────────
+        const { xml, systemPrompt, tokens: gmTokens, episodicXml, episodicTokens } = assembleContext(db, {
+          tokenBudget: 0,
           activeNodes,
           activeEdges,
           recalledNodes: rec.nodes,
           recalledEdges: rec.edges,
         });
 
-        if (lastTurn.dropped > 0) {
+        if (lastTurn.dropped > 0 || episodicTokens > 0) {
           api.logger.info(
-            `[graph-memory] assemble: last turn ${lastTurn.messages.length} msgs (~${lastTurn.tokens} tok), dropped ${lastTurn.dropped} older msgs, graph ~${gmTokens} tok`,
+            `[graph-memory] assemble: last turn ${lastTurn.messages.length} msgs (~${lastTurn.tokens} tok), ` +
+            `dropped ${lastTurn.dropped} older msgs, graph ~${gmTokens} tok` +
+            (episodicTokens > 0 ? `, episodic ~${episodicTokens} tok` : ""),
           );
         }
 
+        // ── 3. 组装 systemPrompt ────────────────────────
         let systemPromptAddition: string | undefined;
-        if (xml) {
-          systemPromptAddition = systemPrompt
-            ? `${systemPrompt}\n\n${xml}`
-            : xml;
+        const parts = [systemPrompt, xml, episodicXml].filter(Boolean);
+        if (parts.length) {
+          systemPromptAddition = parts.join("\n\n");
         }
 
         return {
-          messages: repaired,
+          messages: normalizeMessageContent(repaired),
           estimatedTokens: gmTokens + lastTurn.tokens,
           ...(systemPromptAddition ? { systemPromptAddition } : {}),
         };
@@ -405,10 +446,40 @@ const graphMemoryPlugin = {
           `[graph-memory] afterTurn sid=${sessionId.slice(0, 8)} newMsgs=${newMessages.length} totalMsgs=${totalMsgs}`,
         );
 
-        // ★ 每轮直接提取，不再等累积
+        // ★ 每轮直接提取
         runTurnExtract(sessionId, newMessages).catch((err) => {
           api.logger.error(`[graph-memory] turn extract failed: ${err}`);
         });
+
+        // ★ 社区维护：每 N 轮触发一次（纯计算，<5ms）
+        const turns = (turnCounter.get(sessionId) ?? 0) + 1;
+        turnCounter.set(sessionId, turns);
+        const maintainInterval = cfg.compactTurnCount ?? 7;
+
+        if (turns % maintainInterval === 0) {
+          try {
+            invalidateGraphCache();
+            const pr = computeGlobalPageRank(db, cfg);
+            const comm = detectCommunities(db);
+            api.logger.info(
+              `[graph-memory] periodic maintenance (turn ${turns}): ` +
+              `pagerank top=${pr.topK.slice(0, 3).map(n => n.name).join(",")}, ` +
+              `communities=${comm.count}`,
+            );
+
+            // 每次社区检测后立即生成摘要（需要 LLM），确保泛化召回可用
+            if (comm.communities.size > 0) {
+              const { summarizeCommunities } = await import("./src/graph/community.ts");
+              const embedFn = (recaller as any).embed ?? undefined;
+              const summaries = await summarizeCommunities(db, comm.communities, llm, embedFn);
+              api.logger.info(
+                `[graph-memory] community summaries refreshed: ${summaries} summaries`,
+              );
+            }
+          } catch (err) {
+            api.logger.error(`[graph-memory] periodic maintenance failed: ${err}`);
+          }
+        }
       },
 
       async prepareSubagentSpawn({
@@ -497,6 +568,7 @@ const graphMemoryPlugin = {
       } finally {
         msgSeq.delete(sid);
         recalled.delete(sid);
+        turnCounter.delete(sid);
       }
     });
 
@@ -664,11 +736,6 @@ function estimateMsgTokens(msg: any): number {
   return Math.ceil(text.length / 3);
 }
 
-/**
- * 从最后一个 role=user 到消息末尾，完整保留。
- * tool_use/tool_result 天然配对不会切断。
- * 超长 tool_result 截断（保头尾砍中间）。
- */
 function sliceLastTurn(
   messages: any[],
 ): { messages: any[]; tokens: number; dropped: number } {
@@ -685,17 +752,15 @@ function sliceLastTurn(
   let kept = messages.slice(lastUserIdx);
   const dropped = lastUserIdx;
 
-  // 截断超长 tool_result
+  // 截断超长 tool_result（只截断 string 类型，数组结构不动，避免破坏 content.filter）
   const TOOL_MAX = 6000;
   kept = kept.map((msg: any) => {
     if (msg.role !== "tool" && msg.role !== "toolResult") return msg;
-    const text = typeof msg.content === "string"
-      ? msg.content
-      : JSON.stringify(msg.content ?? "");
-    if (text.length <= TOOL_MAX) return msg;
+    if (typeof msg.content !== "string") return msg;
+    if (msg.content.length <= TOOL_MAX) return msg;
     const head = Math.floor(TOOL_MAX * 0.6);
     const tail = Math.floor(TOOL_MAX * 0.3);
-    return { ...msg, content: text.slice(0, head) + `\n...[truncated ${text.length - head - tail} chars]...\n` + text.slice(-tail) };
+    return { ...msg, content: msg.content.slice(0, head) + `\n...[truncated ${msg.content.length - head - tail} chars]...\n` + msg.content.slice(-tail) };
   });
 
   let tokens = 0;
