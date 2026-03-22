@@ -53,9 +53,11 @@ export function createStoryCompleteFn(
       const errText = await res.text().catch(() => "");
       throw new Error(`[story-runtime] OpenAI-compatible LLM API ${res.status}: ${errText.slice(0, 200)}`);
     }
-    const data = await res.json() as any;
-    const text = data.choices?.[0]?.message?.content ?? "";
-    if (text) return text;
+    const data = await readStoryJsonResponse(res, "OpenAI-compatible");
+    const text = data.choices?.[0]?.message?.content;
+    if (typeof text === "string" && text.trim()) {
+      return text;
+    }
     throw new Error("[story-runtime] OpenAI-compatible LLM returned empty content");
   };
 }
@@ -85,8 +87,12 @@ export function createAnthropicCompatibleCompleteFn(
     if (!res.ok) {
       throw new Error(`[story-runtime] Anthropic-compatible LLM API ${res.status}`);
     }
-    const data = (await res.json() as any);
-    return data.content?.[0]?.text ?? "";
+    const data = await readStoryJsonResponse(res, "Anthropic-compatible");
+    const text = extractAnthropicText(data);
+    if (text.trim()) {
+      return text;
+    }
+    throw new Error("[story-runtime] Anthropic-compatible LLM returned empty content");
   };
 }
 
@@ -148,4 +154,30 @@ function requireStoryCompleteOption(value: string, envName: string) {
     return trimmed;
   }
   throw new Error(`[story-runtime] ${envName} is required for the story runtime`);
+}
+
+async function readStoryJsonResponse(res: Response, providerLabel: string) {
+  try {
+    return await res.json() as any;
+  } catch {
+    throw new Error(`[story-runtime] ${providerLabel} LLM returned invalid JSON`);
+  }
+}
+
+function extractAnthropicText(data: any): string {
+  if (!Array.isArray(data.content)) {
+    throw new Error("[story-runtime] Anthropic-compatible LLM returned invalid content");
+  }
+
+  const text = data.content
+    .filter((block: any) => block?.type === "text" && typeof block.text === "string")
+    .map((block: any) => block.text)
+    .join("\n")
+    .trim();
+
+  if (text) {
+    return text;
+  }
+
+  throw new Error("[story-runtime] Anthropic-compatible LLM returned empty content");
 }
