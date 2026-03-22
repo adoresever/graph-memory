@@ -37,14 +37,15 @@ export function resolveActionConflicts(actions: StoryAction[], turnNumber: numbe
     artifactBuckets.set(action.targetArtifactId, bucket);
   }
 
-  const conflictedActorIds = new Set<string>();
+  const conflictingActionIds = new Set<string>();
   const events: StoryResolvedEvent[] = [];
   let eventOrdinal = 1;
 
   for (const [artifactId, contenders] of artifactBuckets) {
     if (contenders.length < 2) continue;
+    const conflictId = buildConflictAggregateId(artifactId, turnNumber);
     for (const contender of contenders) {
-      conflictedActorIds.add(contender.actorId);
+      conflictingActionIds.add(contender.id);
     }
     const contenderIds = contenders.map((action) => action.actorId);
     events.push({
@@ -54,16 +55,17 @@ export function resolveActionConflicts(actions: StoryAction[], turnNumber: numbe
       summary: `${artifactId} becomes the center of a multi-party contest.`,
       payload: {
         artifactId,
+        conflictId,
         contenderIds,
         subjectId: artifactId,
-        predicate: "CONTESTED_BY",
-        objectId: contenderIds[0] ?? "unknown",
+        predicate: "IN_CONFLICT",
+        objectId: conflictId,
       },
     });
   }
 
   for (const action of normalizedActions) {
-    if (conflictedActorIds.has(action.actorId)) continue;
+    if (conflictingActionIds.has(action.id)) continue;
     events.push(
       createResolvedEventFromAction(action, turnNumber, eventOrdinal++),
     );
@@ -138,6 +140,10 @@ function inferTargetArtifactId(action: StoryAction): string | undefined {
     return "a-ember-seal";
   }
   return undefined;
+}
+
+function buildConflictAggregateId(artifactId: string, turnNumber: number): string {
+  return `conflict:${artifactId}:${turnNumber}`;
 }
 
 function createResolvedEventFromAction(
