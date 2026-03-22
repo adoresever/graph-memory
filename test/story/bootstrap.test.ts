@@ -15,6 +15,7 @@ describe("loadStoryConfig", () => {
     expect(cfg.llm.mode).toBe("anthropic-compatible");
     expect(cfg.llm.baseURL).toContain("minimaxi");
     expect(cfg.llm.model).toBe("MiniMax-M2.7");
+    expect(cfg.llm.apiKey).toBe("test-key");
     expect(cfg.dbPath).toBe("/tmp/story.db");
     expect(cfg.chapterEveryTurns).toBe(5);
     expect(cfg.resetOnStart).toBe(true);
