@@ -134,7 +134,7 @@ function inferActorId(action: StoryAction): string {
 
 function inferTargetArtifactId(action: StoryAction): string | undefined {
   if (typeof action.targetArtifactId === "string") return action.targetArtifactId;
-  if (action.type === "seek-artifact" || action.type === "fortify-secret-realm") {
+  if (action.type === "seek-artifact") {
     return "a-ember-seal";
   }
   return undefined;

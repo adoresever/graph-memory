@@ -2,13 +2,16 @@ import type { DatabaseSyncInstance } from "@photostructure/sqlite";
 import type { StoryCharacter, StoryFaction } from "./types.ts";
 import { rankActorActions } from "./decision/actor-engine.ts";
 import { rankFactionActions } from "./decision/faction-engine.ts";
-import { createStoryWorldState } from "./world-state.ts";
+import { propagateBeliefsFromEvents } from "./beliefs.ts";
 import {
+  insertStoryEvent,
+  insertStoryTurn,
   listStoryBeliefsForActor,
   listStoryEntitiesByKind,
   type StoryBelief,
   type StoryNarrativeSignal,
   type StoryResolvedEvent,
+  upsertStoryNarrativeSignal,
 } from "../store/store.ts";
 import type { StoryModelClient } from "./runtime/model-client.ts";
 import {
@@ -58,19 +61,39 @@ export async function runStoryTurn(db: DatabaseSyncInstance, input: StoryTurnInp
   ))).flat();
 
   const events = resolveActionConflicts([...actorActions, ...factionActions], input.turnNumber);
-  const updates = applyResolvedEvents(db, events);
   const narrativeSignals = deriveNarrativeSignalsFromEvents(events);
-  const world = createStoryWorldState(db);
-
-  world.recordTurn({
-    turnNumber: input.turnNumber,
-    summary: summarizeResolvedEvents(events),
-    payload: { events, stateChanges: updates },
-  });
-  world.recordEvents(events);
-  world.upsertNarrativeSignals(narrativeSignals);
+  const updates = persistTurnAtomically(db, input.turnNumber, events, narrativeSignals);
 
   return { turnNumber: input.turnNumber, events, stateChanges: updates };
+}
+
+function persistTurnAtomically(
+  db: DatabaseSyncInstance,
+  turnNumber: number,
+  events: StoryResolvedEvent[],
+  narrativeSignals: StoryNarrativeSignal[],
+): StoryStateChange[] {
+  db.exec("BEGIN");
+  try {
+    const updates = applyResolvedEvents(db, events);
+    insertStoryTurn(db, {
+      turnNumber,
+      summary: summarizeResolvedEvents(events),
+      payload: { events, stateChanges: updates },
+    });
+    for (const event of events) {
+      insertStoryEvent(db, event);
+    }
+    for (const signal of narrativeSignals) {
+      upsertStoryNarrativeSignal(db, signal);
+    }
+    propagateBeliefsFromEvents(db, events);
+    db.exec("COMMIT");
+    return updates;
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 function settleWorldState(db: DatabaseSyncInstance): SettledWorldState {
