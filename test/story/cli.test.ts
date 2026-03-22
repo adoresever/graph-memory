@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ import {
   createAnthropicCompatibleCompleteFn,
   createStoryCompleteFn,
 } from "../../src/engine/llm.ts";
+import * as storyCli from "../../src/story/cli.ts";
 
 const originalEnv = { ...process.env };
 const originalFetch = global.fetch;
@@ -97,6 +98,25 @@ describe("story:run cli", () => {
     process.env = { ...originalEnv };
   });
 
+  it("builds run ids with a sortable timestamp prefix and unique suffix", () => {
+    const buildRunId = (storyCli as unknown as {
+      buildRunId: (startedAt: string, runIdSuffix?: string) => string;
+    }).buildRunId;
+
+    expect(buildRunId).toBeTypeOf("function");
+
+    const older = buildRunId("2026-03-22T01:02:03.004Z", "aaaa1111");
+    const newer = buildRunId("2026-03-22T01:02:04.004Z", "bbbb2222");
+    const duplicateTimeA = buildRunId("2026-03-22T01:02:03.004Z", "aaaa1111");
+    const duplicateTimeB = buildRunId("2026-03-22T01:02:03.004Z", "bbbb2222");
+
+    expect(older).toBe("story-2026-03-22T01-02-03-004Z-aaaa1111");
+    expect(newer).toBe("story-2026-03-22T01-02-04-004Z-bbbb2222");
+    expect(older < newer).toBe(true);
+    expect(duplicateTimeA).not.toBe(duplicateTimeB);
+    expect(older).not.toMatch(/[:.]/);
+  });
+
   it("runs through the packaged story:run entrypoint and prints runtime config", async () => {
     const result = await execa(
       "npm",
@@ -144,6 +164,47 @@ describe("story:run cli", () => {
       expect(result.stdout).toContain("chapters=1");
     } finally {
       rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the default runs directory when --output-dir is omitted", async () => {
+    const tempDbPath = `/tmp/story-cli-default-output-${Date.now()}.db`;
+    const defaultRunsDir = path.join(repoRoot, "runs");
+    let bundlePath = "";
+
+    try {
+      const result = await execa(
+        "npm",
+        ["run", "story:run", "--", "--turns=3", "--stub-model"],
+        {
+          cwd: repoRoot,
+          env: {
+            ...process.env,
+            NOVEL_LLM_MODE: "anthropic-compatible",
+            NOVEL_DB_PATH: tempDbPath,
+            NOVEL_CHAPTER_EVERY_TURNS: "3",
+            NOVEL_RESET_ON_START: "1",
+          },
+        },
+      );
+
+      const bundleLine = result.stdout
+        .trim()
+        .split("\n")
+        .find((line) => line.startsWith("bundle="));
+      expect(bundleLine).toBeDefined();
+
+      bundlePath = bundleLine!.slice("bundle=".length).trim();
+      expect(bundlePath).toContain(path.join(repoRoot, "runs"));
+      expect(existsSync(bundlePath)).toBe(true);
+    } finally {
+      if (bundlePath) {
+        rmSync(bundlePath, { recursive: true, force: true });
+      }
+
+      if (existsSync(defaultRunsDir) && readdirSync(defaultRunsDir).length === 0) {
+        rmSync(defaultRunsDir, { recursive: true, force: true });
+      }
     }
   });
 

@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { closeDb, getDb } from "../store/db.ts";
 import { loadStoryConfig } from "./config.ts";
@@ -89,6 +90,6 @@ function readOutputDirArg(argv: string[]): string {
   return outputDir;
 }
 
-function buildRunId(startedAt: string): string {
-  return `story-${startedAt.replace(/[:.]/g, "-")}`;
+export function buildRunId(startedAt: string, runIdSuffix = randomBytes(4).toString("hex")): string {
+  return `story-${startedAt.replace(/[:.]/g, "-")}-${runIdSuffix}`;
 }
