@@ -85,7 +85,10 @@ export function createAnthropicCompatibleCompleteFn(
       }),
     });
     if (!res.ok) {
-      throw new Error(`[story-runtime] Anthropic-compatible LLM API ${res.status}`);
+      const errText = await res.text().catch(() => "");
+      throw new Error(
+        `[story-runtime] Anthropic-compatible LLM API ${res.status}: ${errText.slice(0, 200)}`,
+      );
     }
     const data = await readStoryJsonResponse(res, "Anthropic-compatible");
     const text = extractAnthropicText(data);

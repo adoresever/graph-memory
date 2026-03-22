@@ -10,6 +10,18 @@ import {
 const originalEnv = { ...process.env };
 const originalFetch = global.fetch;
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+type FetchArgs = Parameters<typeof fetch>;
+
+function setFetchMock(
+  impl: (input: FetchArgs[0], init?: FetchArgs[1]) => Promise<Response>,
+) {
+  global.fetch = Object.assign(
+    (async (input: FetchArgs[0], init?: FetchArgs[1]) => impl(input, init)) as typeof fetch,
+    {
+      preconnect: originalFetch.preconnect?.bind(originalFetch),
+    },
+  );
+}
 
 describe("story model runtime", () => {
   beforeEach(() => {
@@ -28,11 +40,11 @@ describe("story model runtime", () => {
   });
 
   it("surfaces malformed anthropic-compatible responses instead of fabricating chapter output", async () => {
-    global.fetch = async () =>
+    setFetchMock(async () =>
       new Response(JSON.stringify({ content: [] }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
-      });
+      }));
 
     const client = createStoryModelClient({
       mode: "anthropic-compatible",
@@ -47,7 +59,7 @@ describe("story model runtime", () => {
   });
 
   it("rejects invalid rerank payloads instead of returning unchanged actions", async () => {
-    global.fetch = async () =>
+    setFetchMock(async () =>
       new Response(JSON.stringify({
         choices: [
           {
@@ -59,7 +71,7 @@ describe("story model runtime", () => {
       }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
-      });
+      }));
 
     const client = createStoryModelClient({
       mode: "openai-compatible",
@@ -114,7 +126,7 @@ describe("story llm helpers", () => {
 
   it("builds openai-compatible requests with the expected url, method, and auth header", async () => {
     const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
-    global.fetch = async (input, init) => {
+    setFetchMock(async (input, init) => {
       requests.push({ input, init });
       return new Response(JSON.stringify({
         choices: [
@@ -128,7 +140,7 @@ describe("story llm helpers", () => {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
-    };
+    });
 
     const complete = createStoryCompleteFn({
       baseURL: "https://api.example.com/openai/",
@@ -144,7 +156,7 @@ describe("story llm helpers", () => {
 
   it("builds anthropic-compatible requests with the expected url, method, and auth header", async () => {
     const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
-    global.fetch = async (input, init) => {
+    setFetchMock(async (input, init) => {
       requests.push({ input, init });
       return new Response(JSON.stringify({
         content: [
@@ -157,7 +169,7 @@ describe("story llm helpers", () => {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
-    };
+    });
 
     const complete = createAnthropicCompatibleCompleteFn({
       baseURL: "https://api.minimaxi.com/anthropic/",
@@ -169,5 +181,23 @@ describe("story llm helpers", () => {
     expect(String(requests[0]?.input)).toBe("https://api.minimaxi.com/anthropic/v1/messages");
     expect(requests[0]?.init?.method).toBe("POST");
     expect((requests[0]?.init?.headers as Record<string, string>)["x-api-key"]).toBe("story-anthropic-key");
+  });
+
+  it("includes an anthropic error body snippet on non-2xx responses", async () => {
+    setFetchMock(async () =>
+      new Response("bad auth from provider", {
+        status: 401,
+        headers: { "Content-Type": "text/plain" },
+      }));
+
+    const complete = createAnthropicCompatibleCompleteFn({
+      baseURL: "https://api.minimaxi.com/anthropic/",
+      model: "MiniMax-M2.7",
+      apiKey: "story-anthropic-key",
+    });
+
+    await expect(complete("system prompt", "user prompt")).rejects.toThrowError(
+      "[story-runtime] Anthropic-compatible LLM API 401: bad auth from provider",
+    );
   });
 });
