@@ -211,6 +211,36 @@ npm run story:run -- --turns=3 --stub-model
 
 This is the recommended mode for CI and local integration testing because secrets stay in env for live runs only.
 
+### Run bundles and batch workflow
+
+Use `--output-dir` when you want each simulator run exported as a portable run bundle:
+
+```bash
+npm run story:run -- --turns=3 --stub-model --output-dir=./runs
+```
+
+Each run writes a bundle under `runs/<run-id>/`:
+
+```text
+runs/<run-id>/
+  index.json
+  world-log.jsonl
+  chapters/
+  state/
+```
+
+`index.json` captures bundle metadata, `world-log.jsonl` stores the turn-by-turn event log, `chapters/` contains generated chapter outputs, and `state/` contains exported runtime snapshots.
+
+For repeated simulations, use the batch entrypoint with both `--runs` and `--turns`:
+
+```bash
+npm run story:batch -- --runs=2 --turns=6 --stub-model --output-dir=./runs
+```
+
+This runs multiple independent simulations and exports one bundle per run ID into the same parent output directory. `--stub-model` works for both commands, so you can exercise the full batch workflow without `NOVEL_LLM_BASE_URL` or `NOVEL_LLM_API_KEY`.
+
+Run bundles are file exports for inspection, replay tooling, or fixtures. SQLite persistence is still managed separately through `NOVEL_DB_PATH`, so exporting bundles does not replace the story runtime database unless you explicitly wire both workflows together.
+
 ### Windows users
 
 Download the installer from [Releases](https://github.com/adoresever/graph-memory/releases):
