@@ -68,7 +68,7 @@ if (import.meta.main) {
   });
 }
 
-function readTurnsArg(argv: string[]): number {
+export function readTurnsArg(argv: string[]): number {
   const turnsArg = argv.find((arg) => arg.startsWith("--turns="));
   if (!turnsArg) return 3;
   const parsed = Number(turnsArg.slice("--turns=".length));
@@ -78,7 +78,7 @@ function readTurnsArg(argv: string[]): number {
   return parsed;
 }
 
-function readOutputDirArg(argv: string[]): string {
+export function readOutputDirArg(argv: string[]): string {
   const outputDirArg = argv.find((arg) => arg.startsWith("--output-dir="));
   if (!outputDirArg) {
     return path.join(process.cwd(), "runs");

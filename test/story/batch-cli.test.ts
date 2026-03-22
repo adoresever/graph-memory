@@ -44,7 +44,14 @@ describe("story:batch cli", () => {
         },
       });
 
-      expect(result.stdout).toContain("runs=2");
+      const outputLines = result.stdout.trim().split("\n").filter(Boolean);
+      const summaryLines = outputLines.filter((line) => line.startsWith("run="));
+
+      expect(summaryLines).toHaveLength(2);
+      expect(summaryLines[0]).toMatch(/^run=1 bundle=.+ turns=3 chapters=1$/);
+      expect(summaryLines[1]).toMatch(/^run=2 bundle=.+ turns=3 chapters=1$/);
+      expect(outputLines.at(-1)).toBe("runs=2");
+
       const runBundleDirs = readdirSync(outputRoot, { withFileTypes: true })
         .filter((entry) => entry.isDirectory())
         .map((entry) => entry.name);
@@ -96,6 +103,10 @@ describe("story:batch cli", () => {
 
       expect(result.exitCode).not.toBe(0);
       expect(result.stderr).toContain("run=2");
+      const runBundleDirs = readdirSync(outputRoot, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name);
+      expect(runBundleDirs).toHaveLength(1);
     } finally {
       cleanupPath(outputRoot);
       cleanupPath(path.dirname(dbPath));
