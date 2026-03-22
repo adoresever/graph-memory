@@ -1,9 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { fileURLToPath } from "node:url";
 import { execa } from "execa";
 import { createStoryModelClient } from "../../src/story/runtime/model-client.ts";
+import {
+  createAnthropicCompatibleCompleteFn,
+  createStoryCompleteFn,
+} from "../../src/engine/llm.ts";
 
 const originalEnv = { ...process.env };
 const originalFetch = global.fetch;
+const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 
 describe("story model runtime", () => {
   beforeEach(() => {
@@ -81,7 +87,7 @@ describe("story:run cli", () => {
       "npm",
       ["run", "story:run", "--", "--dry-run"],
       {
-        cwd: "/Users/victor/Documents/New/graph-memory/.worktrees/world-sim-xianxia-mvp",
+        cwd: repoRoot,
         env: {
           ...process.env,
           NOVEL_LLM_MODE: "anthropic-compatible",
@@ -98,5 +104,70 @@ describe("story:run cli", () => {
     expect(result.stdout).toContain("mode=anthropic-compatible model=MiniMax-M2.7");
     expect(result.stdout).toContain("dbPath=/tmp/story.db");
     expect(result.stdout).toContain("Arguments: --dry-run");
+  });
+});
+
+describe("story llm helpers", () => {
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("builds openai-compatible requests with the expected url, method, and auth header", async () => {
+    const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    global.fetch = async (input, init) => {
+      requests.push({ input, init });
+      return new Response(JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: "ranked output",
+            },
+          },
+        ],
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const complete = createStoryCompleteFn({
+      baseURL: "https://api.example.com/openai/",
+      model: "MiniMax-M2.7",
+      apiKey: "story-openai-key",
+    });
+
+    await expect(complete("system prompt", "user prompt")).resolves.toBe("ranked output");
+    expect(String(requests[0]?.input)).toBe("https://api.example.com/openai/chat/completions");
+    expect(requests[0]?.init?.method).toBe("POST");
+    expect((requests[0]?.init?.headers as Record<string, string>).Authorization).toBe("Bearer story-openai-key");
+  });
+
+  it("builds anthropic-compatible requests with the expected url, method, and auth header", async () => {
+    const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    global.fetch = async (input, init) => {
+      requests.push({ input, init });
+      return new Response(JSON.stringify({
+        content: [
+          {
+            type: "text",
+            text: "chapter prose",
+          },
+        ],
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const complete = createAnthropicCompatibleCompleteFn({
+      baseURL: "https://api.minimaxi.com/anthropic/",
+      model: "MiniMax-M2.7",
+      apiKey: "story-anthropic-key",
+    });
+
+    await expect(complete("system prompt", "user prompt")).resolves.toBe("chapter prose");
+    expect(String(requests[0]?.input)).toBe("https://api.minimaxi.com/anthropic/v1/messages");
+    expect(requests[0]?.init?.method).toBe("POST");
+    expect((requests[0]?.init?.headers as Record<string, string>)["x-api-key"]).toBe("story-anthropic-key");
   });
 });
