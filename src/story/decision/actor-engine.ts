@@ -1,29 +1,29 @@
 import type { StoryCharacter } from "../types.ts";
-import type { StoryAction } from "../runtime/model-client.ts";
+import type {
+  StoryAction,
+  StoryModelClient,
+  ActorDecisionInput as RuntimeActorDecisionInput,
+} from "../runtime/model-client.ts";
 import type { StoryBelief, StoryNarrativeSignal } from "../../store/store.ts";
 
 type ScoredStoryAction = StoryAction & { score: number };
 
-export interface ActorDecisionModel {
-  rerankActorActions(actions: StoryAction[], context: ActorDecisionInput): Promise<StoryAction[]>;
-}
-
-export interface ActorDecisionInput {
+export interface ActorEngineInput {
   actor: StoryCharacter;
   beliefs: StoryBelief[];
   worldSignals: StoryNarrativeSignal[];
-  model: ActorDecisionModel;
+  model: Pick<StoryModelClient, "rerankActorActions">;
 }
 
-export async function rankActorActions(input: ActorDecisionInput): Promise<StoryAction[]> {
+export async function rankActorActions(input: ActorEngineInput): Promise<StoryAction[]> {
   const scored = buildCandidateActions(input)
     .map((action) => scoreAction(action, input))
     .sort((left, right) => right.score - left.score || left.id.localeCompare(right.id));
-  const reranked = await input.model.rerankActorActions(scored, input);
+  const reranked = await input.model.rerankActorActions(scored, buildActorRerankContext(input));
   return reranked.slice(0, 2);
 }
 
-function buildCandidateActions(input: ActorDecisionInput): StoryAction[] {
+function buildCandidateActions(input: ActorEngineInput): StoryAction[] {
   return [
     {
       id: `${input.actor.id}:seek-artifact`,
@@ -43,7 +43,7 @@ function buildCandidateActions(input: ActorDecisionInput): StoryAction[] {
   ];
 }
 
-function scoreAction(action: StoryAction, input: ActorDecisionInput): ScoredStoryAction {
+function scoreAction(action: StoryAction, input: ActorEngineInput): ScoredStoryAction {
   const desires = new Set(input.actor.coreDesires);
   const goals = new Set(input.actor.shortTermGoals);
   const beliefs = input.beliefs.filter((belief) => belief.actorId === input.actor.id && belief.actorKind === "character");
@@ -73,4 +73,22 @@ function scoreAction(action: StoryAction, input: ActorDecisionInput): ScoredStor
   }
 
   return { ...action, score };
+}
+
+function buildActorRerankContext(input: ActorEngineInput): RuntimeActorDecisionInput {
+  const beliefHints = input.beliefs
+    .filter((belief) => belief.actorId === input.actor.id && belief.actorKind === "character")
+    .map((belief) => `${belief.predicate}:${belief.objectId}`)
+    .slice(0, 3)
+    .join(", ");
+  const signalHints = input.worldSignals
+    .map((signal) => `${signal.kind}:${signal.subjectId}`)
+    .slice(0, 3)
+    .join(", ");
+
+  return {
+    actorId: input.actor.id,
+    prompt: `desires=${input.actor.coreDesires.join("|")} goals=${input.actor.shortTermGoals.join("|")} beliefs=${beliefHints}`,
+    scene: signalHints,
+  };
 }

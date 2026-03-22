@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { StoryCharacter, StoryFaction } from "../../src/story/types.ts";
 import type { StoryBelief, StoryNarrativeSignal } from "../../src/store/store.ts";
+import type {
+  StoryAction,
+  ActorDecisionInput as RuntimeActorDecisionInput,
+  FactionDecisionInput as RuntimeFactionDecisionInput,
+} from "../../src/story/runtime/model-client.ts";
 import { rankActorActions } from "../../src/story/decision/actor-engine.ts";
 import { rankFactionActions } from "../../src/story/decision/faction-engine.ts";
 
@@ -39,13 +44,18 @@ describe("story decision engines", () => {
 
     let actorRerankCalls = 0;
     let actorModelInput: Array<Record<string, unknown>> = [];
+    let actorContext: RuntimeActorDecisionInput | undefined;
     const actions = await rankActorActions({
       actor: liYao,
       beliefs: [artifactBelief],
       worldSignals: [secretRealmOpening],
       model: {
-        rerankActorActions: async (candidateActions) => {
+        rerankActorActions: async (
+          candidateActions: StoryAction[],
+          context: RuntimeActorDecisionInput,
+        ) => {
           actorRerankCalls += 1;
+          actorContext = context;
           actorModelInput = candidateActions as Array<Record<string, unknown>>;
           const byType = new Map(candidateActions.map((action) => [action.type, action]));
           return [
@@ -54,13 +64,13 @@ describe("story decision engines", () => {
             byType.get("seek-artifact"),
           ].filter((action): action is NonNullable<typeof action> => Boolean(action));
         },
-        rerankFactionActions: async (candidateActions) => candidateActions,
       },
     });
 
     expect(actorRerankCalls).toBe(1);
     expect(actorModelInput).toHaveLength(3);
     expect(actorModelInput[0]?.type).toBe("seek-artifact");
+    expect(actorContext?.actorId).toBe("c-li-yao");
     expect(actions).toHaveLength(2);
     expect(actions.map((action) => action.type)).toEqual(["conceal-bloodline", "train-breakthrough"]);
   });
@@ -97,14 +107,18 @@ describe("story decision engines", () => {
 
     let factionRerankCalls = 0;
     let factionModelInput: Array<Record<string, unknown>> = [];
+    let factionContext: RuntimeFactionDecisionInput | undefined;
     const actions = await rankFactionActions({
       faction: sect,
       beliefs: [factionBelief],
       worldSignals: [rivalInheritanceRumor],
       model: {
-        rerankActorActions: async (candidateActions) => candidateActions,
-        rerankFactionActions: async (candidateActions) => {
+        rerankFactionActions: async (
+          candidateActions: StoryAction[],
+          context: RuntimeFactionDecisionInput,
+        ) => {
           factionRerankCalls += 1;
+          factionContext = context;
           factionModelInput = candidateActions as Array<Record<string, unknown>>;
           const byType = new Map(candidateActions.map((action) => [action.type, action]));
           return [
@@ -119,6 +133,7 @@ describe("story decision engines", () => {
     expect(factionRerankCalls).toBe(1);
     expect(factionModelInput).toHaveLength(3);
     expect(factionModelInput[0]?.type).toBe("purge-rival-line");
+    expect(factionContext?.factionId).toBe("f-cloud-sword");
     expect(actions).toHaveLength(2);
     expect(actions.map((action) => action.type)).toEqual(["fortify-secret-realm", "mediate-inheritance-dispute"]);
   });
