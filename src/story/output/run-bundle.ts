@@ -91,7 +91,7 @@ function listCurrentRunChapters(db: DatabaseSyncInstance, chapterCount: number):
   const rows = db.prepare(`
     SELECT turn_number
     FROM story_chapters
-    ORDER BY created_at DESC, id DESC
+    ORDER BY turn_number DESC, id DESC
     LIMIT ?
   `).all(chapterCount) as Array<{ turn_number: number }>;
 

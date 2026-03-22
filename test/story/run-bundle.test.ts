@@ -96,4 +96,54 @@ describe("story run bundle", () => {
       rmSync(outputDir, { recursive: true, force: true });
     }
   });
+
+  it("keeps exported chapters aligned to persisted turn order", async () => {
+    const db = createTestDb();
+    const outputDir = mkdtempSync(path.join(os.tmpdir(), "story-run-bundle-"));
+    const startedAt = "2026-03-22T10:00:00.000Z";
+    const finishedAt = "2026-03-22T10:00:05.000Z";
+
+    try {
+      initializeStoryWorld(db);
+      const loopResult = await runStoryLoop(db, {
+        turns: 6,
+        model: createStubStoryModelClient(),
+      });
+
+      db.prepare(`
+        UPDATE story_chapters
+        SET created_at = CASE turn_number
+          WHEN 3 THEN 2000
+          WHEN 6 THEN 1000
+          ELSE created_at
+        END
+        WHERE turn_number IN (3, 6)
+      `).run();
+
+      const bundle = await writeRunBundle(db, loopResult, {
+        outputRoot: outputDir,
+        runMetadata: {
+          runId: "test-run-002",
+          turns: 6,
+          chapterEveryTurns: 3,
+          dbPath: "/tmp/story.db",
+          resetOnStart: true,
+          model: { mode: "stub", name: "stub-story-model" },
+          startedAt,
+          finishedAt,
+        },
+      });
+
+      expect(bundle.chapterCount).toBe(2);
+
+      const chapter001 = readFileSync(path.join(bundle.bundlePath, "chapters", "chapter-001.md"), "utf8");
+      const chapter002 = readFileSync(path.join(bundle.bundlePath, "chapters", "chapter-002.md"), "utf8");
+
+      expect(chapter001).toContain("- Turn: 3");
+      expect(chapter002).toContain("- Turn: 6");
+    } finally {
+      db.close();
+      rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
 });
