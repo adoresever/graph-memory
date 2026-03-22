@@ -87,7 +87,7 @@ export function readOutputDirArg(argv: string[]): string {
   if (!outputDir) {
     throw new Error("[story-runtime] --output-dir must not be empty");
   }
-  return outputDir;
+  return path.resolve(process.cwd(), outputDir);
 }
 
 export function buildRunId(startedAt: string, runIdSuffix = randomBytes(4).toString("hex")): string {

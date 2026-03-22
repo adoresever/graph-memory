@@ -208,6 +208,13 @@ describe("story:run cli", () => {
     }
   });
 
+  it("normalizes explicit relative --output-dir values to an absolute path", () => {
+    const outputDir = storyCli.readOutputDirArg(["--output-dir=./runs"]);
+
+    expect(outputDir).toBe(path.join(process.cwd(), "runs"));
+    expect(path.isAbsolute(outputDir)).toBe(true);
+  });
+
   it("exports a bundle for a stubbed story run and reports the bundle path", async () => {
     const outputDir = mkdtempSync(path.join(os.tmpdir(), "story-cli-output-"));
     try {
