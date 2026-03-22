@@ -151,3 +151,13 @@ export const DEFAULT_CONFIG: GmConfig = {
   pagerankDamping: 0.85,
   pagerankIterations: 20,
 };
+
+export type {
+  SeedWorld,
+  StoryArtifact,
+  StoryCharacter,
+  StoryFaction,
+  StoryLocation,
+  StoryRule,
+  StoryThread,
+} from "./story/types.ts";

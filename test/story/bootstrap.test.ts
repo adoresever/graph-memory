@@ -1,6 +1,7 @@
 import os from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadStoryConfig } from "../../src/story/config.ts";
+import { createSeedWorld } from "../../src/story/bootstrap.ts";
 
 const originalEnv = { ...process.env };
 
@@ -79,5 +80,14 @@ describe("loadStoryConfig", () => {
     expect(() => loadStoryConfig()).toThrowError(
       "[story-runtime] NOVEL_LLM_MODEL is required for the story runtime",
     );
+  });
+});
+
+describe("createSeedWorld", () => {
+  it("builds a seed world with characters, factions, and threads", () => {
+    const world = createSeedWorld();
+    expect(world.characters.length).toBeGreaterThanOrEqual(3);
+    expect(world.factions.length).toBeGreaterThanOrEqual(2);
+    expect(world.threads.length).toBeGreaterThanOrEqual(1);
   });
 });
