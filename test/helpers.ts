@@ -210,6 +210,8 @@ export function createTestDb(): DatabaseSyncInstance {
     CREATE INDEX IF NOT EXISTS ix_story_relations_from ON story_relations(from_id);
     CREATE INDEX IF NOT EXISTS ix_story_relations_to ON story_relations(to_id);
     CREATE INDEX IF NOT EXISTS ix_story_events_turn_number ON story_events(turn_number);
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_story_beliefs_actor_subject_predicate
+      ON story_beliefs(actor_id, subject_id, predicate);
     CREATE INDEX IF NOT EXISTS ix_story_narrative_signals_subject_kind_status
       ON story_narrative_signals(subject_id, kind, status);
   `);

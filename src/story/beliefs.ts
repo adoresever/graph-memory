@@ -57,7 +57,7 @@ export function upsertBeliefFromEvent(db: DatabaseSyncInstance, actorId: string,
 
 export function propagateBeliefsFromEvents(db: DatabaseSyncInstance, events: StoryResolvedEvent[]): void {
   for (const event of events) {
-    const observers = event.visibility === "public"
+    const observers = event.visibility !== "private"
       ? [...listObservableActors(db), ...listObservableFactions(db)]
       : (event.observers ?? []);
     for (const actorId of observers) {

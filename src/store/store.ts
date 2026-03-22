@@ -832,8 +832,14 @@ function parseStoredStoryEventPayload(rawPayload: string): {
   payload: unknown;
   visibility: "public" | "private";
   observers: string[];
-} {
-  const parsed = JSON.parse(rawPayload) as unknown;
+} | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawPayload) as unknown;
+  } catch {
+    console.warn("[story-recall] skipped malformed story event payload row");
+    return null;
+  }
   if (
     parsed
     && typeof parsed === "object"
@@ -906,34 +912,24 @@ function inferActorKind(actorId: string): "character" | "faction" {
 
 export function upsertStoryBelief(db: DatabaseSyncInstance, belief: StoryBelief): StoryBelief {
   const now = Date.now();
-  const existing = db.prepare(`
-    SELECT id FROM story_beliefs
-    WHERE actor_id = ? AND subject_id = ? AND predicate = ?
-    LIMIT 1
-  `).get(belief.actorId, belief.subjectId, belief.predicate) as { id: string } | undefined;
-
-  if (existing) {
-    db.prepare(`
-      UPDATE story_beliefs
-      SET object_id = ?, confidence = ?, updated_at = ?
-      WHERE id = ?
-    `).run(belief.objectId, belief.confidence, now, existing.id);
-  } else {
-    db.prepare(`
-      INSERT INTO story_beliefs (
-        id, actor_id, subject_id, predicate, object_id, confidence, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      uid("sb"),
-      belief.actorId,
-      belief.subjectId,
-      belief.predicate,
-      belief.objectId,
-      belief.confidence,
-      now,
-      now,
-    );
-  }
+  db.prepare(`
+    INSERT INTO story_beliefs (
+      id, actor_id, subject_id, predicate, object_id, confidence, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(actor_id, subject_id, predicate) DO UPDATE SET
+      object_id = excluded.object_id,
+      confidence = excluded.confidence,
+      updated_at = excluded.updated_at
+  `).run(
+    uid("sb"),
+    belief.actorId,
+    belief.subjectId,
+    belief.predicate,
+    belief.objectId,
+    belief.confidence,
+    now,
+    now,
+  );
 
   return belief;
 }
@@ -1025,6 +1021,7 @@ export function listEventsForPov(
   const events: StoryStoredEvent[] = [];
   for (const row of rows) {
     const parsed = parseStoredStoryEventPayload(row.payload);
+    if (!parsed) continue;
     const isVisible = parsed.visibility === "public" || parsed.observers.includes(povId);
     if (!isVisible) continue;
     events.push({
@@ -1045,9 +1042,13 @@ export function listRelationshipsForPov(db: DatabaseSyncInstance, povId: string)
   const rows = db.prepare(`
     SELECT id, from_id, relation, to_id, visibility, intensity, source_event_id
     FROM story_relations
-    WHERE from_id = ? OR to_id = ?
+    WHERE (
+      visibility = 'public' AND (from_id = ? OR to_id = ?)
+    ) OR (
+      visibility = 'private' AND from_id = ?
+    )
     ORDER BY updated_at DESC, id ASC
-  `).all(povId, povId) as Array<{
+  `).all(povId, povId, povId) as Array<{
     id: string;
     from_id: string;
     relation: string;
@@ -1096,7 +1097,15 @@ export function listActiveThreadsForEvents(
     ORDER BY created_at ASC, id ASC
   `).all(...threadIdList) as Array<{ payload: string }>;
 
-  return rows.map((row) => JSON.parse(row.payload) as Record<string, unknown>);
+  const threads: Array<Record<string, unknown>> = [];
+  for (const row of rows) {
+    try {
+      threads.push(JSON.parse(row.payload) as Record<string, unknown>);
+    } catch {
+      console.warn("[story-recall] skipped malformed thread payload row");
+    }
+  }
+  return threads;
 }
 
 export function listNarrativeSignals(

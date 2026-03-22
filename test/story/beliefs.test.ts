@@ -113,4 +113,60 @@ describe("story beliefs", () => {
       db.close();
     }
   });
+
+  it("defaults missing visibility to public propagation", () => {
+    const db = createTestDb();
+    try {
+      insertStoryEntities(
+        db,
+        [{ id: "c-li-yao", name: "Li Yao" }],
+        "character",
+      );
+      insertStoryEntities(
+        db,
+        [{ id: "f-cloud-sword", name: "Cloud Sword Sect" }],
+        "faction",
+      );
+
+      propagateBeliefsFromEvents(db, [
+        {
+          id: "e-default-visibility",
+          turnNumber: 1,
+          type: "claim",
+          summary: "Visibility omitted",
+          payload: { subjectId: "a-ember-seal", predicate: "OWNS", objectId: "c-shen-mo" },
+        },
+      ]);
+
+      expect(listBeliefsForActor(db, "c-li-yao")).toHaveLength(1);
+      expect(listBeliefsForActor(db, "f-cloud-sword")).toHaveLength(1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("records events and propagates beliefs through world-state runtime API", () => {
+    const db = createTestDb();
+    try {
+      const world = createStoryWorldState(db);
+      world.saveSeed(createSeedWorld());
+
+      world.recordEvents([
+        {
+          id: "e-runtime-public",
+          turnNumber: 1,
+          type: "claim",
+          summary: "Runtime event",
+          payload: { subjectId: "a-ember-seal", predicate: "OWNS", objectId: "c-shen-mo" },
+        },
+      ]);
+
+      const liYaoBeliefs = listBeliefsForActor(db, "c-li-yao");
+      expect(liYaoBeliefs.some((belief) =>
+        belief.subjectId === "a-ember-seal" && belief.predicate === "OWNS" && belief.objectId === "c-shen-mo"
+      )).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
 });

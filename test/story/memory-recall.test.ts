@@ -88,4 +88,55 @@ describe("story memory recall", () => {
       db.close();
     }
   });
+
+  it("hides private relations from non-owner targets while keeping public relations visible", () => {
+    const db = createTestDb();
+    try {
+      const world = createStoryWorldState(db);
+      world.saveSeed(createSeedWorld());
+
+      const liYaoPacket = buildRecallPacket(db, { povId: "c-li-yao", eventIds: [] });
+      const suWanPacket = buildRecallPacket(db, { povId: "c-su-wan", eventIds: [] });
+
+      expect(liYaoPacket.relationships.some((relation) => relation.relation === "FEELS")).toBe(true);
+      expect(suWanPacket.relationships.some((relation) => relation.relation === "FEELS")).toBe(false);
+      expect(suWanPacket.relationships.some((relation) => relation.relation === "KNOWS")).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("skips malformed event and thread payload rows during recall instead of crashing", () => {
+    const db = createTestDb();
+    try {
+      const world = createStoryWorldState(db);
+      world.saveSeed(createSeedWorld());
+
+      insertStoryEvent(db, {
+        id: "e-good",
+        turnNumber: 1,
+        type: "encounter",
+        summary: "Good event",
+        visibility: "public",
+        observers: [],
+        payload: { threadId: "t-secret-realm", subjectId: "c-li-yao" },
+      });
+      db.prepare(`
+        INSERT INTO story_events (id, turn_number, type, summary, payload, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run("e-bad", 1, "encounter", "Bad payload", "{not-json", Date.now());
+      db.prepare(`
+        UPDATE story_entities
+        SET payload = ?
+        WHERE id = ?
+      `).run("{broken-thread-json", "t-secret-realm");
+
+      expect(() => buildRecallPacket(db, { povId: "c-li-yao", eventIds: ["e-good", "e-bad"] })).not.toThrow();
+      const packet = buildRecallPacket(db, { povId: "c-li-yao", eventIds: ["e-good", "e-bad"] });
+      expect(packet.relatedEvents.map((event) => event.id)).toEqual(["e-good"]);
+      expect(packet.threads).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
 });

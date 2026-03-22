@@ -1,6 +1,7 @@
 import type { DatabaseSyncInstance } from "@photostructure/sqlite";
 import { createSeedWorld } from "./bootstrap.ts";
 import type { SeedWorld, StoryCharacter, StoryThread } from "./types.ts";
+import { propagateBeliefsFromEvents } from "./beliefs.ts";
 import {
   insertStoryEntities,
   insertStoryEvent,
@@ -119,6 +120,7 @@ export function createStoryWorldState(db: DatabaseSyncInstance): StoryWorldState
         for (const event of events) {
           insertStoryEvent(db, event);
         }
+        propagateBeliefsFromEvents(db, events);
         db.exec("COMMIT");
       } catch (e) {
         db.exec("ROLLBACK");
