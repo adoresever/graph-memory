@@ -658,7 +658,18 @@ export interface StoryResolvedEvent {
   type: string;
   summary: string;
   payload: unknown;
+  visibility?: "public" | "private";
+  observers?: string[];
   createdAt?: number;
+}
+
+export interface StoryBelief {
+  actorId: string;
+  subjectId: string;
+  predicate: string;
+  objectId: string;
+  confidence: number;
+  actorKind: "character" | "faction";
 }
 
 export interface StoryNarrativeSignal {
@@ -837,4 +848,223 @@ export function upsertStoryNarrativeSignal(db: DatabaseSyncInstance, signal: Sto
     signal.createdAt ?? now,
     signal.updatedAt ?? now,
   );
+}
+
+function inferActorKind(actorId: string): "character" | "faction" {
+  return actorId.startsWith("f-") ? "faction" : "character";
+}
+
+export function upsertStoryBelief(db: DatabaseSyncInstance, belief: StoryBelief): StoryBelief {
+  const now = Date.now();
+  const existing = db.prepare(`
+    SELECT id FROM story_beliefs
+    WHERE actor_id = ? AND subject_id = ? AND predicate = ?
+    LIMIT 1
+  `).get(belief.actorId, belief.subjectId, belief.predicate) as { id: string } | undefined;
+
+  if (existing) {
+    db.prepare(`
+      UPDATE story_beliefs
+      SET object_id = ?, confidence = ?, updated_at = ?
+      WHERE id = ?
+    `).run(belief.objectId, belief.confidence, now, existing.id);
+  } else {
+    db.prepare(`
+      INSERT INTO story_beliefs (
+        id, actor_id, subject_id, predicate, object_id, confidence, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      uid("sb"),
+      belief.actorId,
+      belief.subjectId,
+      belief.predicate,
+      belief.objectId,
+      belief.confidence,
+      now,
+      now,
+    );
+  }
+
+  return belief;
+}
+
+export function listStoryBeliefsForActor(db: DatabaseSyncInstance, actorId: string): StoryBelief[] {
+  const rows = db.prepare(`
+    SELECT actor_id, subject_id, predicate, object_id, confidence
+    FROM story_beliefs
+    WHERE actor_id = ?
+    ORDER BY updated_at DESC, created_at DESC
+  `).all(actorId) as Array<{
+    actor_id: string;
+    subject_id: string;
+    predicate: string;
+    object_id: string;
+    confidence: number;
+  }>;
+
+  return rows.map((row) => ({
+    actorId: row.actor_id,
+    subjectId: row.subject_id,
+    predicate: row.predicate,
+    objectId: row.object_id,
+    confidence: row.confidence,
+    actorKind: inferActorKind(row.actor_id),
+  }));
+}
+
+export function listObservableActors(db: DatabaseSyncInstance): string[] {
+  const rows = db.prepare(`
+    SELECT id FROM story_entities
+    WHERE kind = 'character' AND status = 'active'
+    ORDER BY created_at ASC, id ASC
+  `).all() as Array<{ id: string }>;
+  return rows.map((row) => row.id);
+}
+
+export function listObservableFactions(db: DatabaseSyncInstance): string[] {
+  const rows = db.prepare(`
+    SELECT id FROM story_entities
+    WHERE kind = 'faction' AND status = 'active'
+    ORDER BY created_at ASC, id ASC
+  `).all() as Array<{ id: string }>;
+  return rows.map((row) => row.id);
+}
+
+export interface StoryStoredEvent {
+  id: string;
+  turnNumber: number;
+  type: string;
+  summary: string;
+  payload: unknown;
+  createdAt: number;
+}
+
+export interface StoryStoredRelation {
+  id: string;
+  fromId: string;
+  relation: string;
+  toId: string;
+  visibility: string;
+  intensity: number;
+  sourceEventId?: string;
+}
+
+export function listEventsForPov(
+  db: DatabaseSyncInstance,
+  _povId: string,
+  eventIds: string[],
+): StoryStoredEvent[] {
+  if (eventIds.length === 0) return [];
+  const placeholders = eventIds.map(() => "?").join(",");
+  const rows = db.prepare(`
+    SELECT id, turn_number, type, summary, payload, created_at
+    FROM story_events
+    WHERE id IN (${placeholders})
+    ORDER BY created_at ASC, id ASC
+  `).all(...eventIds) as Array<{
+    id: string;
+    turn_number: number;
+    type: string;
+    summary: string;
+    payload: string;
+    created_at: number;
+  }>;
+
+  return rows.map((row) => ({
+    id: row.id,
+    turnNumber: row.turn_number,
+    type: row.type,
+    summary: row.summary,
+    payload: JSON.parse(row.payload),
+    createdAt: row.created_at,
+  }));
+}
+
+export function listRelationshipsForPov(db: DatabaseSyncInstance, povId: string): StoryStoredRelation[] {
+  const rows = db.prepare(`
+    SELECT id, from_id, relation, to_id, visibility, intensity, source_event_id
+    FROM story_relations
+    WHERE from_id = ? OR to_id = ?
+    ORDER BY updated_at DESC, id ASC
+  `).all(povId, povId) as Array<{
+    id: string;
+    from_id: string;
+    relation: string;
+    to_id: string;
+    visibility: string;
+    intensity: number;
+    source_event_id: string | null;
+  }>;
+
+  return rows.map((row) => ({
+    id: row.id,
+    fromId: row.from_id,
+    relation: row.relation,
+    toId: row.to_id,
+    visibility: row.visibility,
+    intensity: row.intensity,
+    sourceEventId: row.source_event_id ?? undefined,
+  }));
+}
+
+export function listActiveThreadsForEvents(db: DatabaseSyncInstance, eventIds: string[]): Array<Record<string, unknown>> {
+  if (eventIds.length === 0) return [];
+  const events = listEventsForPov(db, "", eventIds);
+  const threadIds = new Set<string>();
+
+  for (const event of events) {
+    const payload = event.payload as { threadId?: string; threadIds?: string[] } | null;
+    if (payload?.threadId) threadIds.add(payload.threadId);
+    if (Array.isArray(payload?.threadIds)) {
+      for (const threadId of payload.threadIds) {
+        if (threadId) threadIds.add(threadId);
+      }
+    }
+  }
+
+  if (threadIds.size === 0) return [];
+  const threadIdList = Array.from(threadIds);
+  const placeholders = threadIdList.map(() => "?").join(",");
+  const rows = db.prepare(`
+    SELECT payload FROM story_entities
+    WHERE kind = 'thread' AND status = 'active' AND id IN (${placeholders})
+    ORDER BY created_at ASC, id ASC
+  `).all(...threadIdList) as Array<{ payload: string }>;
+
+  return rows.map((row) => JSON.parse(row.payload) as Record<string, unknown>);
+}
+
+export function listNarrativeSignals(
+  db: DatabaseSyncInstance,
+  kind: string,
+  povId: string,
+): StoryNarrativeSignal[] {
+  const rows = db.prepare(`
+    SELECT id, kind, subject_id, related_id, weight, payload_json, status, created_at, updated_at
+    FROM story_narrative_signals
+    WHERE kind = ? AND status = 'active' AND (subject_id = ? OR related_id = ?)
+    ORDER BY weight DESC, updated_at DESC
+  `).all(kind, povId, povId) as Array<{
+    id: string;
+    kind: string;
+    subject_id: string;
+    related_id: string | null;
+    weight: number;
+    payload_json: string;
+    status: string;
+    created_at: number;
+    updated_at: number;
+  }>;
+
+  return rows.map((row) => ({
+    id: row.id,
+    kind: row.kind,
+    subjectId: row.subject_id,
+    relatedId: row.related_id ?? undefined,
+    weight: row.weight,
+    payloadJson: row.payload_json,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
 }
