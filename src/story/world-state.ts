@@ -1,31 +1,103 @@
 import type { DatabaseSyncInstance } from "@photostructure/sqlite";
 import { createSeedWorld } from "./bootstrap.ts";
-import type { SeedWorld, StoryCharacter } from "./types.ts";
-
-const STORY_WORLD_KEY = "seed-world-v1";
+import type { SeedWorld, StoryCharacter, StoryThread } from "./types.ts";
+import {
+  insertStoryEntities,
+  insertStoryEvent,
+  insertStoryRelation,
+  insertStoryTurn,
+  listStoryEntitiesByKind,
+  type StoryNarrativeSignal,
+  type StoryResolvedEvent,
+  type StoryTurnRecord,
+  upsertStoryNarrativeSignal,
+} from "../store/store.ts";
 
 export interface StoryWorldState {
   listCharacters(): StoryCharacter[];
+  listThreads(): StoryThread[];
   saveSeed(seed: SeedWorld): void;
+  recordTurn(summary: StoryTurnRecord): void;
+  recordEvents(events: StoryResolvedEvent[]): void;
+  upsertNarrativeSignal(signal: StoryNarrativeSignal): void;
+  upsertNarrativeSignals(signals: StoryNarrativeSignal[]): void;
 }
 
 export function createStoryWorldState(db: DatabaseSyncInstance): StoryWorldState {
-  ensureStoryStateTable(db);
-
   return {
     listCharacters() {
-      return readSeedWorld(db)?.characters ?? [];
+      return readSeedWorld(db)?.characters ?? listStoryEntitiesByKind<StoryCharacter>(db, "character");
+    },
+    listThreads() {
+      return readSeedWorld(db)?.threads ?? listStoryEntitiesByKind<StoryThread>(db, "thread");
     },
     saveSeed(seed) {
-      const payload = JSON.stringify(seed);
-      const now = Date.now();
-      db.prepare(`
-        INSERT INTO story_world_state (state_key, payload, updated_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(state_key) DO UPDATE SET
-          payload = excluded.payload,
-          updated_at = excluded.updated_at
-      `).run(STORY_WORLD_KEY, payload, now);
+      insertStoryEntities(db, seed.characters, "character");
+      insertStoryEntities(db, seed.factions, "faction");
+      insertStoryEntities(db, seed.locations, "location");
+      insertStoryEntities(db, seed.artifacts, "artifact");
+      insertStoryEntities(db, seed.threads, "thread");
+      insertStoryEntities(db, seed.rules, "rule");
+
+      insertStoryRelation(db, {
+        id: "sr-li-yao-knows-su-wan",
+        fromId: "c-li-yao",
+        relation: "KNOWS",
+        toId: "c-su-wan",
+        visibility: "public",
+      });
+      insertStoryRelation(db, {
+        id: "sr-li-yao-feels-su-wan",
+        fromId: "c-li-yao",
+        relation: "FEELS",
+        toId: "c-su-wan",
+        visibility: "private",
+        intensity: 0.6,
+      });
+      insertStoryRelation(db, {
+        id: "sr-ember-seal-owns-shen-mo",
+        fromId: "a-ember-seal",
+        relation: "OWNS",
+        toId: "c-shen-mo",
+        visibility: "public",
+      });
+
+      upsertStoryNarrativeSignal(db, {
+        id: "ns-secret-bloodline",
+        kind: "secret",
+        subjectId: "c-li-yao",
+        relatedId: "t-secret-realm",
+        weight: 0.8,
+        payloadJson: JSON.stringify({ secret: "ancient-bloodline" }),
+        status: "active",
+      });
+      upsertStoryNarrativeSignal(db, {
+        id: "ns-realm-tension",
+        kind: "tension",
+        subjectId: "f-cloud-sword",
+        relatedId: "t-secret-realm",
+        weight: 0.7,
+        payloadJson: JSON.stringify({ cause: "inheritance-dispute" }),
+        status: "active",
+      });
+
+      saveLegacySeedWorldBlob(db, seed);
+    },
+    recordTurn(summary) {
+      insertStoryTurn(db, summary);
+    },
+    recordEvents(events) {
+      for (const event of events) {
+        insertStoryEvent(db, event);
+      }
+    },
+    upsertNarrativeSignal(signal) {
+      upsertStoryNarrativeSignal(db, signal);
+    },
+    upsertNarrativeSignals(signals) {
+      for (const signal of signals) {
+        upsertStoryNarrativeSignal(db, signal);
+      }
     },
   };
 }
@@ -38,7 +110,9 @@ export function initializeStoryWorld(db: DatabaseSyncInstance): StoryWorldState 
   return world;
 }
 
-function ensureStoryStateTable(db: DatabaseSyncInstance) {
+const STORY_WORLD_KEY = "seed-world-v1";
+
+function saveLegacySeedWorldBlob(db: DatabaseSyncInstance, seed: SeedWorld): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS story_world_state (
       state_key   TEXT PRIMARY KEY,
@@ -46,12 +120,25 @@ function ensureStoryStateTable(db: DatabaseSyncInstance) {
       updated_at  INTEGER NOT NULL
     )
   `);
+
+  db.prepare(`
+    INSERT INTO story_world_state (state_key, payload, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(state_key) DO UPDATE SET
+      payload = excluded.payload,
+      updated_at = excluded.updated_at
+  `).run(STORY_WORLD_KEY, JSON.stringify(seed), Date.now());
 }
 
 function readSeedWorld(db: DatabaseSyncInstance): SeedWorld | null {
-  const row = db.prepare(
-    "SELECT payload FROM story_world_state WHERE state_key = ?",
-  ).get(STORY_WORLD_KEY) as { payload?: unknown } | undefined;
+  let row: { payload?: unknown } | undefined;
+  try {
+    row = db.prepare(
+      "SELECT payload FROM story_world_state WHERE state_key = ?",
+    ).get(STORY_WORLD_KEY) as { payload?: unknown } | undefined;
+  } catch {
+    return null;
+  }
 
   if (!row || typeof row.payload !== "string") {
     return null;

@@ -34,7 +34,7 @@ export function closeDb(): void {
 function migrate(db: DatabaseSyncInstance): void {
   db.exec(`CREATE TABLE IF NOT EXISTS _migrations (v INTEGER PRIMARY KEY, at INTEGER NOT NULL)`);
   const cur = (db.prepare("SELECT MAX(v) as v FROM _migrations").get() as any)?.v ?? 0;
-  const steps = [m1_core, m2_messages, m3_signals, m4_fts5, m5_vectors, m6_communities];
+  const steps = [m1_core, m2_messages, m3_signals, m4_fts5, m5_vectors, m6_communities, m7_story];
   for (let i = cur; i < steps.length; i++) {
     steps[i](db);
     db.prepare("INSERT INTO _migrations (v,at) VALUES (?,?)").run(i + 1, Date.now());
@@ -168,6 +168,95 @@ function m6_communities(db: DatabaseSyncInstance): void {
       node_count  INTEGER NOT NULL DEFAULT 0,
       embedding   BLOB,
       created_at  INTEGER NOT NULL,
+      updated_at  INTEGER NOT NULL
+    );
+  `);
+}
+
+// ─── 故事状态持久化 ──────────────────────────────────────────
+
+function m7_story(db: DatabaseSyncInstance): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS story_entities (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      name TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS story_relations (
+      id TEXT PRIMARY KEY,
+      from_id TEXT NOT NULL,
+      relation TEXT NOT NULL,
+      to_id TEXT NOT NULL,
+      visibility TEXT NOT NULL DEFAULT 'public',
+      intensity REAL NOT NULL DEFAULT 1,
+      source_event_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS story_events (
+      id TEXT PRIMARY KEY,
+      turn_number INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS story_turns (
+      turn_number INTEGER PRIMARY KEY,
+      summary TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS story_beliefs (
+      id TEXT PRIMARY KEY,
+      actor_id TEXT NOT NULL,
+      subject_id TEXT NOT NULL,
+      predicate TEXT NOT NULL,
+      object_id TEXT NOT NULL,
+      confidence REAL NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS story_chapters (
+      id TEXT PRIMARY KEY,
+      turn_number INTEGER NOT NULL,
+      pov_id TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      prose TEXT NOT NULL,
+      claims_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS story_narrative_signals (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      subject_id TEXT NOT NULL,
+      related_id TEXT,
+      weight REAL NOT NULL DEFAULT 1,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS story_director_state (
+      key TEXT PRIMARY KEY,
+      value_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS story_world_state (
+      state_key   TEXT PRIMARY KEY,
+      payload     TEXT NOT NULL,
       updated_at  INTEGER NOT NULL
     );
   `);

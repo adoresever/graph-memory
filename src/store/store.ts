@@ -641,3 +641,178 @@ export function pruneCommunitySummaries(db: DatabaseSyncInstance): number {
   `).run();
   return result.changes;
 }
+
+// ─── Story world-state CRUD ─────────────────────────────────
+
+export type StoryEntityKind = "character" | "faction" | "location" | "artifact" | "thread" | "rule";
+
+export interface StoryTurnRecord {
+  turnNumber: number;
+  summary: string;
+  payload: unknown;
+}
+
+export interface StoryResolvedEvent {
+  id?: string;
+  turnNumber: number;
+  type: string;
+  summary: string;
+  payload: unknown;
+  createdAt?: number;
+}
+
+export interface StoryNarrativeSignal {
+  id: string;
+  kind: string;
+  subjectId: string;
+  relatedId?: string;
+  weight?: number;
+  payloadJson: string;
+  status?: string;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export function insertStoryEntities<T extends { id: string; name: string; status?: string }>(
+  db: DatabaseSyncInstance,
+  entities: T[],
+  kind: StoryEntityKind,
+): void {
+  const now = Date.now();
+  const stmt = db.prepare(`
+    INSERT INTO story_entities (id, kind, name, payload, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      kind = excluded.kind,
+      name = excluded.name,
+      payload = excluded.payload,
+      status = excluded.status,
+      updated_at = excluded.updated_at
+  `);
+
+  db.exec("BEGIN");
+  try {
+    for (const entity of entities) {
+      stmt.run(
+        entity.id,
+        kind,
+        entity.name,
+        JSON.stringify(entity),
+        entity.status ?? "active",
+        now,
+        now,
+      );
+    }
+    db.exec("COMMIT");
+  } catch (e) {
+    db.exec("ROLLBACK");
+    throw e;
+  }
+}
+
+export function listStoryEntitiesByKind<T>(db: DatabaseSyncInstance, kind: StoryEntityKind): T[] {
+  const rows = db.prepare(`
+    SELECT payload FROM story_entities
+    WHERE kind = ? AND status = 'active'
+    ORDER BY created_at ASC, id ASC
+  `).all(kind) as Array<{ payload: string }>;
+
+  const items: T[] = [];
+  for (const row of rows) {
+    try {
+      items.push(JSON.parse(row.payload) as T);
+    } catch {
+      // Ignore malformed payload rows and let higher-level callers decide whether to reseed.
+    }
+  }
+  return items;
+}
+
+export function insertStoryRelation(
+  db: DatabaseSyncInstance,
+  relation: {
+    id?: string;
+    fromId: string;
+    relation: string;
+    toId: string;
+    visibility?: string;
+    intensity?: number;
+    sourceEventId?: string;
+  },
+): void {
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO story_relations (
+      id, from_id, relation, to_id, visibility, intensity, source_event_id, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      from_id = excluded.from_id,
+      relation = excluded.relation,
+      to_id = excluded.to_id,
+      visibility = excluded.visibility,
+      intensity = excluded.intensity,
+      source_event_id = excluded.source_event_id,
+      updated_at = excluded.updated_at
+  `).run(
+    relation.id ?? uid("sr"),
+    relation.fromId,
+    relation.relation,
+    relation.toId,
+    relation.visibility ?? "public",
+    relation.intensity ?? 1,
+    relation.sourceEventId ?? null,
+    now,
+    now,
+  );
+}
+
+export function insertStoryTurn(db: DatabaseSyncInstance, turn: StoryTurnRecord): void {
+  db.prepare(`
+    INSERT INTO story_turns (turn_number, summary, payload, created_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(turn_number) DO UPDATE SET
+      summary = excluded.summary,
+      payload = excluded.payload
+  `).run(turn.turnNumber, turn.summary, JSON.stringify(turn.payload), Date.now());
+}
+
+export function insertStoryEvent(db: DatabaseSyncInstance, event: StoryResolvedEvent): void {
+  db.prepare(`
+    INSERT INTO story_events (id, turn_number, type, summary, payload, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    event.id ?? uid("sev"),
+    event.turnNumber,
+    event.type,
+    event.summary,
+    JSON.stringify(event.payload),
+    event.createdAt ?? Date.now(),
+  );
+}
+
+export function upsertStoryNarrativeSignal(db: DatabaseSyncInstance, signal: StoryNarrativeSignal): void {
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO story_narrative_signals (
+      id, kind, subject_id, related_id, weight, payload_json, status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      kind = excluded.kind,
+      subject_id = excluded.subject_id,
+      related_id = excluded.related_id,
+      weight = excluded.weight,
+      payload_json = excluded.payload_json,
+      status = excluded.status,
+      updated_at = excluded.updated_at
+  `).run(
+    signal.id,
+    signal.kind,
+    signal.subjectId,
+    signal.relatedId ?? null,
+    signal.weight ?? 1,
+    signal.payloadJson,
+    signal.status ?? "active",
+    signal.createdAt ?? now,
+    signal.updatedAt ?? now,
+  );
+}
