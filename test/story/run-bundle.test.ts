@@ -6,7 +6,7 @@ import { createTestDb } from "../helpers.ts";
 import { initializeStoryWorld } from "../../src/story/world-state.ts";
 import { runStoryLoop } from "../../src/story/runtime/run-loop.ts";
 import { createStubStoryModelClient } from "../../src/story/runtime/stub-model.ts";
-import { writeRunBundle } from "../../src/story/runtime/run-bundle.ts";
+import { writeRunBundle } from "../../src/story/output/run-bundle.ts";
 
 describe("story run bundle", () => {
   it("writes the complete bundle layout for a short stubbed run", async () => {
@@ -20,7 +20,14 @@ describe("story run bundle", () => {
         model: createStubStoryModelClient(),
       });
 
-      const bundleDir = await writeRunBundle(db, loopResult, { outputDir, runId: "test-run-001" });
+      const bundleDir = await writeRunBundle(db, loopResult, {
+        outputRoot: outputDir,
+        runMetadata: {
+          runId: "test-run-001",
+          turns: 3,
+          chapterEveryTurns: 3,
+        },
+      });
 
       expect(existsSync(path.join(bundleDir, "index.json"))).toBe(true);
       expect(existsSync(path.join(bundleDir, "world-log.jsonl"))).toBe(true);
