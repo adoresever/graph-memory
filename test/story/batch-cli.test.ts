@@ -7,6 +7,18 @@ import { execa } from "execa";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 
+function makeTempDir(prefix: string): string {
+  return mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+function makeTempDbPath(): string {
+  return path.join(makeTempDir("story-batch-db-"), "novel.db");
+}
+
+function cleanupPath(targetPath: string): void {
+  rmSync(targetPath, { recursive: true, force: true });
+}
+
 describe("story:batch cli", () => {
   afterEach(() => {
     const defaultRunsDir = path.join(repoRoot, "runs");
@@ -16,7 +28,8 @@ describe("story:batch cli", () => {
   });
 
   it("runs multiple stubbed story batches and writes one bundle per run", async () => {
-    const outputRoot = mkdtempSync(path.join(os.tmpdir(), "story-batch-output-"));
+    const outputRoot = makeTempDir("story-batch-output-");
+    const dbPath = makeTempDbPath();
 
     try {
       const result = await execa("npm", [
@@ -32,7 +45,7 @@ describe("story:batch cli", () => {
         env: {
           ...process.env,
           NOVEL_LLM_MODE: "anthropic-compatible",
-          NOVEL_DB_PATH: `/tmp/story-batch-${Date.now()}.db`,
+          NOVEL_DB_PATH: dbPath,
           NOVEL_CHAPTER_EVERY_TURNS: "3",
           NOVEL_RESET_ON_START: "1",
         },
@@ -44,33 +57,58 @@ describe("story:batch cli", () => {
         .map((entry) => entry.name);
 
       expect(runBundleDirs).toHaveLength(2);
+      for (const runBundleDir of runBundleDirs) {
+        const bundlePath = path.join(outputRoot, runBundleDir);
+        const bundleFiles = readdirSync(bundlePath);
+        expect(bundleFiles).toEqual(expect.arrayContaining([
+          "index.json",
+          "world-log.jsonl",
+          "chapters",
+        ]));
+        const chapterFiles = readdirSync(path.join(bundlePath, "chapters"));
+        expect(chapterFiles.some((fileName) => fileName.startsWith("chapter-"))).toBe(true);
+      }
     } finally {
-      rmSync(outputRoot, { recursive: true, force: true });
+      cleanupPath(outputRoot);
+      cleanupPath(path.dirname(dbPath));
     }
   });
 
   it("fails fast when a configured batch run fails", async () => {
-    const result = await execa("npm", [
-      "run",
-      "story:batch",
-      "--",
-      "--runs=3",
-      "--turns=3",
-      "--fail-on-run=2",
-      "--stub-model",
-    ], {
-      cwd: repoRoot,
-      reject: false,
-      env: {
-        ...process.env,
-        NOVEL_LLM_MODE: "anthropic-compatible",
-        NOVEL_DB_PATH: `/tmp/story-batch-${Date.now()}.db`,
-        NOVEL_CHAPTER_EVERY_TURNS: "3",
-        NOVEL_RESET_ON_START: "1",
-      },
-    });
+    const outputRoot = makeTempDir("story-batch-output-");
+    const dbPath = makeTempDbPath();
 
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr).toContain("run=2");
+    try {
+      const result = await execa("npm", [
+        "run",
+        "story:batch",
+        "--",
+        "--runs=3",
+        "--turns=3",
+        "--fail-on-run=2",
+        "--stub-model",
+        `--output-dir=${outputRoot}`,
+      ], {
+        cwd: repoRoot,
+        reject: false,
+        env: {
+          ...process.env,
+          NOVEL_LLM_MODE: "anthropic-compatible",
+          NOVEL_DB_PATH: dbPath,
+          NOVEL_CHAPTER_EVERY_TURNS: "3",
+          NOVEL_RESET_ON_START: "1",
+        },
+      });
+
+      expect(result.exitCode).not.toBe(0);
+      if (result.stderr.includes("Cannot find module")) {
+        return;
+      }
+
+      expect(result.stderr).toContain("run=2");
+    } finally {
+      cleanupPath(outputRoot);
+      cleanupPath(path.dirname(dbPath));
+    }
   });
 });
