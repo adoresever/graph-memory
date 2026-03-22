@@ -10,9 +10,18 @@ import { createTestDb } from "../helpers.ts";
 
 describe("chapter generator", () => {
   it("generates prose from a bounded chapter packet", async () => {
-    const output = await generateChapter(fakeModel, chapterPacket);
+    const capture = createCapturingChapterModel();
+    const output = await generateChapter(capture.model, chapterPacket);
     expect(output.prose.length).toBeGreaterThan(100);
     expect(output.claims.length).toBeGreaterThan(0);
+    expect(capture.lastPacket).toBeDefined();
+    expect(capture.lastPacket?.focus).toContain("c-li-yao");
+    expect(capture.lastPacket?.summary).toContain("\"relationshipHistory\"");
+    expect(capture.lastPacket?.summary).toContain("\"unresolvedSecrets\"");
+    expect(capture.lastPacket?.summary).toContain("\"activeTensionSummary\"");
+    expect(capture.lastPacket?.summary).toContain("\"toneTarget\":\"wuxia intrigue\"");
+    expect(capture.lastPacket?.summary).toContain("\"pacingTarget\":\"tight and rising\"");
+    expect(capture.lastPacket?.summary).toContain("\"chapterEndHook\":\"the spirit tablet splits open at midnight\"");
   });
 
   it("assembles a bounded chapter packet from recall and director state", () => {
@@ -161,3 +170,19 @@ const fakeModel = {
     evidenceSpan: "felt the Ember Seal answer like a second heartbeat",
   }],
 };
+
+function createCapturingChapterModel() {
+  let lastPacket: { turnNumber: number; focus: string; summary?: string } | undefined;
+  return {
+    get lastPacket() {
+      return lastPacket;
+    },
+    model: {
+      generateChapter: async (packet: { turnNumber: number; focus: string; summary?: string }) => {
+        lastPacket = packet;
+        return fakeModel.generateChapter();
+      },
+      extractClaims: fakeModel.extractClaims,
+    },
+  };
+}

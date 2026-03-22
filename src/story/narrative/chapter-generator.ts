@@ -59,11 +59,8 @@ export async function generateChapter(
   model: Pick<StoryModelClient, "generateChapter" | "extractClaims">,
   packet: ChapterPacket,
 ): Promise<GeneratedChapterOutput> {
-  const prose = await model.generateChapter({
-    turnNumber: packet.turnNumber,
-    focus: `${packet.primaryPovId}:${packet.eventSummaries.join(" | ")}`,
-    summary: summarizeChapter(packet),
-  });
+  const runtimePacket = toRuntimeChapterPacket(packet);
+  const prose = await model.generateChapter(runtimePacket);
   return {
     prose,
     summary: summarizeChapter(packet),
@@ -102,6 +99,28 @@ export function summarizeSignals(signals: StoryNarrativeSignal[]): string[] {
 function summarizeChapter(packet: ChapterPacket): string {
   const lead = packet.eventSummaries.slice(0, 2).join(" ");
   return `${lead} Hook: ${packet.chapterEndHook}`;
+}
+
+function toRuntimeChapterPacket(packet: ChapterPacket): { turnNumber: number; focus: string; summary: string } {
+  const eventIds = packet.selectedEvents
+    .map((event) => event.id)
+    .filter((id): id is string => typeof id === "string");
+  const focus = `${packet.primaryPovId}|events:${eventIds.join(",") || "none"}|secondary:${packet.secondaryPovId ?? "none"}`;
+  const summary = JSON.stringify({
+    eventSummaries: packet.eventSummaries,
+    stateDeltas: packet.stateDeltas,
+    relationshipHistory: packet.relationshipHistory,
+    unresolvedSecrets: packet.unresolvedSecrets,
+    activeTensionSummary: packet.activeTensionSummary,
+    toneTarget: packet.toneTarget,
+    pacingTarget: packet.pacingTarget,
+    chapterEndHook: packet.chapterEndHook,
+  });
+  return {
+    turnNumber: packet.turnNumber,
+    focus,
+    summary,
+  };
 }
 
 async function extractChapterClaims(

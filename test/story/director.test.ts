@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { StoryResolvedEvent, StoryNarrativeSignal } from "../../src/store/store.ts";
 import { selectChapterFocus, type EnsembleHeatEntry } from "../../src/story/narrative/director.ts";
+import type { ChapterSelection as RuntimeChapterSelection, NarrativeDirectorInput as RuntimeNarrativeDirectorInput } from "../../src/story/runtime/model-client.ts";
 import type { StoryThread } from "../../src/story/types.ts";
 
 describe("narrative director", () => {
@@ -79,6 +80,9 @@ const fixtureEnsemble: EnsembleHeatEntry[] = [
 
 function fakeDirectorModel() {
   return {
-    rerankChapterFocus: async (candidates: Array<{ id: string }>) => candidates,
+    rerankChapterFocus: async (
+      candidates: RuntimeChapterSelection[],
+      _context: RuntimeNarrativeDirectorInput,
+    ): Promise<RuntimeChapterSelection[]> => candidates,
   };
 }
