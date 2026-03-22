@@ -20,6 +20,51 @@ export interface LlmConfig {
 
 export type CompleteFn = (system: string, user: string) => Promise<string>;
 
+export interface StoryCompleteOptions {
+  baseURL: string;
+  model: string;
+  apiKey: string;
+}
+
+export function createStoryCompleteFn(
+  provider: string,
+  model: string,
+  options: StoryCompleteOptions,
+): CompleteFn {
+  return createCompleteFn(provider, model, options);
+}
+
+export function createAnthropicCompatibleCompleteFn(
+  options: StoryCompleteOptions,
+): CompleteFn {
+  const baseURL = (options.baseURL || "https://api.anthropic.com").replace(/\/+$/, "");
+  if (!options.apiKey) {
+    throw new Error("[graph-memory] Anthropic mode requires NOVEL_LLM_API_KEY in runtime config");
+  }
+
+  return async (system, user) => {
+    const res = await fetch(`${baseURL}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": options.apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: options.model,
+        max_tokens: 4096,
+        system,
+        messages: [{ role: "user", content: user }],
+      }),
+    });
+    if (!res.ok) {
+      throw new Error(`[graph-memory] Anthropic API ${res.status}`);
+    }
+    const data = (await res.json() as any);
+    return data.content?.[0]?.text ?? "";
+  };
+}
+
 export function createCompleteFn(
   provider: string,
   model: string,
