@@ -203,6 +203,13 @@ export function createTestDb(): DatabaseSyncInstance {
       value_json TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
+
+    CREATE INDEX IF NOT EXISTS ix_story_entities_kind_status ON story_entities(kind, status);
+    CREATE INDEX IF NOT EXISTS ix_story_relations_from ON story_relations(from_id);
+    CREATE INDEX IF NOT EXISTS ix_story_relations_to ON story_relations(to_id);
+    CREATE INDEX IF NOT EXISTS ix_story_events_turn_number ON story_events(turn_number);
+    CREATE INDEX IF NOT EXISTS ix_story_narrative_signals_subject_kind_status
+      ON story_narrative_signals(subject_id, kind, status);
   `);
 
   return db;

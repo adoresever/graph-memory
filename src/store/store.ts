@@ -673,7 +673,7 @@ export interface StoryNarrativeSignal {
   updatedAt?: number;
 }
 
-export function insertStoryEntities<T extends { id: string; name: string; status?: string }>(
+export function insertStoryEntities<T extends { id: string; name: string }>(
   db: DatabaseSyncInstance,
   entities: T[],
   kind: StoryEntityKind,
@@ -690,40 +690,51 @@ export function insertStoryEntities<T extends { id: string; name: string; status
       updated_at = excluded.updated_at
   `);
 
-  db.exec("BEGIN");
-  try {
-    for (const entity of entities) {
-      stmt.run(
-        entity.id,
-        kind,
-        entity.name,
-        JSON.stringify(entity),
-        entity.status ?? "active",
-        now,
-        now,
-      );
-    }
-    db.exec("COMMIT");
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
+  for (const entity of entities) {
+    stmt.run(
+      entity.id,
+      kind,
+      entity.name,
+      JSON.stringify(entity),
+      "active",
+      now,
+      now,
+    );
   }
 }
 
 export function listStoryEntitiesByKind<T>(db: DatabaseSyncInstance, kind: StoryEntityKind): T[] {
   const rows = db.prepare(`
-    SELECT payload FROM story_entities
+    SELECT id, payload FROM story_entities
     WHERE kind = ? AND status = 'active'
     ORDER BY created_at ASC, id ASC
-  `).all(kind) as Array<{ payload: string }>;
+  `).all(kind) as Array<{ id: string; payload: string }>;
 
   const items: T[] = [];
+  const malformedIds: string[] = [];
   for (const row of rows) {
     try {
       items.push(JSON.parse(row.payload) as T);
     } catch {
-      // Ignore malformed payload rows and let higher-level callers decide whether to reseed.
+      malformedIds.push(row.id);
     }
+  }
+
+  if (malformedIds.length > 0) {
+    const deleteStmt = db.prepare("DELETE FROM story_entities WHERE id = ?");
+    db.exec("BEGIN");
+    try {
+      for (const id of malformedIds) {
+        deleteStmt.run(id);
+      }
+      db.exec("COMMIT");
+    } catch (e) {
+      db.exec("ROLLBACK");
+      throw e;
+    }
+    console.warn(
+      `[story-world-state] removed ${malformedIds.length} malformed ${kind} entities from persistence`,
+    );
   }
   return items;
 }

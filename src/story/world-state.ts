@@ -32,69 +32,90 @@ export function createStoryWorldState(db: DatabaseSyncInstance): StoryWorldState
       return listStoryEntitiesByKind<StoryThread>(db, "thread");
     },
     saveSeed(seed) {
-      insertStoryEntities(db, seed.characters, "character");
-      insertStoryEntities(db, seed.factions, "faction");
-      insertStoryEntities(db, seed.locations, "location");
-      insertStoryEntities(db, seed.artifacts, "artifact");
-      insertStoryEntities(db, seed.threads, "thread");
-      insertStoryEntities(db, seed.rules, "rule");
+      db.exec("BEGIN");
+      try {
+        insertStoryEntities(db, seed.characters, "character");
+        insertStoryEntities(db, seed.factions, "faction");
+        insertStoryEntities(db, seed.locations, "location");
+        insertStoryEntities(db, seed.artifacts, "artifact");
+        insertStoryEntities(db, seed.threads, "thread");
+        insertStoryEntities(db, seed.rules, "rule");
 
-      insertStoryRelation(db, {
-        id: "sr-li-yao-knows-su-wan",
-        fromId: "c-li-yao",
-        relation: "KNOWS",
-        toId: "c-su-wan",
-        visibility: "public",
-      });
-      insertStoryRelation(db, {
-        id: "sr-li-yao-feels-su-wan",
-        fromId: "c-li-yao",
-        relation: "FEELS",
-        toId: "c-su-wan",
-        visibility: "private",
-        intensity: 0.6,
-      });
-      insertStoryRelation(db, {
-        id: "sr-ember-seal-owns-shen-mo",
-        fromId: "a-ember-seal",
-        relation: "OWNS",
-        toId: "c-shen-mo",
-        visibility: "public",
-      });
+        insertStoryRelation(db, {
+          id: "sr-li-yao-knows-su-wan",
+          fromId: "c-li-yao",
+          relation: "KNOWS",
+          toId: "c-su-wan",
+          visibility: "public",
+        });
+        insertStoryRelation(db, {
+          id: "sr-li-yao-feels-su-wan",
+          fromId: "c-li-yao",
+          relation: "FEELS",
+          toId: "c-su-wan",
+          visibility: "private",
+          intensity: 0.6,
+        });
+        insertStoryRelation(db, {
+          id: "sr-ember-seal-owns-shen-mo",
+          fromId: "a-ember-seal",
+          relation: "OWNS",
+          toId: "c-shen-mo",
+          visibility: "public",
+        });
 
-      upsertStoryNarrativeSignal(db, {
-        id: "ns-secret-bloodline",
-        kind: "secret",
-        subjectId: "c-li-yao",
-        relatedId: "t-secret-realm",
-        weight: 0.8,
-        payloadJson: JSON.stringify({ secret: "ancient-bloodline" }),
-        status: "active",
-      });
-      upsertStoryNarrativeSignal(db, {
-        id: "ns-realm-tension",
-        kind: "tension",
-        subjectId: "f-cloud-sword",
-        relatedId: "t-secret-realm",
-        weight: 0.7,
-        payloadJson: JSON.stringify({ cause: "inheritance-dispute" }),
-        status: "active",
-      });
+        upsertStoryNarrativeSignal(db, {
+          id: "ns-secret-bloodline",
+          kind: "secret",
+          subjectId: "c-li-yao",
+          relatedId: "t-secret-realm",
+          weight: 0.8,
+          payloadJson: JSON.stringify({ secret: "ancient-bloodline" }),
+          status: "active",
+        });
+        upsertStoryNarrativeSignal(db, {
+          id: "ns-realm-tension",
+          kind: "tension",
+          subjectId: "f-cloud-sword",
+          relatedId: "t-secret-realm",
+          weight: 0.7,
+          payloadJson: JSON.stringify({ cause: "inheritance-dispute" }),
+          status: "active",
+        });
+        db.exec("COMMIT");
+      } catch (e) {
+        db.exec("ROLLBACK");
+        throw e;
+      }
     },
     recordTurn(summary) {
       insertStoryTurn(db, summary);
     },
     recordEvents(events) {
-      for (const event of events) {
-        insertStoryEvent(db, event);
+      db.exec("BEGIN");
+      try {
+        for (const event of events) {
+          insertStoryEvent(db, event);
+        }
+        db.exec("COMMIT");
+      } catch (e) {
+        db.exec("ROLLBACK");
+        throw e;
       }
     },
     upsertNarrativeSignal(signal) {
       upsertStoryNarrativeSignal(db, signal);
     },
     upsertNarrativeSignals(signals) {
-      for (const signal of signals) {
-        upsertStoryNarrativeSignal(db, signal);
+      db.exec("BEGIN");
+      try {
+        for (const signal of signals) {
+          upsertStoryNarrativeSignal(db, signal);
+        }
+        db.exec("COMMIT");
+      } catch (e) {
+        db.exec("ROLLBACK");
+        throw e;
       }
     },
   };
