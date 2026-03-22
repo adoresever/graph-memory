@@ -156,4 +156,49 @@ describe("story world-state persistence", () => {
       db.close();
     }
   });
+
+  it("rolls back malformed cleanup atomically when a dependent delete fails", () => {
+    const db = createTestDb();
+    try {
+      const now = Date.now();
+      db.prepare(`
+        INSERT INTO story_entities (id, kind, name, payload, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run("c-bad-savepoint", "character", "Broken Character", "{bad-json", "active", now, now);
+      db.prepare(`
+        INSERT INTO story_relations (id, from_id, relation, to_id, visibility, intensity, source_event_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run("sr-bad-savepoint", "c-bad-savepoint", "KNOWS", "c-other", "public", 1, null, now, now);
+      db.prepare(`
+        INSERT INTO story_narrative_signals (id, kind, subject_id, related_id, weight, payload_json, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run("ns-bad-savepoint", "secret", "c-bad-savepoint", "t-other", 1, "{}", "active", now, now);
+
+      db.exec(`
+        CREATE TRIGGER story_signal_delete_blocker
+        BEFORE DELETE ON story_narrative_signals
+        BEGIN
+          SELECT RAISE(ABORT, 'signal-delete-blocked');
+        END;
+      `);
+
+      const world = createStoryWorldState(db);
+      expect(() => world.listCharacters()).toThrowError(/signal-delete-blocked/);
+
+      const relationCount = (db.prepare("SELECT COUNT(*) as c FROM story_relations WHERE id = 'sr-bad-savepoint'").get() as {
+        c: number;
+      }).c;
+      const signalCount = (db.prepare("SELECT COUNT(*) as c FROM story_narrative_signals WHERE id = 'ns-bad-savepoint'").get() as {
+        c: number;
+      }).c;
+      const entityCount = (db.prepare("SELECT COUNT(*) as c FROM story_entities WHERE id = 'c-bad-savepoint'").get() as {
+        c: number;
+      }).c;
+      expect(relationCount).toBe(1);
+      expect(signalCount).toBe(1);
+      expect(entityCount).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
 });

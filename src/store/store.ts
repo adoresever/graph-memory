@@ -722,21 +722,30 @@ export function listStoryEntitiesByKind<T>(db: DatabaseSyncInstance, kind: Story
 
   if (malformedIds.length > 0) {
     const placeholders = malformedIds.map(() => "?").join(",");
-    db.prepare(`
-      DELETE FROM story_relations
-      WHERE from_id IN (${placeholders}) OR to_id IN (${placeholders})
-    `).run(...malformedIds, ...malformedIds);
-    db.prepare(`
-      DELETE FROM story_narrative_signals
-      WHERE subject_id IN (${placeholders}) OR related_id IN (${placeholders})
-    `).run(...malformedIds, ...malformedIds);
-    db.prepare(`
-      DELETE FROM story_entities
-      WHERE id IN (${placeholders})
-    `).run(...malformedIds);
-    console.warn(
-      `[story-world-state] removed ${malformedIds.length} malformed ${kind} entities from persistence`,
-    );
+    const savepointName = "malformed_story_entity_cleanup";
+    db.exec(`SAVEPOINT ${savepointName}`);
+    try {
+      db.prepare(`
+        DELETE FROM story_relations
+        WHERE from_id IN (${placeholders}) OR to_id IN (${placeholders})
+      `).run(...malformedIds, ...malformedIds);
+      db.prepare(`
+        DELETE FROM story_narrative_signals
+        WHERE subject_id IN (${placeholders}) OR related_id IN (${placeholders})
+      `).run(...malformedIds, ...malformedIds);
+      db.prepare(`
+        DELETE FROM story_entities
+        WHERE id IN (${placeholders})
+      `).run(...malformedIds);
+      db.exec(`RELEASE SAVEPOINT ${savepointName}`);
+      console.warn(
+        `[story-world-state] removed ${malformedIds.length} malformed ${kind} entities from persistence`,
+      );
+    } catch (error) {
+      db.exec(`ROLLBACK TO SAVEPOINT ${savepointName}`);
+      db.exec(`RELEASE SAVEPOINT ${savepointName}`);
+      throw error;
+    }
   }
   return items;
 }
