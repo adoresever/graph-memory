@@ -128,9 +128,6 @@ describe("story:run cli", () => {
         env: {
           ...process.env,
           NOVEL_LLM_MODE: "anthropic-compatible",
-          NOVEL_LLM_BASE_URL: "https://api.minimaxi.com/anthropic",
-          NOVEL_LLM_MODEL: "MiniMax-M2.7",
-          NOVEL_LLM_API_KEY: "test-key",
           NOVEL_DB_PATH: tempDbPath,
           NOVEL_CHAPTER_EVERY_TURNS: "3",
           NOVEL_RESET_ON_START: "1",
