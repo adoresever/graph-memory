@@ -253,11 +253,5 @@ function m7_story(db: DatabaseSyncInstance): void {
       value_json TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
-
-    CREATE TABLE IF NOT EXISTS story_world_state (
-      state_key   TEXT PRIMARY KEY,
-      payload     TEXT NOT NULL,
-      updated_at  INTEGER NOT NULL
-    );
   `);
 }

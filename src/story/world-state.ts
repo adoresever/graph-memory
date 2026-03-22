@@ -26,10 +26,10 @@ export interface StoryWorldState {
 export function createStoryWorldState(db: DatabaseSyncInstance): StoryWorldState {
   return {
     listCharacters() {
-      return readSeedWorld(db)?.characters ?? listStoryEntitiesByKind<StoryCharacter>(db, "character");
+      return listStoryEntitiesByKind<StoryCharacter>(db, "character");
     },
     listThreads() {
-      return readSeedWorld(db)?.threads ?? listStoryEntitiesByKind<StoryThread>(db, "thread");
+      return listStoryEntitiesByKind<StoryThread>(db, "thread");
     },
     saveSeed(seed) {
       insertStoryEntities(db, seed.characters, "character");
@@ -80,8 +80,6 @@ export function createStoryWorldState(db: DatabaseSyncInstance): StoryWorldState
         payloadJson: JSON.stringify({ cause: "inheritance-dispute" }),
         status: "active",
       });
-
-      saveLegacySeedWorldBlob(db, seed);
     },
     recordTurn(summary) {
       insertStoryTurn(db, summary);
@@ -108,45 +106,4 @@ export function initializeStoryWorld(db: DatabaseSyncInstance): StoryWorldState 
     world.saveSeed(createSeedWorld());
   }
   return world;
-}
-
-const STORY_WORLD_KEY = "seed-world-v1";
-
-function saveLegacySeedWorldBlob(db: DatabaseSyncInstance, seed: SeedWorld): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS story_world_state (
-      state_key   TEXT PRIMARY KEY,
-      payload     TEXT NOT NULL,
-      updated_at  INTEGER NOT NULL
-    )
-  `);
-
-  db.prepare(`
-    INSERT INTO story_world_state (state_key, payload, updated_at)
-    VALUES (?, ?, ?)
-    ON CONFLICT(state_key) DO UPDATE SET
-      payload = excluded.payload,
-      updated_at = excluded.updated_at
-  `).run(STORY_WORLD_KEY, JSON.stringify(seed), Date.now());
-}
-
-function readSeedWorld(db: DatabaseSyncInstance): SeedWorld | null {
-  let row: { payload?: unknown } | undefined;
-  try {
-    row = db.prepare(
-      "SELECT payload FROM story_world_state WHERE state_key = ?",
-    ).get(STORY_WORLD_KEY) as { payload?: unknown } | undefined;
-  } catch {
-    return null;
-  }
-
-  if (!row || typeof row.payload !== "string") {
-    return null;
-  }
-
-  try {
-    return JSON.parse(row.payload) as SeedWorld;
-  } catch {
-    return null;
-  }
 }

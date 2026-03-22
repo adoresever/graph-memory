@@ -109,27 +109,32 @@ describe("initializeStoryWorld", () => {
     const db = createTestDb();
     try {
       initializeStoryWorld(db);
-      const customWorld = {
-        ...createSeedWorld(),
-        characters: [
-          {
-            id: "c-custom",
-            name: "Custom Survivor",
-            realm: "Foundation",
-            coreDesires: ["survive"],
-            shortTermGoals: ["stay-hidden"],
-            taboos: ["trust-strangers"],
-            resources: { spiritStones: 1, reputation: 1 },
-            hiddenTruths: ["none"],
-            emotionalVectors: {},
-            publicIdentity: "nobody",
-            privateIdentity: "someone",
-          },
-        ],
-      };
-      db.prepare(
-        "UPDATE story_world_state SET payload = ?, updated_at = ? WHERE state_key = ?",
-      ).run(JSON.stringify(customWorld), 123, "seed-world-v1");
+      const now = Date.now();
+      db.prepare("DELETE FROM story_entities WHERE kind = 'character'").run();
+      db.prepare(`
+        INSERT INTO story_entities (id, kind, name, payload, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        "c-custom",
+        "character",
+        "Custom Survivor",
+        JSON.stringify({
+          id: "c-custom",
+          name: "Custom Survivor",
+          realm: "Foundation",
+          coreDesires: ["survive"],
+          shortTermGoals: ["stay-hidden"],
+          taboos: ["trust-strangers"],
+          resources: { spiritStones: 1, reputation: 1 },
+          hiddenTruths: ["none"],
+          emotionalVectors: {},
+          publicIdentity: "nobody",
+          privateIdentity: "someone",
+        }),
+        "active",
+        now,
+        now,
+      );
 
       const world = initializeStoryWorld(db);
       const characters = world.listCharacters();
@@ -140,19 +145,13 @@ describe("initializeStoryWorld", () => {
     }
   });
 
-  it("recovers from invalid stored JSON and reseeds instead of crashing", () => {
+  it("recovers from invalid normalized payload rows and reseeds instead of crashing", () => {
     const db = createTestDb();
     try {
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS story_world_state (
-          state_key   TEXT PRIMARY KEY,
-          payload     TEXT NOT NULL,
-          updated_at  INTEGER NOT NULL
-        )
-      `);
-      db.prepare(
-        "INSERT INTO story_world_state (state_key, payload, updated_at) VALUES (?, ?, ?)",
-      ).run("seed-world-v1", "{bad-json", Date.now());
+      db.prepare(`
+        INSERT INTO story_entities (id, kind, name, payload, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run("c-bad-json", "character", "Bad Json", "{bad-json", "active", Date.now(), Date.now());
 
       expect(() => initializeStoryWorld(db)).not.toThrow();
       const world = initializeStoryWorld(db);
