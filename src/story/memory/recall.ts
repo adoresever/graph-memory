@@ -13,7 +13,7 @@ export function buildRecallPacket(db: DatabaseSyncInstance, params: {
   return {
     relatedEvents: listEventsForPov(db, params.povId, params.eventIds),
     relationships: listRelationshipsForPov(db, params.povId),
-    threads: listActiveThreadsForEvents(db, params.eventIds),
+    threads: listActiveThreadsForEvents(db, params.povId, params.eventIds),
     unresolvedSecrets: listNarrativeSignals(db, "secret", params.povId),
     activeTensions: listNarrativeSignals(db, "tension", params.povId),
     payoffCandidates: listNarrativeSignals(db, "payoff-candidate", params.povId),

@@ -22,9 +22,35 @@ describe("story beliefs", () => {
         confidence: 0.7,
       });
       const truth = repo.recordRelation("a-ember-seal", "OWNS", "c-shen-mo");
+      const truthRows = db.prepare(`
+        SELECT from_id, relation, to_id
+        FROM story_relations
+        WHERE from_id = ? AND relation = ?
+        ORDER BY to_id ASC
+      `).all("a-ember-seal", "OWNS") as Array<{ from_id: string; relation: string; to_id: string }>;
+      const beliefRows = db.prepare(`
+        SELECT actor_id, subject_id, predicate, object_id
+        FROM story_beliefs
+        WHERE actor_id = ? AND subject_id = ? AND predicate = ?
+      `).all("c-li-yao", "a-ember-seal", "OWNS") as Array<{
+        actor_id: string;
+        subject_id: string;
+        predicate: string;
+        object_id: string;
+      }>;
 
       expect(belief.objectId).toBe("c-su-wan");
       expect(truth.toId).toBe("c-shen-mo");
+      expect(truthRows.some((row) => row.to_id === "c-shen-mo")).toBe(true);
+      expect(truthRows.some((row) => row.to_id === "c-su-wan")).toBe(false);
+      expect(beliefRows).toEqual([
+        {
+          actor_id: "c-li-yao",
+          subject_id: "a-ember-seal",
+          predicate: "OWNS",
+          object_id: "c-su-wan",
+        },
+      ]);
     } finally {
       db.close();
     }
@@ -35,12 +61,19 @@ describe("story beliefs", () => {
     try {
       insertStoryEntities(
         db,
-        [{ id: "c-li-yao", name: "Li Yao" }],
+        [
+          { id: "c-li-yao", name: "Li Yao" },
+          { id: "c-shen-mo", name: "Shen Mo" },
+          { id: "c-su-wan", name: "Su Wan" },
+        ],
         "character",
       );
       insertStoryEntities(
         db,
-        [{ id: "f-cloud-sword", name: "Cloud Sword Sect" }],
+        [
+          { id: "f-cloud-sword", name: "Cloud Sword Sect" },
+          { id: "f-black-river", name: "Black River Hall" },
+        ],
         "faction",
       );
 
@@ -65,8 +98,17 @@ describe("story beliefs", () => {
         },
       ]);
 
-      expect(listBeliefsForActor(db, "c-li-yao")).toHaveLength(1);
-      expect(listBeliefsForActor(db, "c-su-wan")).toHaveLength(0);
+      const liYaoBeliefs = listBeliefsForActor(db, "c-li-yao");
+      const shenMoBeliefs = listBeliefsForActor(db, "c-shen-mo");
+      const suWanBeliefs = listBeliefsForActor(db, "c-su-wan");
+      const cloudSwordBeliefs = listBeliefsForActor(db, "f-cloud-sword");
+
+      expect(liYaoBeliefs).toHaveLength(1);
+      expect(shenMoBeliefs.some((belief) =>
+        belief.predicate === "BLOODLINE" && belief.objectId === "ancient"
+      )).toBe(true);
+      expect(suWanBeliefs.some((belief) => belief.predicate === "BLOODLINE")).toBe(false);
+      expect(cloudSwordBeliefs.some((belief) => belief.predicate === "BLOODLINE")).toBe(false);
     } finally {
       db.close();
     }

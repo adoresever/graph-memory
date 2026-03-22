@@ -809,6 +809,56 @@ export function insertStoryTurn(db: DatabaseSyncInstance, turn: StoryTurnRecord)
   `).run(turn.turnNumber, turn.summary, JSON.stringify(turn.payload), Date.now());
 }
 
+interface StoryEventPayloadEnvelope {
+  __story_event: {
+    visibility: "public" | "private";
+    observers: string[];
+  };
+  payload: unknown;
+}
+
+function toStoredStoryEventPayload(event: StoryResolvedEvent): string {
+  const wrapped: StoryEventPayloadEnvelope = {
+    __story_event: {
+      visibility: event.visibility ?? "public",
+      observers: event.observers ?? [],
+    },
+    payload: event.payload,
+  };
+  return JSON.stringify(wrapped);
+}
+
+function parseStoredStoryEventPayload(rawPayload: string): {
+  payload: unknown;
+  visibility: "public" | "private";
+  observers: string[];
+} {
+  const parsed = JSON.parse(rawPayload) as unknown;
+  if (
+    parsed
+    && typeof parsed === "object"
+    && "__story_event" in parsed
+    && "payload" in parsed
+  ) {
+    const wrapped = parsed as StoryEventPayloadEnvelope;
+    const visibility = wrapped.__story_event?.visibility === "private" ? "private" : "public";
+    const observers = Array.isArray(wrapped.__story_event?.observers)
+      ? wrapped.__story_event.observers.filter((observer): observer is string => typeof observer === "string")
+      : [];
+    return {
+      payload: wrapped.payload,
+      visibility,
+      observers,
+    };
+  }
+
+  return {
+    payload: parsed,
+    visibility: "public",
+    observers: [],
+  };
+}
+
 export function insertStoryEvent(db: DatabaseSyncInstance, event: StoryResolvedEvent): void {
   db.prepare(`
     INSERT INTO story_events (id, turn_number, type, summary, payload, created_at)
@@ -818,7 +868,7 @@ export function insertStoryEvent(db: DatabaseSyncInstance, event: StoryResolvedE
     event.turnNumber,
     event.type,
     event.summary,
-    JSON.stringify(event.payload),
+    toStoredStoryEventPayload(event),
     event.createdAt ?? Date.now(),
   );
 }
@@ -936,6 +986,8 @@ export interface StoryStoredEvent {
   type: string;
   summary: string;
   payload: unknown;
+  visibility: "public" | "private";
+  observers: string[];
   createdAt: number;
 }
 
@@ -951,7 +1003,7 @@ export interface StoryStoredRelation {
 
 export function listEventsForPov(
   db: DatabaseSyncInstance,
-  _povId: string,
+  povId: string,
   eventIds: string[],
 ): StoryStoredEvent[] {
   if (eventIds.length === 0) return [];
@@ -970,14 +1022,23 @@ export function listEventsForPov(
     created_at: number;
   }>;
 
-  return rows.map((row) => ({
-    id: row.id,
-    turnNumber: row.turn_number,
-    type: row.type,
-    summary: row.summary,
-    payload: JSON.parse(row.payload),
-    createdAt: row.created_at,
-  }));
+  const events: StoryStoredEvent[] = [];
+  for (const row of rows) {
+    const parsed = parseStoredStoryEventPayload(row.payload);
+    const isVisible = parsed.visibility === "public" || parsed.observers.includes(povId);
+    if (!isVisible) continue;
+    events.push({
+      id: row.id,
+      turnNumber: row.turn_number,
+      type: row.type,
+      summary: row.summary,
+      payload: parsed.payload,
+      visibility: parsed.visibility,
+      observers: parsed.observers,
+      createdAt: row.created_at,
+    });
+  }
+  return events;
 }
 
 export function listRelationshipsForPov(db: DatabaseSyncInstance, povId: string): StoryStoredRelation[] {
@@ -1007,9 +1068,13 @@ export function listRelationshipsForPov(db: DatabaseSyncInstance, povId: string)
   }));
 }
 
-export function listActiveThreadsForEvents(db: DatabaseSyncInstance, eventIds: string[]): Array<Record<string, unknown>> {
+export function listActiveThreadsForEvents(
+  db: DatabaseSyncInstance,
+  povId: string,
+  eventIds: string[],
+): Array<Record<string, unknown>> {
   if (eventIds.length === 0) return [];
-  const events = listEventsForPov(db, "", eventIds);
+  const events = listEventsForPov(db, povId, eventIds);
   const threadIds = new Set<string>();
 
   for (const event of events) {
