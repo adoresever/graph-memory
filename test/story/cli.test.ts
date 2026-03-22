@@ -117,6 +117,30 @@ describe("story:run cli", () => {
     expect(result.stdout).toContain("dbPath=/tmp/story.db");
     expect(result.stdout).toContain("Arguments: --dry-run");
   });
+
+  it("runs story loop with stub model and reports turns/chapters counters", async () => {
+    const tempDbPath = `/tmp/story-task9-${Date.now()}.db`;
+    const result = await execa(
+      "npm",
+      ["run", "story:run", "--", "--turns=3", "--stub-model"],
+      {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          NOVEL_LLM_MODE: "anthropic-compatible",
+          NOVEL_LLM_BASE_URL: "https://api.minimaxi.com/anthropic",
+          NOVEL_LLM_MODEL: "MiniMax-M2.7",
+          NOVEL_LLM_API_KEY: "test-key",
+          NOVEL_DB_PATH: tempDbPath,
+          NOVEL_CHAPTER_EVERY_TURNS: "3",
+          NOVEL_RESET_ON_START: "1",
+        },
+      },
+    );
+
+    expect(result.stdout).toContain("turns=3");
+    expect(result.stdout).toContain("chapters=1");
+  });
 });
 
 describe("story llm helpers", () => {

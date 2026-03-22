@@ -171,6 +171,46 @@ Unlike global PageRank, PPR ranks nodes **relative to your current query**:
 - [OpenClaw](https://github.com/openclaw/openclaw) (v2026.3.x+)
 - Node.js 22+
 
+## Story Simulator CLI
+
+The repository also includes an isolated story runtime CLI:
+
+```bash
+npm run story:run -- --turns=3 --stub-model
+```
+
+This runs 3 turns and generates chapters on the configured cadence. The CLI prints:
+
+- `turns=...`
+- `chapters=...`
+- `db=...`
+- `resetOnStart=...`
+
+### Environment variables
+
+Story runtime config is read from environment variables:
+
+- `NOVEL_DB_PATH` (optional): path to the story runtime database.
+  - default: `~/.graph-memory/story-memory.db`
+  - this is separate from OpenClaw plugin DB defaults unless you explicitly point both to the same file
+- `NOVEL_CHAPTER_EVERY_TURNS` (optional): chapter cadence (default `3`)
+- `NOVEL_RESET_ON_START` (optional): set `1` to clear prior story runtime state before the next run
+- `NOVEL_LLM_MODE` (optional): `openai-compatible` or `anthropic-compatible` (default `anthropic-compatible`)
+- `NOVEL_LLM_MODEL` (optional): model name (default `MiniMax-M2.7`)
+- `NOVEL_LLM_BASE_URL` and `NOVEL_LLM_API_KEY`:
+  - required for live model runs
+  - not required when running with `--stub-model`
+
+### Stub model for local/test runs
+
+Use `--stub-model` to run end-to-end without live provider credentials:
+
+```bash
+npm run story:run -- --turns=3 --stub-model
+```
+
+This is the recommended mode for CI and local integration testing because secrets stay in env for live runs only.
+
 ### Windows users
 
 Download the installer from [Releases](https://github.com/adoresever/graph-memory/releases):
