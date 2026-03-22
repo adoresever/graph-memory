@@ -7,51 +7,60 @@ import { createStubStoryModelClient } from "./runtime/stub-model.ts";
 import { runStoryLoop } from "./runtime/run-loop.ts";
 
 export async function runStoryBatchCli(argv: string[] = process.argv.slice(2)) {
+  const previousResetOnStart = process.env.NOVEL_RESET_ON_START;
   process.env.NOVEL_RESET_ON_START = "1";
 
-  const useStubModel = argv.includes("--stub-model");
-  const runs = readRunsArg(argv);
-  const turns = readTurnsArg(argv);
-  const outputDir = readOutputDirArg(argv);
-  const failOnRun = readFailOnRunArg(argv);
-  const cfg = loadStoryConfig({ allowMissingLlmEnv: useStubModel });
+  try {
+    const useStubModel = argv.includes("--stub-model");
+    const runs = readRunsArg(argv);
+    const turns = readTurnsArg(argv);
+    const outputDir = readOutputDirArg(argv);
+    const failOnRun = readFailOnRunArg(argv);
+    const cfg = loadStoryConfig({ allowMissingLlmEnv: useStubModel });
 
-  for (let runNumber = 1; runNumber <= runs; runNumber += 1) {
-    if (failOnRun === runNumber) {
-      console.error(`run=${runNumber}`);
-      throw new Error(`[story-runtime] configured batch failure at run=${runNumber}`);
+    for (let runNumber = 1; runNumber <= runs; runNumber += 1) {
+      if (failOnRun === runNumber) {
+        console.error(`run=${runNumber}`);
+        throw new Error(`[story-runtime] configured batch failure at run=${runNumber}`);
+      }
+
+      const startedAt = new Date().toISOString();
+      const db = getDb(cfg.dbPath);
+
+      try {
+        const model = useStubModel ? createStubStoryModelClient() : createStoryModelClient(cfg.llm);
+        const result = await runStoryLoop(db, { turns, model });
+        const finishedAt = new Date().toISOString();
+        const bundle = await writeRunBundle(db, result, {
+          outputRoot: outputDir,
+          runMetadata: {
+            runId: buildRunId(startedAt),
+            turns,
+            chapterEveryTurns: cfg.chapterEveryTurns,
+            dbPath: cfg.dbPath,
+            resetOnStart: cfg.resetOnStart,
+            model: useStubModel
+              ? { mode: "stub", name: "stub-story-model" }
+              : { mode: cfg.llm.mode, name: cfg.llm.model },
+            startedAt,
+            finishedAt,
+          },
+        });
+
+        console.log(`run=${runNumber} bundle=${bundle.bundlePath} turns=${bundle.turnCount} chapters=${bundle.chapterCount}`);
+      } finally {
+        closeDb();
+      }
     }
 
-    const startedAt = new Date().toISOString();
-    const db = getDb(cfg.dbPath);
-
-    try {
-      const model = useStubModel ? createStubStoryModelClient() : createStoryModelClient(cfg.llm);
-      const result = await runStoryLoop(db, { turns, model });
-      const finishedAt = new Date().toISOString();
-      const bundle = await writeRunBundle(db, result, {
-        outputRoot: outputDir,
-        runMetadata: {
-          runId: buildRunId(startedAt),
-          turns,
-          chapterEveryTurns: cfg.chapterEveryTurns,
-          dbPath: cfg.dbPath,
-          resetOnStart: cfg.resetOnStart,
-          model: useStubModel
-            ? { mode: "stub", name: "stub-story-model" }
-            : { mode: cfg.llm.mode, name: cfg.llm.model },
-          startedAt,
-          finishedAt,
-        },
-      });
-
-      console.log(`run=${runNumber} bundle=${bundle.bundlePath} turns=${bundle.turnCount} chapters=${bundle.chapterCount}`);
-    } finally {
-      closeDb();
+    console.log(`runs=${runs}`);
+  } finally {
+    if (previousResetOnStart === undefined) {
+      delete process.env.NOVEL_RESET_ON_START;
+    } else {
+      process.env.NOVEL_RESET_ON_START = previousResetOnStart;
     }
   }
-
-  console.log(`runs=${runs}`);
 }
 
 if (import.meta.main) {

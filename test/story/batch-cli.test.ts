@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execa } from "execa";
+import { runStoryBatchCli } from "../../src/story/batch-cli.ts";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -108,6 +109,33 @@ describe("story:batch cli", () => {
         .map((entry) => entry.name);
       expect(runBundleDirs).toHaveLength(1);
     } finally {
+      cleanupPath(outputRoot);
+      cleanupPath(path.dirname(dbPath));
+    }
+  });
+
+  it("restores NOVEL_RESET_ON_START after an in-process batch failure", async () => {
+    const outputRoot = makeTempDir("story-batch-output-");
+    const dbPath = makeTempDbPath();
+    const originalResetOnStart = process.env.NOVEL_RESET_ON_START;
+    process.env.NOVEL_RESET_ON_START = "preserve-me";
+
+    try {
+      await expect(runStoryBatchCli([
+        "--runs=1",
+        "--fail-on-run=1",
+        "--turns=3",
+        "--stub-model",
+        `--output-dir=${outputRoot}`,
+      ])).rejects.toThrow("[story-runtime] configured batch failure at run=1");
+
+      expect(process.env.NOVEL_RESET_ON_START).toBe("preserve-me");
+    } finally {
+      if (originalResetOnStart === undefined) {
+        delete process.env.NOVEL_RESET_ON_START;
+      } else {
+        process.env.NOVEL_RESET_ON_START = originalResetOnStart;
+      }
       cleanupPath(outputRoot);
       cleanupPath(path.dirname(dbPath));
     }
