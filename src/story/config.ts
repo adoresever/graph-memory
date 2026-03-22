@@ -22,6 +22,7 @@ export function loadStoryConfig(): StoryRuntimeConfig {
   const mode = readStoryLlmMode(process.env.NOVEL_LLM_MODE);
   const baseURL = requireStoryEnv("NOVEL_LLM_BASE_URL");
   const apiKey = requireStoryEnv("NOVEL_LLM_API_KEY");
+  const chapterEveryTurns = readChapterEveryTurns(process.env.NOVEL_CHAPTER_EVERY_TURNS);
 
   return {
     dbPath: expandStoryPath(process.env.NOVEL_DB_PATH ?? STORY_DEFAULT_DB_PATH),
@@ -31,7 +32,7 @@ export function loadStoryConfig(): StoryRuntimeConfig {
       model: process.env.NOVEL_LLM_MODEL ?? "MiniMax-M2.7",
       apiKey,
     },
-    chapterEveryTurns: Number(process.env.NOVEL_CHAPTER_EVERY_TURNS ?? 3),
+    chapterEveryTurns,
     resetOnStart: process.env.NOVEL_RESET_ON_START === "1",
   };
 }
@@ -54,6 +55,15 @@ function requireStoryEnv(name: "NOVEL_LLM_BASE_URL" | "NOVEL_LLM_API_KEY"): stri
   }
 
   throw new Error(`[story-runtime] ${name} is required for the story runtime`);
+}
+
+function readChapterEveryTurns(rawValue: string | undefined): number {
+  const parsed = Number(rawValue ?? 3);
+  if (Number.isInteger(parsed) && parsed > 0) {
+    return parsed;
+  }
+
+  throw new Error("[story-runtime] NOVEL_CHAPTER_EVERY_TURNS must be a positive integer");
 }
 
 function expandStoryPath(pathValue: string): string {

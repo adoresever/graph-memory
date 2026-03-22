@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runStoryCli } from "../../src/story/cli.ts";
 
 const originalEnv = { ...process.env };
+const originalFetch = global.fetch;
+const originalConsoleLog = console.log;
 
 describe("runStoryCli", () => {
   beforeEach(() => {
@@ -16,12 +18,26 @@ describe("runStoryCli", () => {
 
   afterEach(() => {
     process.env = { ...originalEnv };
+    global.fetch = originalFetch;
+    console.log = originalConsoleLog;
   });
 
-  it("exposes the runtime client while logging config state", async () => {
+  it("logs the configured runtime mode and surfaces provider failures", async () => {
+    const logs: string[] = [];
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    };
+    global.fetch = async () =>
+      new Response("bad auth", {
+        status: 401,
+        headers: { "Content-Type": "text/plain" },
+      });
+
     const client = await runStoryCli(["--dry-run"]);
-    expect(client).toBeDefined();
-    expect(typeof client.generateChapter).toBe("function");
-    expect(typeof client.summarizeTurn).toBe("function");
+    expect(logs.some((line) => line.includes("mode=anthropic-compatible model=MiniMax-M2.7"))).toBe(true);
+    expect(logs.some((line) => line.includes("dbPath=/tmp/story.db"))).toBe(true);
+    await expect(client.generateChapter({ turnNumber: 1, focus: "sect rivalry" })).rejects.toThrowError(
+      "[story-runtime] Anthropic-compatible LLM API 401",
+    );
   });
 });

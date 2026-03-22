@@ -58,4 +58,15 @@ describe("loadStoryConfig", () => {
       "[story-runtime] NOVEL_LLM_API_KEY is required for the story runtime",
     );
   });
+
+  it("rejects invalid chapter cadence values", () => {
+    process.env.NOVEL_LLM_MODE = "anthropic-compatible";
+    process.env.NOVEL_LLM_BASE_URL = "https://api.minimaxi.com/anthropic";
+    process.env.NOVEL_LLM_API_KEY = "test-key";
+    process.env.NOVEL_CHAPTER_EVERY_TURNS = "0";
+
+    expect(() => loadStoryConfig()).toThrowError(
+      "[story-runtime] NOVEL_CHAPTER_EVERY_TURNS must be a positive integer",
+    );
+  });
 });

@@ -85,39 +85,41 @@ export function createStoryModelClient(cfg: StoryRuntimeConfig["llm"]): StoryMod
 function buildStoryModelClient(completeFn: CompleteFn): StoryModelClient {
   return {
     rerankActorActions: async (actions, context) => {
-      await callModel(completeFn, "Rerank actor actions", JSON.stringify({ actions, context }));
+      await callModel(completeFn, "rerank actor actions", JSON.stringify({ actions, context }));
       return actions;
     },
     rerankFactionActions: async (actions, context) => {
-      await callModel(completeFn, "Rerank faction actions", JSON.stringify({ actions, context }));
+      await callModel(completeFn, "rerank faction actions", JSON.stringify({ actions, context }));
       return actions;
     },
     rerankChapterFocus: async (candidates, context) => {
-      await callModel(completeFn, "Rerank chapter focus", JSON.stringify({ candidates, context }));
+      await callModel(completeFn, "rerank chapter focus", JSON.stringify({ candidates, context }));
       return candidates;
     },
     generateChapter: async (packet) => {
       const prompt = `Generate chapter for turn ${packet.turnNumber}, focus ${packet.focus}`;
-      const narrative = await callModel(completeFn, "Generate chapter", prompt);
+      const narrative = await callModel(completeFn, "generate chapter", prompt);
       return narrative || "";
     },
     summarizeTurn: async (input) => {
       const summaryPrompt = `Summarize turn ${input.turnNumber} with highlights ${input.highlights.join(";")}`;
-      const summary = await callModel(completeFn, "Summarize turn", summaryPrompt);
+      const summary = await callModel(completeFn, "summarize turn", summaryPrompt);
       return summary || "";
     },
     extractClaims: async (prose) => {
-      await callModel(completeFn, "Extract claims", prose);
+      await callModel(completeFn, "extract claims", prose);
       return [];
     },
   };
 }
 
-async function callModel(completeFn: CompleteFn, system: string, user: string) {
+async function callModel(completeFn: CompleteFn, operation: string, user: string) {
   try {
-    return await completeFn(system, user);
+    return await completeFn(operation, user);
   } catch (err) {
-    // Do not crash the runtime if the model call fails early; log for debugging if needed.
-    return "";
+    if (err instanceof Error) {
+      throw err;
+    }
+    throw new Error(`[story-runtime] Failed to ${operation}`);
   }
 }
