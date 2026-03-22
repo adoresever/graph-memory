@@ -2,6 +2,8 @@ import os from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadStoryConfig } from "../../src/story/config.ts";
 import { createSeedWorld } from "../../src/story/bootstrap.ts";
+import { initializeStoryWorld } from "../../src/story/world-state.ts";
+import { createTestDb } from "../helpers.ts";
 
 const originalEnv = { ...process.env };
 
@@ -89,5 +91,74 @@ describe("createSeedWorld", () => {
     expect(world.characters.length).toBeGreaterThanOrEqual(3);
     expect(world.factions.length).toBeGreaterThanOrEqual(2);
     expect(world.threads.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("initializeStoryWorld", () => {
+  it("seeds the world when empty", () => {
+    const db = createTestDb();
+    try {
+      const world = initializeStoryWorld(db);
+      expect(world.listCharacters().length).toBeGreaterThanOrEqual(3);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("does not overwrite an existing non-empty world on a second call", () => {
+    const db = createTestDb();
+    try {
+      initializeStoryWorld(db);
+      const customWorld = {
+        ...createSeedWorld(),
+        characters: [
+          {
+            id: "c-custom",
+            name: "Custom Survivor",
+            realm: "Foundation",
+            coreDesires: ["survive"],
+            shortTermGoals: ["stay-hidden"],
+            taboos: ["trust-strangers"],
+            resources: { spiritStones: 1, reputation: 1 },
+            hiddenTruths: ["none"],
+            emotionalVectors: {},
+            publicIdentity: "nobody",
+            privateIdentity: "someone",
+          },
+        ],
+      };
+      db.prepare(
+        "UPDATE story_world_state SET payload = ?, updated_at = ? WHERE state_key = ?",
+      ).run(JSON.stringify(customWorld), 123, "seed-world-v1");
+
+      const world = initializeStoryWorld(db);
+      const characters = world.listCharacters();
+      expect(characters).toHaveLength(1);
+      expect(characters[0]?.id).toBe("c-custom");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("recovers from invalid stored JSON and reseeds instead of crashing", () => {
+    const db = createTestDb();
+    try {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS story_world_state (
+          state_key   TEXT PRIMARY KEY,
+          payload     TEXT NOT NULL,
+          updated_at  INTEGER NOT NULL
+        )
+      `);
+      db.prepare(
+        "INSERT INTO story_world_state (state_key, payload, updated_at) VALUES (?, ?, ?)",
+      ).run("seed-world-v1", "{bad-json", Date.now());
+
+      expect(() => initializeStoryWorld(db)).not.toThrow();
+      const world = initializeStoryWorld(db);
+      expect(world.listCharacters().length).toBeGreaterThanOrEqual(3);
+    } finally {
+      db.close();
+    }
   });
 });

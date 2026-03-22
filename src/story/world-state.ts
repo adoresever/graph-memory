@@ -30,7 +30,7 @@ export function createStoryWorldState(db: DatabaseSyncInstance): StoryWorldState
   };
 }
 
-export function initializeStoryWorld(db: DatabaseSyncInstance) {
+export function initializeStoryWorld(db: DatabaseSyncInstance): StoryWorldState {
   const world = createStoryWorldState(db);
   if (world.listCharacters().length === 0) {
     world.saveSeed(createSeedWorld());
@@ -57,5 +57,9 @@ function readSeedWorld(db: DatabaseSyncInstance): SeedWorld | null {
     return null;
   }
 
-  return JSON.parse(row.payload) as SeedWorld;
+  try {
+    return JSON.parse(row.payload) as SeedWorld;
+  } catch {
+    return null;
+  }
 }
