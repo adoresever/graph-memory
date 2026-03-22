@@ -23,6 +23,18 @@ interface EventPayloadShape {
 }
 
 export function loadDirectorState(db: DatabaseSyncInstance): NarrativeDirectorState {
+  const row = db.prepare(`
+    SELECT value_json
+    FROM story_director_state
+    WHERE key = ?
+  `).get(DIRECTOR_STATE_KEY) as { value_json: string } | undefined;
+  if (row) {
+    const snapshot = parseDirectorStateSnapshot(row.value_json);
+    if (snapshot) {
+      return snapshot;
+    }
+  }
+
   return {
     activeThreads: listTrackedThreads(db),
     unresolvedSecrets: listSignalsByKind(db, "secret"),
@@ -236,4 +248,31 @@ function updateEnsembleHeat(existingHeat: EnsembleHeatEntry[], events: StoryReso
 
 function appendRecentPov(recentPovIds: string[], nextPovId: string): string[] {
   return [...recentPovIds, nextPovId].slice(-5);
+}
+
+function parseDirectorStateSnapshot(rawValue: string): NarrativeDirectorState | null {
+  try {
+    const parsed = JSON.parse(rawValue) as Partial<NarrativeDirectorState>;
+    if (
+      !parsed
+      || !Array.isArray(parsed.activeThreads)
+      || !Array.isArray(parsed.unresolvedSecrets)
+      || !Array.isArray(parsed.activeTensions)
+      || !Array.isArray(parsed.payoffCandidates)
+      || !Array.isArray(parsed.ensembleHeat)
+      || !Array.isArray(parsed.recentPovIds)
+    ) {
+      return null;
+    }
+    return {
+      activeThreads: parsed.activeThreads as StoryThread[],
+      unresolvedSecrets: parsed.unresolvedSecrets as StoryNarrativeSignal[],
+      activeTensions: parsed.activeTensions as StoryNarrativeSignal[],
+      payoffCandidates: parsed.payoffCandidates as StoryNarrativeSignal[],
+      ensembleHeat: parsed.ensembleHeat as EnsembleHeatEntry[],
+      recentPovIds: parsed.recentPovIds.filter((value): value is string => typeof value === "string"),
+    };
+  } catch {
+    return null;
+  }
 }

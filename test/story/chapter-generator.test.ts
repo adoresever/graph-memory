@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { createStoryWorldState } from "../../src/story/world-state.ts";
 import { createSeedWorld } from "../../src/story/bootstrap.ts";
-import { buildChapterPacket, generateChapter, type ChapterPacket } from "../../src/story/narrative/chapter-generator.ts";
+import { buildChapterPacket, createAndStoreChapter, generateChapter, type ChapterPacket } from "../../src/story/narrative/chapter-generator.ts";
 import type { ChapterSelection } from "../../src/story/narrative/director.ts";
 import type { NarrativeDirectorState } from "../../src/story/narrative/state.ts";
 import type { StoryTurnResult } from "../../src/story/turn-simulator.ts";
 import { insertStoryEvent } from "../../src/store/store.ts";
+import { buildStoryModelClientForTest } from "../../src/story/runtime/model-client.ts";
 import { createTestDb } from "../helpers.ts";
 
 describe("chapter generator", () => {
@@ -103,6 +104,52 @@ describe("chapter generator", () => {
     } finally {
       db.close();
     }
+  });
+
+  it("persists chapter prose even when claim extraction fails afterward", async () => {
+    const db = createTestDb();
+    try {
+      const result = await createAndStoreChapter(db, {
+        generateChapter: async () => "Persist me before claim extraction fails.",
+        extractClaims: async () => {
+          throw new Error("claims-failed");
+        },
+      }, chapterPacket);
+
+      expect(result.prose).toContain("Persist me");
+      expect(result.claims).toEqual([]);
+
+      const row = db.prepare(`
+        SELECT turn_number, pov_id, prose, claims_json
+        FROM story_chapters
+        WHERE turn_number = ?
+      `).get(chapterPacket.turnNumber) as
+        | { turn_number: number; pov_id: string; prose: string; claims_json: string }
+        | undefined;
+      expect(row).toBeDefined();
+      expect(row?.turn_number).toBe(chapterPacket.turnNumber);
+      expect(row?.pov_id).toBe(chapterPacket.primaryPovId);
+      expect(row?.prose).toContain("Persist me");
+      expect(row?.claims_json).toBe("[]");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("concrete runtime chapter generation prompt includes packet.summary content", async () => {
+    let capturedUserPrompt = "";
+    const client = buildStoryModelClientForTest(async (_operation, user) => {
+      capturedUserPrompt = user;
+      return "Generated chapter prose.";
+    });
+
+    await client.generateChapter({
+      turnNumber: 99,
+      focus: "c-li-yao|events:sev-99-1",
+      summary: "{\"marker\":\"summary-propagates\"}",
+    });
+
+    expect(capturedUserPrompt).toContain("summary-propagates");
   });
 });
 

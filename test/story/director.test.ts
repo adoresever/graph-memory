@@ -3,6 +3,8 @@ import type { StoryResolvedEvent, StoryNarrativeSignal } from "../../src/store/s
 import { selectChapterFocus, type EnsembleHeatEntry } from "../../src/story/narrative/director.ts";
 import type { ChapterSelection as RuntimeChapterSelection, NarrativeDirectorInput as RuntimeNarrativeDirectorInput } from "../../src/story/runtime/model-client.ts";
 import type { StoryThread } from "../../src/story/types.ts";
+import { loadDirectorState, saveDirectorState, type NarrativeDirectorState } from "../../src/story/narrative/state.ts";
+import { createTestDb } from "../helpers.ts";
 
 describe("narrative director", () => {
   it("selects a single primary pov and chapter-worthy event bundle", async () => {
@@ -29,6 +31,65 @@ describe("narrative director", () => {
       model: fakeDirectorModel(),
     });
     expect(choice.primaryPovId).not.toBe("c-li-yao");
+  });
+
+  it("does not pick high-heat offstage povs with zero event relevance", async () => {
+    const choice = await selectChapterFocus({
+      events: fixtureEvents,
+      activeThreads: fixtureThreads,
+      activeTensions: fixtureTensions,
+      ensembleState: [
+        ...fixtureEnsemble,
+        { entityId: "c-offstage", heat: 100 },
+      ],
+      recentPovIds: [],
+      model: fakeDirectorModel(),
+    });
+
+    expect(choice.primaryPovId).not.toBe("c-offstage");
+  });
+
+  it("round-trips saved director state snapshots", () => {
+    const db = createTestDb();
+    try {
+      const snapshot: NarrativeDirectorState = {
+        activeThreads: [{ id: "t-snapshot", name: "Snapshot Thread", status: "active" }],
+        unresolvedSecrets: [{
+          id: "ns-snap-secret",
+          kind: "secret",
+          subjectId: "c-li-yao",
+          relatedId: "t-snapshot",
+          weight: 1,
+          payloadJson: "{\"k\":\"v\"}",
+          status: "active",
+        }],
+        activeTensions: [{
+          id: "ns-snap-tension",
+          kind: "tension",
+          subjectId: "c-su-wan",
+          relatedId: "c-shen-mo",
+          weight: 0.8,
+          payloadJson: "{\"pressure\":true}",
+          status: "active",
+        }],
+        payoffCandidates: [{
+          id: "ns-snap-payoff",
+          kind: "payoff-candidate",
+          subjectId: "a-ember-seal",
+          relatedId: "c-li-yao",
+          weight: 0.7,
+          payloadJson: "{\"arc\":\"seal-awakens\"}",
+          status: "active",
+        }],
+        ensembleHeat: [{ entityId: "c-li-yao", heat: 9 }],
+        recentPovIds: ["c-su-wan", "c-li-yao"],
+      };
+      saveDirectorState(db, snapshot);
+
+      expect(loadDirectorState(db)).toEqual(snapshot);
+    } finally {
+      db.close();
+    }
   });
 });
 

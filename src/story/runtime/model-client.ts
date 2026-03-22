@@ -82,6 +82,10 @@ export function createStoryModelClient(cfg: StoryRuntimeConfig["llm"]): StoryMod
   return buildStoryModelClient(completeFn);
 }
 
+export function buildStoryModelClientForTest(completeFn: CompleteFn): StoryModelClient {
+  return buildStoryModelClient(completeFn);
+}
+
 function buildStoryModelClient(completeFn: CompleteFn): StoryModelClient {
   return {
     rerankActorActions: async (actions, context) => {
@@ -109,7 +113,10 @@ function buildStoryModelClient(completeFn: CompleteFn): StoryModelClient {
       return parseRankedSelections(raw, candidates);
     },
     generateChapter: async (packet) => {
-      const prompt = `Generate chapter for turn ${packet.turnNumber}, focus ${packet.focus}`;
+      const prompt = [
+        `Generate chapter for turn ${packet.turnNumber}, focus ${packet.focus}`,
+        `Chapter context summary: ${packet.summary ?? "(none)"}`,
+      ].join("\n");
       const narrative = await callModel(completeFn, "generate chapter", prompt);
       if (narrative.trim()) {
         return narrative;

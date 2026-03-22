@@ -73,20 +73,40 @@ export async function createAndStoreChapter(
   model: Pick<StoryModelClient, "generateChapter" | "extractClaims">,
   packet: ChapterPacket,
 ): Promise<GeneratedChapterOutput> {
-  const chapter = await generateChapter(model, packet);
+  const runtimePacket = toRuntimeChapterPacket(packet);
+  const prose = await model.generateChapter(runtimePacket);
+  const summary = summarizeChapter(packet);
+  const id = chapterId(packet.turnNumber);
   db.prepare(`
     INSERT INTO story_chapters (id, turn_number, pov_id, summary, prose, claims_json, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(
-    chapterId(packet.turnNumber),
+    id,
     packet.turnNumber,
     packet.primaryPovId,
-    chapter.summary,
-    chapter.prose,
-    JSON.stringify(chapter.claims),
+    summary,
+    prose,
+    "[]",
     Date.now(),
   );
-  return chapter;
+
+  let claims: StoryClaim[] = [];
+  try {
+    claims = await extractChapterClaims(model, prose);
+    db.prepare(`
+      UPDATE story_chapters
+      SET claims_json = ?
+      WHERE id = ?
+    `).run(JSON.stringify(claims), id);
+  } catch {
+    claims = [];
+  }
+
+  return {
+    prose,
+    summary,
+    claims,
+  };
 }
 
 export function summarizeSignals(signals: StoryNarrativeSignal[]): string[] {
