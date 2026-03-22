@@ -20,6 +20,14 @@ export interface StoryWorldState {
   saveSeed(seed: SeedWorld): void;
   recordTurn(turn: StoryTurnRecord): void;
   recordEvents(events: StoryResolvedEvent[]): void;
+  recordChapter(chapter: {
+    turnNumber: number;
+    povId: string;
+    summary: string;
+    prose: string;
+    claimsJson: string;
+  }): void;
+  saveDirectorStateSnapshot(key: string, valueJson: string): void;
   upsertNarrativeSignal(signal: StoryNarrativeSignal): void;
   upsertNarrativeSignals(signals: StoryNarrativeSignal[]): void;
 }
@@ -126,6 +134,29 @@ export function createStoryWorldState(db: DatabaseSyncInstance): StoryWorldState
         db.exec("ROLLBACK");
         throw e;
       }
+    },
+    recordChapter(chapter) {
+      db.prepare(`
+        INSERT INTO story_chapters (id, turn_number, pov_id, summary, prose, claims_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        `sch-${chapter.turnNumber}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        chapter.turnNumber,
+        chapter.povId,
+        chapter.summary,
+        chapter.prose,
+        chapter.claimsJson,
+        Date.now(),
+      );
+    },
+    saveDirectorStateSnapshot(key, valueJson) {
+      db.prepare(`
+        INSERT INTO story_director_state (key, value_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+          value_json = excluded.value_json,
+          updated_at = excluded.updated_at
+      `).run(key, valueJson, Date.now());
     },
     upsertNarrativeSignal(signal) {
       upsertStoryNarrativeSignal(db, signal);
