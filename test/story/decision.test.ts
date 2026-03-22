@@ -4,13 +4,6 @@ import type { StoryBelief, StoryNarrativeSignal } from "../../src/store/store.ts
 import { rankActorActions } from "../../src/story/decision/actor-engine.ts";
 import { rankFactionActions } from "../../src/story/decision/faction-engine.ts";
 
-function fakeDecisionModel() {
-  return {
-    rerankActorActions: async (actions: Array<Record<string, unknown>>) => actions,
-    rerankFactionActions: async (actions: Array<Record<string, unknown>>) => actions,
-  };
-}
-
 describe("story decision engines", () => {
   it("ranks actor actions using desires, goals, and beliefs", async () => {
     const liYao: StoryCharacter = {
@@ -44,14 +37,32 @@ describe("story decision engines", () => {
       status: "active",
     };
 
+    let actorRerankCalls = 0;
+    let actorModelInput: Array<Record<string, unknown>> = [];
     const actions = await rankActorActions({
       actor: liYao,
       beliefs: [artifactBelief],
       worldSignals: [secretRealmOpening],
-      model: fakeDecisionModel(),
+      model: {
+        rerankActorActions: async (candidateActions) => {
+          actorRerankCalls += 1;
+          actorModelInput = candidateActions as Array<Record<string, unknown>>;
+          const byType = new Map(candidateActions.map((action) => [action.type, action]));
+          return [
+            byType.get("conceal-bloodline"),
+            byType.get("train-breakthrough"),
+            byType.get("seek-artifact"),
+          ].filter((action): action is NonNullable<typeof action> => Boolean(action));
+        },
+        rerankFactionActions: async (candidateActions) => candidateActions,
+      },
     });
 
-    expect(actions[0]?.type).toBe("seek-artifact");
+    expect(actorRerankCalls).toBe(1);
+    expect(actorModelInput).toHaveLength(3);
+    expect(actorModelInput[0]?.type).toBe("seek-artifact");
+    expect(actions).toHaveLength(2);
+    expect(actions.map((action) => action.type)).toEqual(["conceal-bloodline", "train-breakthrough"]);
   });
 
   it("ranks faction actions using agenda, beliefs, and constraints", async () => {
@@ -84,13 +95,31 @@ describe("story decision engines", () => {
       status: "active",
     };
 
+    let factionRerankCalls = 0;
+    let factionModelInput: Array<Record<string, unknown>> = [];
     const actions = await rankFactionActions({
       faction: sect,
       beliefs: [factionBelief],
       worldSignals: [rivalInheritanceRumor],
-      model: fakeDecisionModel(),
+      model: {
+        rerankActorActions: async (candidateActions) => candidateActions,
+        rerankFactionActions: async (candidateActions) => {
+          factionRerankCalls += 1;
+          factionModelInput = candidateActions as Array<Record<string, unknown>>;
+          const byType = new Map(candidateActions.map((action) => [action.type, action]));
+          return [
+            byType.get("fortify-secret-realm"),
+            byType.get("mediate-inheritance-dispute"),
+            byType.get("purge-rival-line"),
+          ].filter((action): action is NonNullable<typeof action> => Boolean(action));
+        },
+      },
     });
 
-    expect(actions[0]?.type).toBe("purge-rival-line");
+    expect(factionRerankCalls).toBe(1);
+    expect(factionModelInput).toHaveLength(3);
+    expect(factionModelInput[0]?.type).toBe("purge-rival-line");
+    expect(actions).toHaveLength(2);
+    expect(actions.map((action) => action.type)).toEqual(["fortify-secret-realm", "mediate-inheritance-dispute"]);
   });
 });
