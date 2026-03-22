@@ -213,13 +213,13 @@ This is the recommended mode for CI and local integration testing because secret
 
 ### Run bundles and batch workflow
 
-Use `--output-dir` when you want each simulator run exported as a portable run bundle:
+Every `story:run` execution exports a portable run bundle. Use `--output-dir` to choose the parent directory for that bundle; if omitted, the CLI defaults to `./runs`:
 
 ```bash
 npm run story:run -- --turns=3 --stub-model --output-dir=./runs
 ```
 
-Each run writes a bundle under `runs/<run-id>/`:
+On success, the single-run CLI also prints `bundle=...` with the full exported bundle path. Each run writes its bundle under `<output-dir>/<run-id>/`:
 
 ```text
 runs/<run-id>/
@@ -237,7 +237,7 @@ For repeated simulations, use the batch entrypoint with both `--runs` and `--tur
 npm run story:batch -- --runs=2 --turns=6 --stub-model --output-dir=./runs
 ```
 
-This runs multiple independent simulations and exports one bundle per run ID into the same parent output directory. `--stub-model` works for both commands, so you can exercise the full batch workflow without `NOVEL_LLM_BASE_URL` or `NOVEL_LLM_API_KEY`.
+This runs multiple independent simulations and exports one bundle per run ID into the same parent output directory. Batch mode keeps runs isolated by forcing `NOVEL_RESET_ON_START=1` for the duration of the command, then restoring the prior environment value afterward. `--stub-model` works for both commands, so you can exercise the full batch workflow without `NOVEL_LLM_BASE_URL` or `NOVEL_LLM_API_KEY`.
 
 Run bundles are file exports for inspection, replay tooling, or fixtures. SQLite persistence is still managed separately through `NOVEL_DB_PATH`, so exporting bundles does not replace the story runtime database unless you explicitly wire both workflows together.
 
