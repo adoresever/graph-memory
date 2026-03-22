@@ -3,7 +3,7 @@ import type { StoryRuntimeConfig } from "../config.ts";
 import { createAnthropicCompatibleCompleteFn, createStoryCompleteFn } from "../../engine/llm.ts";
 
 export type StoryAction = {
-  id?: string;
+  id: string;
   type: string;
   summary?: string;
   [key: string]: unknown;
@@ -149,9 +149,6 @@ async function callModel(completeFn: CompleteFn, operation: string, user: string
 function parseRankedActions(raw: string, actions: StoryAction[], label: "actor action" | "faction action") {
   const ids = parseJsonArrayOfStrings(raw, `Invalid ${label} ranking response`);
   const byId = new Map(actions.map((action) => [action.id, action]));
-  if (actions.some((action) => !action.id)) {
-    throw new Error(`[story-runtime] Cannot rerank ${label}s without stable ids`);
-  }
 
   const ranked = ids.map((id) => {
     const action = byId.get(id);

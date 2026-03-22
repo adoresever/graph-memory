@@ -22,6 +22,7 @@ export function loadStoryConfig(): StoryRuntimeConfig {
   const mode = readStoryLlmMode(process.env.NOVEL_LLM_MODE);
   const baseURL = requireStoryEnv("NOVEL_LLM_BASE_URL");
   const apiKey = requireStoryEnv("NOVEL_LLM_API_KEY");
+  const model = readStoryModel(process.env.NOVEL_LLM_MODEL);
   const chapterEveryTurns = readChapterEveryTurns(process.env.NOVEL_CHAPTER_EVERY_TURNS);
 
   return {
@@ -29,7 +30,7 @@ export function loadStoryConfig(): StoryRuntimeConfig {
     llm: {
       mode,
       baseURL,
-      model: process.env.NOVEL_LLM_MODEL ?? "MiniMax-M2.7",
+      model,
       apiKey,
     },
     chapterEveryTurns,
@@ -55,6 +56,15 @@ function requireStoryEnv(name: "NOVEL_LLM_BASE_URL" | "NOVEL_LLM_API_KEY"): stri
   }
 
   throw new Error(`[story-runtime] ${name} is required for the story runtime`);
+}
+
+function readStoryModel(rawModel: string | undefined): string {
+  const model = (rawModel ?? "MiniMax-M2.7").trim();
+  if (model) {
+    return model;
+  }
+
+  throw new Error("[story-runtime] NOVEL_LLM_MODEL is required for the story runtime");
 }
 
 function readChapterEveryTurns(rawValue: string | undefined): number {

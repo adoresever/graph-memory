@@ -69,4 +69,15 @@ describe("loadStoryConfig", () => {
       "[story-runtime] NOVEL_CHAPTER_EVERY_TURNS must be a positive integer",
     );
   });
+
+  it("rejects an empty llm model value", () => {
+    process.env.NOVEL_LLM_MODE = "anthropic-compatible";
+    process.env.NOVEL_LLM_BASE_URL = "https://api.minimaxi.com/anthropic";
+    process.env.NOVEL_LLM_API_KEY = "test-key";
+    process.env.NOVEL_LLM_MODEL = "   ";
+
+    expect(() => loadStoryConfig()).toThrowError(
+      "[story-runtime] NOVEL_LLM_MODEL is required for the story runtime",
+    );
+  });
 });
