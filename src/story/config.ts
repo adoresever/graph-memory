@@ -18,12 +18,11 @@ const STORY_LLM_MODES = new Set<StoryRuntimeConfig["llm"]["mode"]>([
   "anthropic-compatible",
 ]);
 
-export function loadStoryConfig(): StoryRuntimeConfig {
+export function loadStoryConfig(options?: { allowMissingLlmEnv?: boolean }): StoryRuntimeConfig {
   const mode = readStoryLlmMode(process.env.NOVEL_LLM_MODE);
-  const baseURL = requireStoryEnv("NOVEL_LLM_BASE_URL");
-  const apiKey = requireStoryEnv("NOVEL_LLM_API_KEY");
+  const baseURL = requireStoryEnv("NOVEL_LLM_BASE_URL", options?.allowMissingLlmEnv === true);
+  const apiKey = requireStoryEnv("NOVEL_LLM_API_KEY", options?.allowMissingLlmEnv === true);
   const model = readStoryModel(process.env.NOVEL_LLM_MODEL);
-  const chapterEveryTurns = readChapterEveryTurns(process.env.NOVEL_CHAPTER_EVERY_TURNS);
 
   return {
     dbPath: expandStoryPath(process.env.NOVEL_DB_PATH ?? STORY_DEFAULT_DB_PATH),
@@ -33,7 +32,7 @@ export function loadStoryConfig(): StoryRuntimeConfig {
       model,
       apiKey,
     },
-    chapterEveryTurns,
+    chapterEveryTurns: readChapterEveryTurns(process.env.NOVEL_CHAPTER_EVERY_TURNS),
     resetOnStart: process.env.NOVEL_RESET_ON_START === "1",
   };
 }
@@ -49,10 +48,16 @@ function readStoryLlmMode(rawMode: string | undefined): StoryRuntimeConfig["llm"
   );
 }
 
-function requireStoryEnv(name: "NOVEL_LLM_BASE_URL" | "NOVEL_LLM_API_KEY"): string {
+function requireStoryEnv(
+  name: "NOVEL_LLM_BASE_URL" | "NOVEL_LLM_API_KEY",
+  allowMissing: boolean,
+): string {
   const value = process.env[name]?.trim();
   if (value) {
     return value;
+  }
+  if (allowMissing) {
+    return "injected-model";
   }
 
   throw new Error(`[story-runtime] ${name} is required for the story runtime`);

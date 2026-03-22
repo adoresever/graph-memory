@@ -82,7 +82,6 @@ export function validateRecentChapters(db: DatabaseSyncInstance) {
   const chapters = listRecentStoryChapters(db, 5);
   return chapters.flatMap((chapter) =>
     validateChapterClaims(world, parseClaimsJson(chapter.claimsJson))
-      .map((claim) => ({ chapterId: chapter.id, ...claim }))
   );
 }
 

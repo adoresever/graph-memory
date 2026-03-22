@@ -180,6 +180,55 @@ export function initializeStoryWorld(db: DatabaseSyncInstance): StoryWorldState 
   const world = createStoryWorldState(db);
   if (world.listCharacters().length === 0) {
     world.saveSeed(createSeedWorld());
+  } else if (countActiveNarrativeSignals(db) === 0) {
+    for (const signal of listCanonicalNarrativeSignals(listPresentEntityIds(db))) {
+      world.upsertNarrativeSignal(signal);
+    }
   }
   return world;
+}
+
+function listCanonicalNarrativeSignals(presentIds: Set<string>) {
+  return [
+    {
+      id: "ns-secret-bloodline",
+      kind: "secret",
+      subjectId: "c-li-yao",
+      relatedId: "t-secret-realm",
+      weight: 0.8,
+      payloadJson: JSON.stringify({ secret: "ancient-bloodline" }),
+      status: "active",
+    },
+    {
+      id: "ns-realm-tension",
+      kind: "tension",
+      subjectId: "f-cloud-sword",
+      relatedId: "t-secret-realm",
+      weight: 0.7,
+      payloadJson: JSON.stringify({ cause: "inheritance-dispute" }),
+      status: "active",
+    },
+  ].filter((signal) => {
+    const hasSubject = presentIds.has(signal.subjectId);
+    const hasRelated = signal.relatedId ? presentIds.has(signal.relatedId) : true;
+    return hasSubject && hasRelated;
+  });
+}
+
+function listPresentEntityIds(db: DatabaseSyncInstance): Set<string> {
+  const kinds = ["character", "faction", "location", "artifact", "thread", "rule"] as const;
+  return new Set<string>(
+    kinds.flatMap((kind) =>
+      listStoryEntitiesByKind<{ id: string }>(db, kind).map((entity) => entity.id)
+    ),
+  );
+}
+
+function countActiveNarrativeSignals(db: DatabaseSyncInstance): number {
+  const row = db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM story_narrative_signals
+    WHERE status = 'active'
+  `).get() as { count: number } | undefined;
+  return row?.count ?? 0;
 }

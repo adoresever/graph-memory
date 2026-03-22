@@ -33,7 +33,6 @@ export interface StoryLoopResult {
   }>;
   finalDirectorState: NarrativeDirectorState;
   consistencyIssues: Array<{
-    chapterId: string;
     subjectId: string;
     predicate: "OWNS" | "LOCATED_IN" | "ALLY_OF" | "ENEMY_OF" | "INJURED" | "DEAD";
     objectId?: string;
@@ -47,7 +46,7 @@ export async function runStoryLoop(
   input: StoryLoopInput,
 ): Promise<StoryLoopResult> {
   initializeStoryWorld(db);
-  const cfg = loadStoryConfig();
+  const cfg = input.model ? loadStoryConfig({ allowMissingLlmEnv: true }) : loadStoryConfig();
   const model = input.model ?? createStoryModelClient(cfg.llm);
   const chapters: StoryLoopResult["chapters"] = [];
   const worldLogs: StoryTurnResult[] = [];

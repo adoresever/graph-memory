@@ -21,8 +21,8 @@ describe("story long run coherence", () => {
   });
 
   it("keeps active threads coherent across twenty turns", async () => {
-    process.env.NOVEL_LLM_BASE_URL = "http://localhost:11434/v1";
-    process.env.NOVEL_LLM_API_KEY = "test-key";
+    delete process.env.NOVEL_LLM_BASE_URL;
+    delete process.env.NOVEL_LLM_API_KEY;
     delete process.env.NOVEL_CHAPTER_EVERY_TURNS;
     delete process.env.NOVEL_RESET_ON_START;
 

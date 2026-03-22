@@ -9,7 +9,8 @@ import type {
   StoryModelClient,
   TurnSummaryInput,
 } from "../../src/story/runtime/model-client.ts";
-import { runStoryLoop } from "../../src/story/runtime/run-loop.ts";
+import { getNextStoryTurnNumber, runStoryLoop } from "../../src/story/runtime/run-loop.ts";
+import { initializeStoryWorld } from "../../src/story/world-state.ts";
 import { createTestDb } from "../helpers.ts";
 
 describe("story run loop", () => {
@@ -21,8 +22,8 @@ describe("story run loop", () => {
   });
 
   it("emits chapter prose every three turns by default", async () => {
-    process.env.NOVEL_LLM_BASE_URL = "http://localhost:11434/v1";
-    process.env.NOVEL_LLM_API_KEY = "test-key";
+    delete process.env.NOVEL_LLM_BASE_URL;
+    delete process.env.NOVEL_LLM_API_KEY;
     delete process.env.NOVEL_CHAPTER_EVERY_TURNS;
     delete process.env.NOVEL_RESET_ON_START;
 
@@ -31,6 +32,19 @@ describe("story run loop", () => {
       const result = await runStoryLoop(db, { turns: 3, model: fakeStoryModel() });
       expect(result.chapters).toHaveLength(1);
       expect(result.worldLogs).toHaveLength(3);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("preserves seeded narrative signals when resetOnStart is true", () => {
+    const db = createTestDb();
+    try {
+      initializeStoryWorld(db);
+
+      expect(countActiveNarrativeSignals(db)).toBeGreaterThan(0);
+      expect(getNextStoryTurnNumber(db, true)).toBe(1);
+      expect(countActiveNarrativeSignals(db)).toBeGreaterThan(0);
     } finally {
       db.close();
     }
@@ -53,4 +67,13 @@ function fakeStoryModel(): StoryModelClient {
     summarizeTurn: async (_input: TurnSummaryInput): Promise<string> => "Stable turn summary.",
     extractClaims: async (_prose: string): Promise<StoryClaim[]> => [],
   };
+}
+
+function countActiveNarrativeSignals(db: ReturnType<typeof createTestDb>): number {
+  const row = db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM story_narrative_signals
+    WHERE status = 'active'
+  `).get() as { count: number };
+  return row.count;
 }
