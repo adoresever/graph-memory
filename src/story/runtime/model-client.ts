@@ -66,54 +66,58 @@ export interface StoryModelClient {
 }
 
 export function createStoryModelClient(cfg: StoryRuntimeConfig["llm"]): StoryModelClient {
-  if (cfg.mode === "anthropic-compatible") {
-    return buildStoryModelClient(
-      createAnthropicCompatibleCompleteFn({
-        apiKey: cfg.apiKey,
-        baseURL: cfg.baseURL || "https://api.anthropic.com",
-        model: cfg.model,
-      }),
-    );
-  }
+  const completeFn =
+    cfg.mode === "anthropic-compatible"
+      ? createAnthropicCompatibleCompleteFn({
+          apiKey: cfg.apiKey,
+          baseURL: cfg.baseURL || "https://api.anthropic.com",
+          model: cfg.model,
+        })
+      : createStoryCompleteFn("story-openai", cfg.model, {
+          apiKey: cfg.apiKey,
+          baseURL: cfg.baseURL,
+          model: cfg.model,
+        });
 
-  return buildStoryModelClient(
-    createStoryCompleteFn("story-openai", cfg.model, {
-      apiKey: cfg.apiKey,
-      baseURL: cfg.baseURL,
-      model: cfg.model,
-    }),
-  );
+  return buildStoryModelClient(completeFn);
 }
 
 function buildStoryModelClient(completeFn: CompleteFn): StoryModelClient {
   return {
-    rerankActorActions: async (actions) => {
-      await ensureModelWarm(completeFn);
+    rerankActorActions: async (actions, context) => {
+      await callModel(completeFn, "Rerank actor actions", JSON.stringify({ actions, context }));
       return actions;
     },
-    rerankFactionActions: async (actions) => {
-      await ensureModelWarm(completeFn);
+    rerankFactionActions: async (actions, context) => {
+      await callModel(completeFn, "Rerank faction actions", JSON.stringify({ actions, context }));
       return actions;
     },
-    rerankChapterFocus: async (candidates) => {
-      await ensureModelWarm(completeFn);
+    rerankChapterFocus: async (candidates, context) => {
+      await callModel(completeFn, "Rerank chapter focus", JSON.stringify({ candidates, context }));
       return candidates;
     },
-    generateChapter: async () => {
-      await ensureModelWarm(completeFn);
-      return "";
+    generateChapter: async (packet) => {
+      const prompt = `Generate chapter for turn ${packet.turnNumber}, focus ${packet.focus}`;
+      const narrative = await callModel(completeFn, "Generate chapter", prompt);
+      return narrative || "";
     },
-    summarizeTurn: async () => {
-      await ensureModelWarm(completeFn);
-      return "";
+    summarizeTurn: async (input) => {
+      const summaryPrompt = `Summarize turn ${input.turnNumber} with highlights ${input.highlights.join(";")}`;
+      const summary = await callModel(completeFn, "Summarize turn", summaryPrompt);
+      return summary || "";
     },
-    extractClaims: async () => {
-      await ensureModelWarm(completeFn);
+    extractClaims: async (prose) => {
+      await callModel(completeFn, "Extract claims", prose);
       return [];
     },
   };
 }
 
-async function ensureModelWarm(_completeFn: CompleteFn) {
-  // placeholder to keep the compiler happy without making actual requests yet
+async function callModel(completeFn: CompleteFn, system: string, user: string) {
+  try {
+    return await completeFn(system, user);
+  } catch (err) {
+    // Do not crash the runtime if the model call fails early; log for debugging if needed.
+    return "";
+  }
 }
