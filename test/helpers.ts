@@ -127,6 +127,8 @@ export function createTestDb(): DatabaseSyncInstance {
 
   // m7: 故事世界状态
   db.exec(`
+    -- Story tables intentionally defer foreign keys for now: seed/update flows may persist
+    -- partial payload snapshots and cross-kind references before later normalization tasks.
     CREATE TABLE IF NOT EXISTS story_entities (
       id TEXT PRIMARY KEY,
       kind TEXT NOT NULL,

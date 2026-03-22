@@ -177,6 +177,8 @@ function m6_communities(db: DatabaseSyncInstance): void {
 
 function m7_story(db: DatabaseSyncInstance): void {
   db.exec(`
+    -- Story tables intentionally defer foreign keys for now: seed/update flows may persist
+    -- partial payload snapshots and cross-kind references before later normalization tasks.
     CREATE TABLE IF NOT EXISTS story_entities (
       id TEXT PRIMARY KEY,
       kind TEXT NOT NULL,

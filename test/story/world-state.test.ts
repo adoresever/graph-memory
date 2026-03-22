@@ -74,4 +74,86 @@ describe("story world-state persistence", () => {
       db.close();
     }
   });
+
+  it("does not persist canonical relations/signals that reference missing custom-seed ids", () => {
+    const db = createTestDb();
+    try {
+      const world = createStoryWorldState(db);
+      const seed = createSeedWorld();
+      seed.characters = [
+        {
+          id: "c-custom",
+          name: "Custom Disciple",
+          realm: "Foundation",
+          coreDesires: ["survive"],
+          shortTermGoals: ["hide"],
+          taboos: ["betray-allies"],
+          resources: { spiritStones: 5, reputation: 1 },
+          hiddenTruths: ["none"],
+          emotionalVectors: {},
+          publicIdentity: "disciple",
+          privateIdentity: "outsider",
+        },
+      ];
+      seed.factions = [
+        {
+          id: "f-custom",
+          name: "Custom Sect",
+          agenda: ["persist"],
+          constraints: ["low-power"],
+          doctrine: "adapt",
+          internalBlocks: [],
+          strategicTargets: [],
+          publicPosture: "neutral",
+          hiddenOperations: [],
+        },
+      ];
+      seed.locations = [{ id: "l-custom", name: "Custom Peak", kind: "sect" }];
+      seed.artifacts = [{ id: "a-custom", name: "Custom Relic", kind: "token", ownerId: "c-custom" }];
+      seed.threads = [{ id: "t-custom", name: "Custom Thread", status: "active" }];
+      seed.rules = [{ id: "r-custom", name: "Custom Rule", effect: "custom-effect" }];
+
+      world.saveSeed(seed);
+
+      const relationCount = (db.prepare("SELECT COUNT(*) as c FROM story_relations").get() as { c: number }).c;
+      const signalCount = (db.prepare("SELECT COUNT(*) as c FROM story_narrative_signals").get() as { c: number }).c;
+      expect(relationCount).toBe(0);
+      expect(signalCount).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("removes malformed entities and their obvious dependent rows during recovery", () => {
+    const db = createTestDb();
+    try {
+      const now = Date.now();
+      db.prepare(`
+        INSERT INTO story_entities (id, kind, name, payload, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run("c-bad", "character", "Broken Character", "{bad-json", "active", now, now);
+      db.prepare(`
+        INSERT INTO story_relations (id, from_id, relation, to_id, visibility, intensity, source_event_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run("sr-bad", "c-bad", "KNOWS", "c-other", "public", 1, null, now, now);
+      db.prepare(`
+        INSERT INTO story_narrative_signals (id, kind, subject_id, related_id, weight, payload_json, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run("ns-bad", "secret", "c-bad", "t-other", 1, "{}", "active", now, now);
+
+      const world = createStoryWorldState(db);
+      expect(world.listCharacters()).toEqual([]);
+
+      const relationCount = (db.prepare("SELECT COUNT(*) as c FROM story_relations WHERE id = 'sr-bad'").get() as {
+        c: number;
+      }).c;
+      const signalCount = (db.prepare("SELECT COUNT(*) as c FROM story_narrative_signals WHERE id = 'ns-bad'").get() as {
+        c: number;
+      }).c;
+      expect(relationCount).toBe(0);
+      expect(signalCount).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
 });
