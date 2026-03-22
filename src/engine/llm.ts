@@ -27,38 +27,63 @@ export interface StoryCompleteOptions {
 }
 
 export function createStoryCompleteFn(
-  provider: string,
-  model: string,
   options: StoryCompleteOptions,
 ): CompleteFn {
-  return createCompleteFn(provider, model, options);
+  const baseURL = requireStoryCompleteOption(options.baseURL, "NOVEL_LLM_BASE_URL");
+  const apiKey = requireStoryCompleteOption(options.apiKey, "NOVEL_LLM_API_KEY");
+  const model = requireStoryCompleteOption(options.model, "NOVEL_LLM_MODEL");
+
+  return async (system, user) => {
+    const res = await fetch(`${baseURL.replace(/\/+$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          ...(system.trim() ? [{ role: "system", content: system.trim() }] : []),
+          { role: "user", content: user },
+        ],
+        temperature: 0.1,
+      }),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(`[story-runtime] OpenAI-compatible LLM API ${res.status}: ${errText.slice(0, 200)}`);
+    }
+    const data = await res.json() as any;
+    const text = data.choices?.[0]?.message?.content ?? "";
+    if (text) return text;
+    throw new Error("[story-runtime] OpenAI-compatible LLM returned empty content");
+  };
 }
 
 export function createAnthropicCompatibleCompleteFn(
   options: StoryCompleteOptions,
 ): CompleteFn {
-  const baseURL = (options.baseURL || "https://api.anthropic.com").replace(/\/+$/, "");
-  if (!options.apiKey) {
-    throw new Error("[graph-memory] Anthropic mode requires NOVEL_LLM_API_KEY in runtime config");
-  }
+  const baseURL = requireStoryCompleteOption(options.baseURL, "NOVEL_LLM_BASE_URL").replace(/\/+$/, "");
+  const apiKey = requireStoryCompleteOption(options.apiKey, "NOVEL_LLM_API_KEY");
+  const model = requireStoryCompleteOption(options.model, "NOVEL_LLM_MODEL");
 
   return async (system, user) => {
     const res = await fetch(`${baseURL}/v1/messages`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": options.apiKey,
+        "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: options.model,
+        model,
         max_tokens: 4096,
         system,
         messages: [{ role: "user", content: user }],
       }),
     });
     if (!res.ok) {
-      throw new Error(`[graph-memory] Anthropic API ${res.status}`);
+      throw new Error(`[story-runtime] Anthropic-compatible LLM API ${res.status}`);
     }
     const data = (await res.json() as any);
     return data.content?.[0]?.text ?? "";
@@ -115,4 +140,12 @@ export function createCompleteFn(
     if (!res.ok) throw new Error(`[graph-memory] Anthropic API ${res.status}`);
     return ((await res.json() as any).content?.[0]?.text) ?? "";
   };
+}
+
+function requireStoryCompleteOption(value: string, envName: string) {
+  const trimmed = value.trim();
+  if (trimmed) {
+    return trimmed;
+  }
+  throw new Error(`[story-runtime] ${envName} is required for the story runtime`);
 }

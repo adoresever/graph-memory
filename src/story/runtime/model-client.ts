@@ -70,10 +70,10 @@ export function createStoryModelClient(cfg: StoryRuntimeConfig["llm"]): StoryMod
     cfg.mode === "anthropic-compatible"
       ? createAnthropicCompatibleCompleteFn({
           apiKey: cfg.apiKey,
-          baseURL: cfg.baseURL || "https://api.anthropic.com",
+          baseURL: cfg.baseURL,
           model: cfg.model,
         })
-      : createStoryCompleteFn("story-openai", cfg.model, {
+      : createStoryCompleteFn({
           apiKey: cfg.apiKey,
           baseURL: cfg.baseURL,
           model: cfg.model,
