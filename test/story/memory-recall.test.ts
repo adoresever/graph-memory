@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createStoryWorldState } from "../../src/story/world-state.ts";
 import { createSeedWorld } from "../../src/story/bootstrap.ts";
-import { insertStoryEvent } from "../../src/store/store.ts";
+import { insertStoryEvent, insertStoryRelation } from "../../src/store/store.ts";
 import { buildRecallPacket } from "../../src/story/memory/recall.ts";
 import { createTestDb } from "../helpers.ts";
 
@@ -135,6 +135,28 @@ describe("story memory recall", () => {
       const packet = buildRecallPacket(db, { povId: "c-li-yao", eventIds: ["e-good", "e-bad"] });
       expect(packet.relatedEvents.map((event) => event.id)).toEqual(["e-good"]);
       expect(packet.threads).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("treats unknown relationship visibility values as public for now", () => {
+    const db = createTestDb();
+    try {
+      const world = createStoryWorldState(db);
+      world.saveSeed(createSeedWorld());
+      insertStoryRelation(db, {
+        id: "sr-unknown-visibility",
+        fromId: "c-li-yao",
+        relation: "ALLY",
+        toId: "c-su-wan",
+        visibility: "rumor-only",
+      });
+
+      const liYaoPacket = buildRecallPacket(db, { povId: "c-li-yao", eventIds: [] });
+      const suWanPacket = buildRecallPacket(db, { povId: "c-su-wan", eventIds: [] });
+      expect(liYaoPacket.relationships.some((relation) => relation.id === "sr-unknown-visibility")).toBe(true);
+      expect(suWanPacket.relationships.some((relation) => relation.id === "sr-unknown-visibility")).toBe(true);
     } finally {
       db.close();
     }

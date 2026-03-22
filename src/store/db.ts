@@ -34,7 +34,7 @@ export function closeDb(): void {
 function migrate(db: DatabaseSyncInstance): void {
   db.exec(`CREATE TABLE IF NOT EXISTS _migrations (v INTEGER PRIMARY KEY, at INTEGER NOT NULL)`);
   const cur = (db.prepare("SELECT MAX(v) as v FROM _migrations").get() as any)?.v ?? 0;
-  const steps = [m1_core, m2_messages, m3_signals, m4_fts5, m5_vectors, m6_communities, m7_story];
+  const steps = [m1_core, m2_messages, m3_signals, m4_fts5, m5_vectors, m6_communities, m7_story, m8_story_belief_uniqueness];
   for (let i = cur; i < steps.length; i++) {
     steps[i](db);
     db.prepare("INSERT INTO _migrations (v,at) VALUES (?,?)").run(i + 1, Date.now());
@@ -264,5 +264,26 @@ function m7_story(db: DatabaseSyncInstance): void {
       ON story_beliefs(actor_id, subject_id, predicate);
     CREATE INDEX IF NOT EXISTS ix_story_narrative_signals_subject_kind_status
       ON story_narrative_signals(subject_id, kind, status);
+  `);
+}
+
+function m8_story_belief_uniqueness(db: DatabaseSyncInstance): void {
+  db.exec(`
+    DELETE FROM story_beliefs AS older
+    WHERE EXISTS (
+      SELECT 1
+      FROM story_beliefs AS newer
+      WHERE newer.actor_id = older.actor_id
+        AND newer.subject_id = older.subject_id
+        AND newer.predicate = older.predicate
+        AND (
+          newer.updated_at > older.updated_at
+          OR (newer.updated_at = older.updated_at AND newer.created_at > older.created_at)
+          OR (newer.updated_at = older.updated_at AND newer.created_at = older.created_at AND newer.rowid > older.rowid)
+        )
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_story_beliefs_actor_subject_predicate
+      ON story_beliefs(actor_id, subject_id, predicate);
   `);
 }

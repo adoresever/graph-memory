@@ -1043,7 +1043,7 @@ export function listRelationshipsForPov(db: DatabaseSyncInstance, povId: string)
     SELECT id, from_id, relation, to_id, visibility, intensity, source_event_id
     FROM story_relations
     WHERE (
-      visibility = 'public' AND (from_id = ? OR to_id = ?)
+      visibility != 'private' AND (from_id = ? OR to_id = ?)
     ) OR (
       visibility = 'private' AND from_id = ?
     )
