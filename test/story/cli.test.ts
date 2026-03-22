@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execa } from "execa";
 import { createStoryModelClient } from "../../src/story/runtime/model-client.ts";
@@ -120,23 +123,75 @@ describe("story:run cli", () => {
 
   it("runs story loop with stub model and reports turns/chapters counters", async () => {
     const tempDbPath = `/tmp/story-task9-${Date.now()}.db`;
-    const result = await execa(
-      "npm",
-      ["run", "story:run", "--", "--turns=3", "--stub-model"],
-      {
-        cwd: repoRoot,
-        env: {
-          ...process.env,
-          NOVEL_LLM_MODE: "anthropic-compatible",
-          NOVEL_DB_PATH: tempDbPath,
-          NOVEL_CHAPTER_EVERY_TURNS: "3",
-          NOVEL_RESET_ON_START: "1",
+    const outputDir = mkdtempSync(path.join(os.tmpdir(), "story-cli-output-"));
+    try {
+      const result = await execa(
+        "npm",
+        ["run", "story:run", "--", "--turns=3", "--stub-model", `--output-dir=${outputDir}`],
+        {
+          cwd: repoRoot,
+          env: {
+            ...process.env,
+            NOVEL_LLM_MODE: "anthropic-compatible",
+            NOVEL_DB_PATH: tempDbPath,
+            NOVEL_CHAPTER_EVERY_TURNS: "3",
+            NOVEL_RESET_ON_START: "1",
+          },
         },
-      },
-    );
+      );
 
-    expect(result.stdout).toContain("turns=3");
-    expect(result.stdout).toContain("chapters=1");
+      expect(result.stdout).toContain("turns=3");
+      expect(result.stdout).toContain("chapters=1");
+    } finally {
+      rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("exports a bundle for a stubbed story run and reports the bundle path", async () => {
+    const outputDir = mkdtempSync(path.join(os.tmpdir(), "story-cli-output-"));
+    try {
+      const result = await execa(
+        "npm",
+        ["run", "story:run", "--", "--turns=3", "--stub-model", `--output-dir=${outputDir}`],
+        {
+          cwd: repoRoot,
+          env: {
+            ...process.env,
+            NOVEL_LLM_MODE: "anthropic-compatible",
+            NOVEL_DB_PATH: `/tmp/story-cli-${Date.now()}.db`,
+            NOVEL_CHAPTER_EVERY_TURNS: "3",
+            NOVEL_RESET_ON_START: "1",
+          },
+        },
+      );
+
+      expect(result.stdout).toContain("turns=3");
+      expect(result.stdout).toContain("chapters=1");
+      expect(result.stdout).toContain("bundle=");
+
+      const bundleLine = result.stdout
+        .trim()
+        .split("\n")
+        .find((line) => line.startsWith("bundle="));
+      expect(bundleLine).toBeDefined();
+
+      const bundlePath = bundleLine!.slice("bundle=".length).trim();
+      expect(existsSync(bundlePath)).toBe(true);
+      expect(existsSync(path.join(bundlePath, "index.json"))).toBe(true);
+      expect(existsSync(path.join(bundlePath, "world-log.jsonl"))).toBe(true);
+      expect(existsSync(path.join(bundlePath, "chapters", "chapter-001.md"))).toBe(true);
+
+      const index = JSON.parse(readFileSync(path.join(bundlePath, "index.json"), "utf8")) as {
+        turnCount: number;
+        chapterCount: number;
+        bundlePath: string;
+      };
+      expect(index.turnCount).toBe(3);
+      expect(index.chapterCount).toBe(1);
+      expect(index.bundlePath).toBe(bundlePath);
+    } finally {
+      rmSync(outputDir, { recursive: true, force: true });
+    }
   });
 });
 
