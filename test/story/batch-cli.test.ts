@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,13 +20,6 @@ function cleanupPath(targetPath: string): void {
 }
 
 describe("story:batch cli", () => {
-  afterEach(() => {
-    const defaultRunsDir = path.join(repoRoot, "runs");
-    if (existsSync(defaultRunsDir) && readdirSync(defaultRunsDir).length === 0) {
-      rmSync(defaultRunsDir, { recursive: true, force: true });
-    }
-  });
-
   it("runs multiple stubbed story batches and writes one bundle per run", async () => {
     const outputRoot = makeTempDir("story-batch-output-");
     const dbPath = makeTempDbPath();
@@ -64,6 +57,7 @@ describe("story:batch cli", () => {
           "index.json",
           "world-log.jsonl",
           "chapters",
+          "state",
         ]));
         const chapterFiles = readdirSync(path.join(bundlePath, "chapters"));
         expect(chapterFiles.some((fileName) => fileName.startsWith("chapter-"))).toBe(true);
@@ -101,10 +95,6 @@ describe("story:batch cli", () => {
       });
 
       expect(result.exitCode).not.toBe(0);
-      if (result.stderr.includes("Cannot find module")) {
-        return;
-      }
-
       expect(result.stderr).toContain("run=2");
     } finally {
       cleanupPath(outputRoot);
