@@ -291,10 +291,12 @@ const graphMemoryPlugin = {
         sessionId,
         messages,
         tokenBudget,
+        prompt,
       }: {
         sessionId: string;
         messages: any[];
         tokenBudget?: number;
+        prompt?: string;  // Added in OpenClaw 2026.03.28: prompt-aware retrieval
       }) {
         const activeNodes = getBySession(db, sessionId);
         const activeEdges = activeNodes.flatMap((n) => [
@@ -302,7 +304,25 @@ const graphMemoryPlugin = {
           ...edgesTo(db, n.id),
         ]);
 
-        const rec = recalled.get(sessionId) ?? { nodes: [], edges: [] };
+        // OpenClaw 2026.03.28: use the prompt for a fresh, accurate recall
+        // at assembly time instead of relying solely on the pre-cached result
+        // from before_agent_start.
+        let rec = recalled.get(sessionId) ?? { nodes: [], edges: [] };
+        if (prompt) {
+          const cleaned = cleanPrompt(prompt);
+          if (cleaned) {
+            try {
+              const freshRec = await recaller.recall(cleaned);
+              if (freshRec.nodes.length) {
+                rec = freshRec;
+                recalled.set(sessionId, freshRec);
+              }
+            } catch (err) {
+              api.logger.warn(`[graph-memory] assemble recall failed: ${err}`);
+              // fall through to cached rec
+            }
+          }
+        }
         const totalGmNodes = activeNodes.length + rec.nodes.length;
 
         if (totalGmNodes === 0) {
