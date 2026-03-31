@@ -94,6 +94,9 @@ export function createCompleteFn(
       body: JSON.stringify({ model, max_tokens: 4096, system, messages: [{ role: "user", content: user }] }),
     });
     if (!res.ok) throw new Error(`[graph-memory] Anthropic API ${res.status}`);
-    return ((await res.json() as any).content?.[0]?.text) ?? "";
+    const data = await res.json() as any;
+    const text = data.content?.[0]?.text ?? "";
+    if (text) return text;
+    throw new Error("[graph-memory] Anthropic API returned empty content");
   };
 }

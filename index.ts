@@ -446,11 +446,9 @@ const graphMemoryPlugin = {
       }) {
         if (isHeartbeat) return;
 
-        // 消息入库（同步，零 LLM）
+        // Messages are already persisted by ingest() — only slice to
+        // determine the new-message count for extraction triggering.
         const newMessages = messages.slice(prePromptMessageCount ?? 0);
-        for (const message of newMessages) {
-          ingestMessage(sessionId, message);
-        }
 
         const totalMsgs = msgSeq.get(sessionId) ?? 0;
         api.logger.info(
