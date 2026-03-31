@@ -316,10 +316,11 @@ const graphMemoryPlugin = {
           if (cleaned) {
             try {
               const freshRec = await recaller.recall(cleaned);
-              if (freshRec.nodes.length) {
-                rec = freshRec;
-                recalled.set(sessionId, freshRec);
-              }
+              // Always overwrite the cache with the fresh result — even when
+              // empty — so stale hits from a previous turn do not bleed into
+              // a context where the current prompt has no matches.
+              rec = freshRec;
+              recalled.set(sessionId, freshRec);
             } catch (err) {
               api.logger.warn(`[graph-memory] assemble recall failed: ${err}`);
               // fall through to cached rec
