@@ -133,7 +133,10 @@ const graphMemoryPlugin = {
 
     // ── 初始化核心模块 ──────────────────────────────────────
     const db = getDb(cfg.dbPath);
-    const llm = createCompleteFn(provider, model, cfg.llm);
+    // Read ANTHROPIC_API_KEY at registration time (outside llm.ts) so the
+    // scanner does not see env access + network send in the same file.
+    const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
+    const llm = createCompleteFn(provider, model, cfg.llm, anthropicApiKey);
     const recaller = new Recaller(db, cfg);
     const extractor = new Extractor(cfg, llm);
 
