@@ -88,7 +88,8 @@ export async function createEmbedFn(cfg: EmbeddingConfig | undefined): Promise<E
     return async (text: string): Promise<number[]> => {
       return callEmbedding(text.slice(0, 8000));
     };
-  } catch {
+  } catch (err) {
+    console.error(`[graph-memory] embedding probe failed:`, err);
     return null;
   }
 }
