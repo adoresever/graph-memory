@@ -83,15 +83,14 @@ export function createCompleteFn(
     }
 
     // ── 路径 B：Anthropic API ──────────────────────────────
-    const key = anthropicApiKey;
-    if (!key) {
+    if (!anthropicApiKey) {
       throw new Error(
         "[graph-memory] No LLM available. 在 openclaw.json 的 graph-memory config 中配置 llm.apiKey + llm.baseURL",
       );
     }
     const res = await fetchRetry("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+      headers: { "Content-Type": "application/json", "x-api-key": anthropicApiKey, "anthropic-version": "2023-06-01" },
       body: JSON.stringify({ model, max_tokens: 4096, system, messages: [{ role: "user", content: user }] }),
     });
     if (!res.ok) throw new Error(`[graph-memory] Anthropic API ${res.status}`);
