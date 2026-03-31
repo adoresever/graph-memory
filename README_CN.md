@@ -152,7 +152,7 @@ session_end
   ├─ finalize（LLM）：EVENT → SKILL 升级
   └─ maintenance：去重 → PageRank → 社区检测
 
-下次新对话 → before_agent_start
+下次新对话 → before_prompt_build
   ├─ 双路径召回（精确 + 泛化）
   └─ 个性化 PageRank 排序 → 注入上下文
 ```

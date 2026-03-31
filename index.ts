@@ -235,9 +235,9 @@ const graphMemoryPlugin = {
       return next;
     }
 
-    // ── before_agent_start：召回 ────────────────────────────
+    // ── before_prompt_build：召回 ────────────────────────────
 
-    api.on("before_agent_start", async (event: any, ctx: any) => {
+    api.on("before_prompt_build", async (event: any, ctx: any) => {
       try {
         const rawPrompt = typeof event?.prompt === "string" ? event.prompt : "";
         const prompt = cleanPrompt(rawPrompt);

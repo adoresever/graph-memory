@@ -18,7 +18,24 @@ export function resolvePath(p: string): string {
 export function getDb(dbPath: string): DatabaseSyncInstance {
   if (_db) return _db;
   const resolved = resolvePath(dbPath);
-  mkdirSync(resolved.substring(0, resolved.lastIndexOf("/")), { recursive: true });
+  
+  // 修复：同时处理 Windows 和 Unix 路径分隔符
+  const lastSeparator = Math.max(
+    resolved.lastIndexOf("/"),
+    resolved.lastIndexOf("\\")
+  );
+  
+  if (lastSeparator > 0) {
+    const dirPath = resolved.substring(0, lastSeparator);
+    mkdirSync(dirPath, { recursive: true });
+  } else if (lastSeparator === 0) {
+    // 路径像是 "/file.db" 或 "C:file.db"
+    // 在根目录或驱动器根目录，不需要创建目录
+  } else {
+    // lastSeparator === -1，路径没有分隔符
+    // 像是 "file.db"，使用当前目录，不需要创建目录
+  }
+
   _db = new DatabaseSync(resolved);
   _db.exec("PRAGMA journal_mode = WAL");
   _db.exec("PRAGMA foreign_keys = ON");

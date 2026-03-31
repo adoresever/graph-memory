@@ -150,7 +150,7 @@ session_end
   ├─ finalize (LLM): EVENT → SKILL promotion
   └─ maintenance: dedup → PageRank → community detection
 
-Next session → before_agent_start
+Next session → before_prompt_build
   ├─ Dual-path recall (precise + generalized)
   └─ Personalized PageRank ranking → inject into context
 ```
