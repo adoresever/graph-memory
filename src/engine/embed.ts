@@ -89,9 +89,7 @@ export async function createEmbedFn(cfg: EmbeddingConfig | undefined): Promise<E
       return callEmbedding(text.slice(0, 8000));
     };
   } catch (err) {
-    if (process.env.GM_DEBUG) {
-      console.error(`[graph-memory] embedding probe failed:`, err);
-    }
+    console.error(`[graph-memory] embedding probe failed:`, err);
     return null;
   }
 }
