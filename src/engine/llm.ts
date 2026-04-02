@@ -90,8 +90,8 @@ export function createCompleteFn(
     }
     const res = await fetchRetry("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": anthropicApiKey, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model, max_tokens: 4096, system, messages: [{ role: "user", content: user }] }),
+      headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model: llmConfig?.model ?? model, max_tokens: 4096, system, messages: [{ role: "user", content: user }] }),
     });
     if (!res.ok) throw new Error(`[graph-memory] Anthropic API ${res.status}`);
     const data = await res.json() as any;
