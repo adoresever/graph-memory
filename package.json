@@ -25,6 +25,7 @@
   "openclaw": {
     "extensions": [
       "./index.ts"
-    ]
+    ],
+    "hooks": {}
   }
 }

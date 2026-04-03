@@ -284,11 +284,9 @@ export class Extractor {
 
       return { nodes, edges };
     } catch (err) {
-      if (process.env.GM_DEBUG) {
-        console.log(`  [DEBUG] JSON parse failed: ${err}`);
-        console.log(`  [DEBUG] raw content: ${raw.slice(0, 500)}`);
-      }
-      return { nodes: [], edges: [] };
+      throw new Error(
+        `[graph-memory] extraction parse failed: ${err}\nraw (first 200): ${raw.slice(0, 200)}`,
+      );
     }
   }
 

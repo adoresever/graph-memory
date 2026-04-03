@@ -328,13 +328,11 @@ describe("LLM 输出格式容错", () => {
     expect(result.nodes).toHaveLength(1);
   });
 
-  it("完全无效的输出返回空结果", async () => {
+  it("完全无效的输出抛出错误（防止 markExtracted 误标）", async () => {
     const ext = createExtractor("这不是 JSON，我不知道该怎么提取。");
 
-    const result = await ext.extract({ messages: [], existingNames: [] });
-
-    expect(result.nodes).toHaveLength(0);
-    expect(result.edges).toHaveLength(0);
+    await expect(ext.extract({ messages: [], existingNames: [] }))
+      .rejects.toThrow("extraction parse failed");
   });
 
   it("空 JSON 返回空结果", async () => {
