@@ -123,6 +123,7 @@ export interface EmbeddingConfig {
 
 export interface GmConfig {
   dbPath: string;
+  agentId?: string;
   compactTurnCount: number;
   recallMaxNodes: number;
   recallMaxDepth: number;

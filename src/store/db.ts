@@ -9,22 +9,42 @@ import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite"
 import { mkdirSync } from "fs";
 import { homedir } from "os";
 
-let _db: DatabaseSyncInstance | null = null;
+const _dbMap = new Map<string, DatabaseSyncInstance>();
 
 export function resolvePath(p: string): string {
   return p.replace(/^~/, homedir());
 }
 
+export function resolveAgentDbPath(dbPath: string, agentId?: string): string {
+  const aid = agentId?.trim();
+  if (!aid) return dbPath;
+
+  // Sanitize: only alphanumeric, hyphens, underscores
+  const safe = aid.replace(/[^a-zA-Z0-9_-]/g, "_");
+  if (!safe) return dbPath;
+
+  const lastSlash = Math.max(dbPath.lastIndexOf("/"), dbPath.lastIndexOf("\\"));
+  const dotIdx = dbPath.lastIndexOf(".");
+
+  if (dotIdx > lastSlash && dotIdx !== -1) {
+    // Has extension: insert suffix before it
+    return `${dbPath.slice(0, dotIdx)}-${safe}${dbPath.slice(dotIdx)}`;
+  }
+  // No extension: append suffix
+  return `${dbPath}-${safe}`;
+}
+
 export function getDb(dbPath: string): DatabaseSyncInstance {
-  if (_db) return _db;
   const resolved = resolvePath(dbPath);
-  
+  const existing = _dbMap.get(resolved);
+  if (existing) return existing;
+
   // 修复：同时处理 Windows 和 Unix 路径分隔符
   const lastSeparator = Math.max(
     resolved.lastIndexOf("/"),
     resolved.lastIndexOf("\\")
   );
-  
+
   if (lastSeparator > 0) {
     const dirPath = resolved.substring(0, lastSeparator);
     mkdirSync(dirPath, { recursive: true });
@@ -36,16 +56,24 @@ export function getDb(dbPath: string): DatabaseSyncInstance {
     // 像是 "file.db"，使用当前目录，不需要创建目录
   }
 
-  _db = new DatabaseSync(resolved);
-  _db.exec("PRAGMA journal_mode = WAL");
-  _db.exec("PRAGMA foreign_keys = ON");
-  migrate(_db);
-  return _db;
+  const db = new DatabaseSync(resolved);
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA foreign_keys = ON");
+  migrate(db);
+  _dbMap.set(resolved, db);
+  return db;
 }
 
-/** 仅用于测试：关闭并重置单例 */
-export function closeDb(): void {
-  if (_db) { _db.close(); _db = null; }
+/** 仅用于测试：关闭并重置单例（不传 path 则关闭全部） */
+export function closeDb(dbPath?: string): void {
+  if (dbPath) {
+    const resolved = resolvePath(dbPath);
+    const db = _dbMap.get(resolved);
+    if (db) { db.close(); _dbMap.delete(resolved); }
+  } else {
+    for (const db of _dbMap.values()) db.close();
+    _dbMap.clear();
+  }
 }
 
 function migrate(db: DatabaseSyncInstance): void {

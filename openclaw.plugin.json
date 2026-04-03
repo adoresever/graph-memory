@@ -1,7 +1,7 @@
 {
   "id": "graph-memory",
   "name": "Graph Memory",
-  "version": "1.5.7",
+  "version": "1.6.0",
   "description": "知识图谱记忆引擎：从对话提取三元组，FTS5+图遍历+PageRank 跨对话召回，社区聚类+向量去重自动维护",
   "configSchema": {
     "type": "object",
@@ -10,6 +10,10 @@
         "type": "string",
         "default": "~/.openclaw/graph-memory.db",
         "description": "SQLite 图谱数据库路径"
+      },
+      "agentId": {
+        "type": "string",
+        "description": "可选：Agent 命名空间。设置后知识库按 Agent 隔离，dbPath 变为 dbPath-{agentId}.db。不设置则共享（单 Agent 模式）。"
       },
       "compactTurnCount": {
         "type": "integer",
