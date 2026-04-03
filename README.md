@@ -63,6 +63,14 @@ The embedding module now uses raw `fetch` instead of the `openai` SDK, making it
 - Ollama, llama.cpp, vLLM (local models)
 - Any endpoint that implements `POST /embeddings`
 
+### Operational safeguards
+
+Three small safeguards make graph-memory cheaper and safer to run in busy OpenClaw deployments:
+
+- **Readonly subagent/helper sessions**: subagents and short-lived helper sessions can still inherit recall context, but they no longer write noisy long-term memory into the shared graph. This keeps maintenance focused on human-facing sessions instead of ephemeral worker chatter.
+- **Permanent-error LLM cooldown**: repeated `400/401/403/404/422` failures from `config.llm` now trigger a temporary cooldown instead of hammering the provider every turn. This turns broken credentials or disabled accounts into a contained failure instead of runaway token spend.
+- **Community summary reuse**: community summaries are now keyed by member signatures. If a community has not changed, graph-memory skips regeneration; if the same member set reappears under a different community id, it reuses the cached summary and embedding. This cuts unnecessary summary LLM calls without changing recall quality.
+
 ### Windows one-click installer
 
 v2.0 ships a **Windows installer** (`.exe`). Download from [Releases](https://github.com/adoresever/graph-memory/releases):
@@ -144,6 +152,7 @@ assemble (zero LLM)
 afterTurn (async, non-blocking)
   ├─ LLM extracts triples → gm_nodes + gm_edges
   ├─ Every 7 turns: PageRank + community detection + community summaries
+  │    └─ unchanged communities reuse cached summaries/embeddings
   └─ User sends new message → extract auto-interrupted
 
 session_end
@@ -152,6 +161,7 @@ session_end
 
 Next session → before_prompt_build
   ├─ Dual-path recall (precise + generalized)
+  ├─ Subagent/helper sessions stay recall-only
   └─ Personalized PageRank ranking → inject into context
 ```
 
@@ -323,6 +333,7 @@ sqlite3 ~/.openclaw/graph-memory.db "SELECT id, summary FROM gm_communities;"
 | `recall` works but `gm_messages` is empty | `plugins.slots.contextEngine` not set | Add `"contextEngine": "graph-memory"` to `plugins.slots` |
 | `FTS5 search mode` instead of `vector search ready` | Embedding not configured or API key invalid | Check `config.embedding` credentials |
 | `No LLM available` error | LLM config missing after plugin reinstall | Re-add `config.llm` to `plugins.entries.graph-memory` |
+| Repeated `LLM API 403/404/422` errors | Broken account, credentials, or provider-side permanent failure | Fix the provider config; graph-memory now enters a temporary cooldown instead of retrying every turn |
 | No `extracted` log after `afterTurn` | Gateway restart caused turn_index overlap | Update to v2.0 (fixes msgSeq persistence) |
 | `content.filter is not a function` | OpenClaw expects array content | Update to v2.0 (adds content normalization) |
 | Nodes are empty after many messages | `compactTurnCount` not reached | Default is 7 messages. Keep chatting or set a lower value |
