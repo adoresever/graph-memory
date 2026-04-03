@@ -43,7 +43,7 @@ interface GraphStructure {
   cachedAt: number;
 }
 
-const _cachedGraphs = new Map<DatabaseSyncInstance, GraphStructure>();
+const _cachedGraphs = new WeakMap<DatabaseSyncInstance, GraphStructure>();
 const CACHE_TTL = 30_000; // 30 秒缓存
 
 /**

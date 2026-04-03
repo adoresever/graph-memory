@@ -189,7 +189,7 @@ export function edgesTo(db: DatabaseSyncInstance, id: string): GmEdge[] {
 
 // ─── FTS5 搜索 ───────────────────────────────────────────────
 
-const _fts5Cache = new Map<DatabaseSyncInstance, boolean>();
+const _fts5Cache = new WeakMap<DatabaseSyncInstance, boolean>();
 
 function fts5Available(db: DatabaseSyncInstance): boolean {
   const cached = _fts5Cache.get(db);
