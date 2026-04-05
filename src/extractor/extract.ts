@@ -6,11 +6,11 @@
  */
 
 import type { GmConfig, ExtractionResult, FinalizeResult } from "../types.ts";
+import { normalizeNodeType } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 
 // ─── 节点/边合法值 ──────────────────────────────────────────────
 
-const VALID_NODE_TYPES = new Set(["TASK", "SKILL", "EVENT"]);
 const VALID_EDGE_TYPES = new Set(["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH"]);
 
 /** 边类型 → 合法的 from 节点类型 */
@@ -261,10 +261,12 @@ export class Extractor {
 
       const nodes = (p.nodes ?? []).filter((n: any) => {
         if (!n.name || !n.type || !n.content) return false;
-        if (!VALID_NODE_TYPES.has(n.type)) {
+        const nt = normalizeNodeType(String(n.type));
+        if (!nt) {
           if (process.env.GM_DEBUG) console.log(`  [DEBUG] node dropped: invalid type "${n.type}"`);
           return false;
         }
+        n.type = nt;
         if (!n.description) n.description = "";
         n.name = normalizeName(n.name);
         return true;
@@ -328,7 +330,7 @@ export class Extractor {
 
 function extractJson(raw: string): string {
   let s = raw.trim();
-  s = s.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  s = s.replace(/<think>[\s\S]*?<\/redacted_thinking>/gi, "");
   s = s.replace(/<think>[\s\S]*/gi, "");
   s = s.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?\s*```\s*$/i, "");
   s = s.trim();

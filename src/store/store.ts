@@ -6,13 +6,13 @@
  */
 
 import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import type { GmNode, GmEdge, EdgeType, NodeType, Signal } from "../types.ts";
 
 // ─── 工具 ─────────────────────────────────────────────────────
 
 function uid(p: string): string {
-  return `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  return `${p}-${randomUUID()}`;
 }
 
 function toNode(r: any): GmNode {

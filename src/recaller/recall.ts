@@ -232,12 +232,13 @@ export class Recaller {
   /** 异步同步 embedding，不阻塞主流程 */
   async syncEmbed(node: GmNode): Promise<void> {
     if (!this.embed) return;
-    const hash = createHash("md5").update(node.content).digest("hex");
+    const embedSource = `${node.name}: ${node.description}\n${node.content.slice(0, 500)}`;
+    const hash = createHash("md5").update(embedSource).digest("hex");
     if (getVectorHash(this.db, node.id) === hash) return;
     try {
-      const text = `${node.name}: ${node.description}\n${node.content.slice(0, 500)}`;
+      const text = embedSource;
       const vec = await this.embed(text);
-      if (vec.length) saveVector(this.db, node.id, node.content, vec);
+      if (vec.length) saveVector(this.db, node.id, embedSource, vec);
     } catch { /* 不影响主流程 */ }
   }
 }

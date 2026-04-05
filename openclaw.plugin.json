@@ -52,20 +52,23 @@
       },
       "embedding": {
         "type": "object",
-        "description": "可选：向量搜索配置。配了用语义搜索+去重，没配用 FTS5 全文搜索",
+        "description": "可选：向量搜索。未填 apiKey/baseURL 时复用 llm 的同字段（同一 OpenAI 兼容网关下一处配置即可）。LLM 用 Anthropic 时须在此单独写 OpenAI 兼容 baseURL 才能走向量。",
         "properties": {
-          "apiKey": { "type": "string", "description": "Embedding API Key" },
-          "baseURL": { "type": "string", "default": "https://api.openai.com/v1", "description": "API 地址" },
+          "apiKey": { "type": "string", "description": "可选；缺省则用 llm.apiKey" },
+          "baseURL": { "type": "string", "default": "https://api.openai.com/v1", "description": "可选；缺省则用 llm.baseURL，再缺省为 OpenAI 官方 v1" },
           "model": { "type": "string", "default": "text-embedding-3-small", "description": "模型名" },
           "dimensions": { "type": "integer", "default": 512, "description": "向量维度" }
         }
       },
       "llm": {
         "type": "object",
-        "description": "可选：LLM 配置。不配则用 OpenClaw 全局 provider",
+        "description": "必填：提取/整理用 LLM。baseURL 含 anthropic.com 时走 Anthropic Messages API，否则走 OpenAI 兼容 /chat/completions",
         "properties": {
-          "apiKey": { "type": "string" },
-          "baseURL": { "type": "string" },
+          "apiKey": { "type": "string", "description": "API Key（写入配置，勿依赖环境变量）" },
+          "baseURL": {
+            "type": "string",
+            "description": "例如 https://api.openai.com/v1 或 https://api.anthropic.com"
+          },
           "model": { "type": "string" }
         }
       }

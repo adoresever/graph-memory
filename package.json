@@ -5,7 +5,7 @@
   "main": "index.ts",
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -26,6 +26,6 @@
     "extensions": [
       "./index.ts"
     ],
-    "hooks": {}
+    "hooks": []
   }
 }

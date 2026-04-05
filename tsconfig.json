@@ -3,12 +3,12 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "types": ["node", "vitest/globals"],
     "esModuleInterop": true,
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "strict": true,
     "skipLibCheck": true,
-    "outDir": "dist",
     "rootDir": ".",
     "baseUrl": "."
   },

@@ -15,6 +15,14 @@
 // ─── 节点 ─────────────────────────────────────────────────────
 
 export type NodeType = "TASK" | "SKILL" | "EVENT";
+
+/** 校验并规范化节点类型（大小写不敏感）；非法则返回 null */
+export function normalizeNodeType(s: string): NodeType | null {
+  const t = s.trim().toUpperCase();
+  if (t === "TASK" || t === "SKILL" || t === "EVENT") return t;
+  return null;
+}
+
 export type NodeStatus = "active" | "deprecated";
 
 export interface GmNode {

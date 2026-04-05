@@ -22,7 +22,7 @@ const cfg: GmConfig = { ...DEFAULT_CONFIG };
 
 beforeEach(() => {
   db = createTestDb();
-  invalidateGraphCache();
+  invalidateGraphCache(db);
 });
 
 // ═══════════════════════════════════════════════════════════════

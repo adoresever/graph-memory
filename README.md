@@ -247,13 +247,11 @@ Add your API credentials inside `plugins.entries.graph-memory.config`:
         "enabled": true,
         "config": {
           "llm": {
-            "apiKey": "your-llm-api-key",
+            "apiKey": "your-api-key",
             "baseURL": "https://api.openai.com/v1",
             "model": "gpt-4o-mini"
           },
           "embedding": {
-            "apiKey": "your-embedding-api-key",
-            "baseURL": "https://api.openai.com/v1",
             "model": "text-embedding-3-small",
             "dimensions": 512
           }
@@ -264,13 +262,13 @@ Add your API credentials inside `plugins.entries.graph-memory.config`:
 }
 ```
 
-**LLM** (`config.llm`) — Required. Used for knowledge extraction and community summaries. Any OpenAI-compatible endpoint works. Use a cheap/fast model.
+**LLM** (`config.llm`) — Required. Set `apiKey` and `baseURL` in config (do not rely on environment variables; OpenClaw’s installer flags env access + network as unsafe). Use an OpenAI-compatible `baseURL` for `/chat/completions`, or set `baseURL` to `https://api.anthropic.com` to use Anthropic’s Messages API. Use a cheap/fast model.
 
-**Embedding** (`config.embedding`) — Optional but recommended. Enables semantic vector search, community-level recall, and vector dedup. Without it, falls back to FTS5 full-text search (still works, just keyword-based).
+**Embedding** (`config.embedding`) — Optional fields on top of the same provider defaults. If you omit `embedding.apiKey` / `embedding.baseURL`, graph-memory **reuses `llm.apiKey` and `llm.baseURL`** for `POST …/embeddings` (same OpenAI-compatible host). You can omit the whole `embedding` object and still get vectors with the default embedding model (`text-embedding-3-small`). If the LLM host is Anthropic, there is no compatible `/embeddings` route—set `embedding.baseURL` (and `embedding.apiKey` if different) to an OpenAI-compatible endpoint, or accept FTS5-only search.
 
-> **⚠️ Important**: `pnpm openclaw plugins install` may reset your config. Always verify `config.llm` and `config.embedding` are present after reinstalling.
+> **⚠️ Important**: `pnpm openclaw plugins install` may reset your config. Always verify `config.llm` (and any `embedding` overrides you rely on) after reinstalling.
 
-If `config.llm` is not set, graph-memory falls back to the `ANTHROPIC_API_KEY` environment variable + Anthropic API.
+If `config.llm` is missing or incomplete, graph-memory throws at first LLM call with instructions to add `llm.apiKey` and `llm.baseURL`.
 
 ### Supported embedding providers
 

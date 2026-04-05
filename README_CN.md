@@ -249,13 +249,11 @@ pnpm openclaw plugins install .
         "enabled": true,
         "config": {
           "llm": {
-            "apiKey": "你的LLM-API密钥",
+            "apiKey": "你的API密钥",
             "baseURL": "https://api.openai.com/v1",
             "model": "gpt-4o-mini"
           },
           "embedding": {
-            "apiKey": "你的Embedding-API密钥",
-            "baseURL": "https://api.openai.com/v1",
             "model": "text-embedding-3-small",
             "dimensions": 512
           }
@@ -266,13 +264,13 @@ pnpm openclaw plugins install .
 }
 ```
 
-**LLM**（`config.llm`）— 必填。用于知识提取和社区摘要生成。支持任何 OpenAI 兼容端点。建议用便宜/快速的模型。
+**LLM**（`config.llm`）— 必填。在配置里填写 `apiKey` 与 `baseURL`（不要依赖环境变量；OpenClaw 安装器会把「读环境变量 + 发网络请求」标为高风险）。`baseURL` 为 OpenAI 兼容地址时走 `/chat/completions`；填 `https://api.anthropic.com` 时走 Anthropic Messages API。建议用便宜/快速的模型。
 
-**Embedding**（`config.embedding`）— 可选但推荐。启用语义向量搜索、社区级召回和向量去重。不配则降级为 FTS5 全文搜索（仍然可用，只是基于关键词匹配）。
+**Embedding**（`config.embedding`）— 可选，用于覆盖向量相关字段。若省略 `embedding.apiKey` / `embedding.baseURL`，会**复用 `llm.apiKey` 与 `llm.baseURL`** 调用同一主机上的 `POST …/embeddings`。整个 `embedding` 对象都可以不写，此时仍可用默认嵌入模型 `text-embedding-3-small` 启用向量。若 LLM 走 Anthropic，其网关不提供 OpenAI 式 `/embeddings`，需在 `embedding` 里单独写 OpenAI 兼容的 `baseURL`（密钥不同则再写 `apiKey`），否则仅 FTS5。
 
-> **⚠️ 注意**：`pnpm openclaw plugins install` 可能会重置你的配置。每次重装插件后请检查 `config.llm` 和 `config.embedding` 是否还在。
+> **⚠️ 注意**：`pnpm openclaw plugins install` 可能会重置你的配置。每次重装插件后请确认 `config.llm` 以及你依赖的 `embedding` 覆盖项仍在。
 
-如果不配 `config.llm`，graph-memory 会回退到环境变量 `ANTHROPIC_API_KEY` + Anthropic API。
+若未配置或缺少 `llm.apiKey` / `llm.baseURL`，首次调用 LLM 时会抛出明确错误提示补全配置。
 
 ### 支持的 Embedding 服务商
 

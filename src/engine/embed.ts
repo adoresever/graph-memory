@@ -8,7 +8,12 @@
 /**
  * Embedding 服务
  *
- * 可选模块：配了 embedding.apiKey 才启用，否则返回 null → 降级 FTS5
+ * 可选模块：解析后的配置里需有 apiKey 才启用，否则返回 null → 降级 FTS5
+ *
+ * apiKey / baseURL 可与 llm 共用：未在 embedding 中填写时，回退到 config.llm，
+ * 便于在同一家 OpenAI 兼容服务商下一处填密钥、同时开对话与向量。
+ * 若 llm.baseURL 为 Anthropic，/embeddings 不可用，需在 embedding 里单独写
+ * OpenAI 兼容的 baseURL（或接受仅 FTS5）。
  *
  * 使用 fetch 直接调 OpenAI 兼容 /embeddings 接口（不依赖 openai SDK），
  * 兼容 OpenAI、阿里云 DashScope、MiniMax、Jina、Ollama、llama.cpp 等。
@@ -16,7 +21,21 @@
  * 内置：429/5xx 重试 3 次 + 10s 超时
  */
 
-import type { EmbeddingConfig } from "../types.ts";
+import type { EmbeddingConfig, GmConfig } from "../types.ts";
+
+/** 合并 llm 与 embedding，供一处配置或分别覆盖 */
+export function resolveEffectiveEmbeddingConfig(cfg: GmConfig): EmbeddingConfig | undefined {
+  const e = cfg.embedding;
+  const l = cfg.llm;
+  const apiKey = e?.apiKey ?? l?.apiKey;
+  if (!apiKey) return undefined;
+  return {
+    apiKey,
+    baseURL: e?.baseURL ?? l?.baseURL ?? "https://api.openai.com/v1",
+    model: e?.model,
+    dimensions: e?.dimensions,
+  };
+}
 
 export type EmbedFn = (text: string) => Promise<number[]>;
 
@@ -44,12 +63,14 @@ async function fetchRetry(url: string, init: RequestInit, retries = 3, timeoutMs
 
 // ─── EmbedFn 工厂 ───────────────────────────────────────────
 
-export async function createEmbedFn(cfg: EmbeddingConfig | undefined): Promise<EmbedFn | null> {
-  if (!cfg?.apiKey) return null;
+export async function createEmbedFn(cfg: GmConfig): Promise<EmbedFn | null> {
+  const resolved = resolveEffectiveEmbeddingConfig(cfg);
+  if (!resolved || !resolved.apiKey) return null;
 
-  const baseURL    = (cfg.baseURL ?? "https://api.openai.com/v1").replace(/\/+$/, "");
-  const model      = cfg.model ?? "text-embedding-3-small";
-  const dimensions = cfg.dimensions && cfg.dimensions > 0 ? cfg.dimensions : undefined;
+  const apiKey     = resolved.apiKey;
+  const baseURL    = (resolved.baseURL ?? "https://api.openai.com/v1").replace(/\/+$/, "");
+  const model      = resolved.model ?? "text-embedding-3-small";
+  const dimensions = resolved.dimensions && resolved.dimensions > 0 ? resolved.dimensions : undefined;
 
   function buildBody(input: string): Record<string, unknown> {
     const body: Record<string, unknown> = { model, input };
@@ -62,7 +83,7 @@ export async function createEmbedFn(cfg: EmbeddingConfig | undefined): Promise<E
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${cfg!.apiKey}`,
+        "Authorization": `Bearer ${apiKey}`,
       },
       body: JSON.stringify(buildBody(input)),
     });
