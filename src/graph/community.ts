@@ -24,8 +24,15 @@
  *   - kg_stats 展示社区分布
  */
 
+import { createHash } from "node:crypto";
 import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
-import { updateCommunities } from "../store/store.ts";
+import {
+  getCommunitySummary,
+  getCommunitySummaryBySignature,
+  pruneCommunitySummaries,
+  updateCommunities,
+  upsertCommunitySummary,
+} from "../store/store.ts";
 
 export interface CommunityResult {
   labels: Map<string, string>;
@@ -168,13 +175,16 @@ export function getCommunityPeers(db: DatabaseSyncInstance, nodeId: string, limi
 
 import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn } from "../engine/embed.ts";
-import { upsertCommunitySummary, pruneCommunitySummaries } from "../store/store.ts";
 
 const COMMUNITY_SUMMARY_SYS = `你是知识图谱摘要引擎。根据节点列表，用简短的描述概括这组节点的主题领域。
 要求：
 - 只返回短语本身，不要解释
 - 描述涵盖的工具/技术/任务领域
 - 不要使用"社区"这个词`;
+
+function buildCommunityMemberSignature(memberIds: string[]): string {
+  return createHash("sha1").update([...memberIds].sort().join(",")).digest("hex");
+}
 
 /**
  * 为所有社区生成 LLM 摘要描述 + embedding 向量
@@ -192,6 +202,25 @@ export async function summarizeCommunities(
 
   for (const [communityId, memberIds] of communities) {
     if (memberIds.length === 0) continue;
+    const memberSignature = buildCommunityMemberSignature(memberIds);
+
+    const current = getCommunitySummary(db, communityId);
+    if (current?.memberSignature === memberSignature && current.summary.trim()) {
+      continue;
+    }
+
+    const reusable = getCommunitySummaryBySignature(db, memberSignature);
+    if (reusable?.summary.trim()) {
+      upsertCommunitySummary(
+        db,
+        communityId,
+        reusable.summary,
+        memberIds.length,
+        reusable.embedding,
+        memberSignature,
+      );
+      continue;
+    }
 
     const placeholders = memberIds.map(() => "?").join(",");
     const members = db.prepare(`
@@ -238,7 +267,7 @@ export async function summarizeCommunities(
         }
       }
 
-      upsertCommunitySummary(db, communityId, cleaned, memberIds.length, embedding);
+      upsertCommunitySummary(db, communityId, cleaned, memberIds.length, embedding, memberSignature);
       generated++;
     } catch (err) {
       console.log(`  [WARN] community summary failed for ${communityId}: ${err}`);

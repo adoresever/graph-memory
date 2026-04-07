@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
 import { createTestDb, insertNode, insertEdge } from "./helpers.ts";
 import { personalizedPageRank, computeGlobalPageRank, invalidateGraphCache } from "../src/graph/pagerank.ts";
-import { detectCommunities, getCommunityPeers } from "../src/graph/community.ts";
+import { detectCommunities, getCommunityPeers, summarizeCommunities } from "../src/graph/community.ts";
 import { detectDuplicates, dedup } from "../src/graph/dedup.ts";
 import { runMaintenance } from "../src/graph/maintenance.ts";
 import { saveVector } from "../src/store/store.ts";
@@ -193,6 +193,26 @@ describe("Community Detection", () => {
   it("空图不报错", () => {
     const { count } = detectCommunities(db);
     expect(count).toBe(0);
+  });
+
+  it("reuses existing summaries when a community is unchanged", async () => {
+    const a = insertNode(db, { name: "docker-build" });
+    const b = insertNode(db, { name: "docker-push" });
+    insertEdge(db, { fromId: a, toId: b });
+
+    const { communities } = detectCommunities(db);
+    let llmCalls = 0;
+    const llm = async () => {
+      llmCalls += 1;
+      return "docker deployment skills";
+    };
+
+    const first = await summarizeCommunities(db, communities, llm);
+    const second = await summarizeCommunities(db, communities, llm);
+
+    expect(first).toBe(1);
+    expect(second).toBe(0);
+    expect(llmCalls).toBe(1);
   });
 });
 

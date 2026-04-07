@@ -531,39 +531,85 @@ export interface CommunitySummary {
   id: string;
   summary: string;
   nodeCount: number;
+  memberSignature: string | null;
   createdAt: number;
   updatedAt: number;
 }
 
 export function upsertCommunitySummary(
-  db: DatabaseSyncInstance, id: string, summary: string, nodeCount: number, embedding?: number[],
+  db: DatabaseSyncInstance,
+  id: string,
+  summary: string,
+  nodeCount: number,
+  embedding?: number[] | Uint8Array,
+  memberSignature?: string,
 ): void {
   const now = Date.now();
-  const blob = embedding ? new Uint8Array(new Float32Array(embedding).buffer) : null;
+  const blob = embedding
+    ? embedding instanceof Uint8Array
+      ? embedding
+      : new Uint8Array(new Float32Array(embedding).buffer)
+    : null;
   const ex = db.prepare("SELECT id FROM gm_communities WHERE id=?").get(id) as any;
   if (ex) {
     if (blob) {
-      db.prepare("UPDATE gm_communities SET summary=?, node_count=?, embedding=?, updated_at=? WHERE id=?")
-        .run(summary, nodeCount, blob, now, id);
+      db.prepare("UPDATE gm_communities SET summary=?, node_count=?, embedding=?, member_signature=?, updated_at=? WHERE id=?")
+        .run(summary, nodeCount, blob, memberSignature ?? null, now, id);
     } else {
-      db.prepare("UPDATE gm_communities SET summary=?, node_count=?, updated_at=? WHERE id=?")
-        .run(summary, nodeCount, now, id);
+      db.prepare("UPDATE gm_communities SET summary=?, node_count=?, member_signature=?, updated_at=? WHERE id=?")
+        .run(summary, nodeCount, memberSignature ?? null, now, id);
     }
   } else {
-    db.prepare("INSERT INTO gm_communities (id, summary, node_count, embedding, created_at, updated_at) VALUES (?,?,?,?,?,?)")
-      .run(id, summary, nodeCount, blob, now, now);
+    db.prepare("INSERT INTO gm_communities (id, summary, node_count, embedding, member_signature, created_at, updated_at) VALUES (?,?,?,?,?,?,?)")
+      .run(id, summary, nodeCount, blob, memberSignature ?? null, now, now);
   }
 }
 
 export function getCommunitySummary(db: DatabaseSyncInstance, id: string): CommunitySummary | null {
   const r = db.prepare("SELECT * FROM gm_communities WHERE id=?").get(id) as any;
   if (!r) return null;
-  return { id: r.id, summary: r.summary, nodeCount: r.node_count, createdAt: r.created_at, updatedAt: r.updated_at };
+  return {
+    id: r.id,
+    summary: r.summary,
+    nodeCount: r.node_count,
+    memberSignature: r.member_signature ?? null,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+export function getCommunitySummaryBySignature(
+  db: DatabaseSyncInstance,
+  memberSignature: string,
+): (CommunitySummary & { embedding?: Uint8Array }) | null {
+  const r = db.prepare(`
+    SELECT * FROM gm_communities
+    WHERE member_signature=?
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `).get(memberSignature) as any;
+  if (!r) return null;
+  return {
+    id: r.id,
+    summary: r.summary,
+    nodeCount: r.node_count,
+    memberSignature: r.member_signature ?? null,
+    embedding: r.embedding ? (r.embedding as Uint8Array) : undefined,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
 }
 
 export function getAllCommunitySummaries(db: DatabaseSyncInstance): CommunitySummary[] {
   return (db.prepare("SELECT * FROM gm_communities ORDER BY node_count DESC").all() as any[])
-    .map(r => ({ id: r.id, summary: r.summary, nodeCount: r.node_count, createdAt: r.created_at, updatedAt: r.updated_at }));
+    .map(r => ({
+      id: r.id,
+      summary: r.summary,
+      nodeCount: r.node_count,
+      memberSignature: r.member_signature ?? null,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    }));
 }
 
 export type ScoredCommunity = { id: string; summary: string; score: number; nodeCount: number };

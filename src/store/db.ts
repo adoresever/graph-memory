@@ -5,6 +5,7 @@
  * Email: Wywelljob@gmail.com
  */
 
+import { createHash } from "node:crypto";
 import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
 import { mkdirSync } from "fs";
 import { homedir } from "os";
@@ -51,7 +52,16 @@ export function closeDb(): void {
 function migrate(db: DatabaseSyncInstance): void {
   db.exec(`CREATE TABLE IF NOT EXISTS _migrations (v INTEGER PRIMARY KEY, at INTEGER NOT NULL)`);
   const cur = (db.prepare("SELECT MAX(v) as v FROM _migrations").get() as any)?.v ?? 0;
-  const steps = [m1_core, m2_messages, m3_signals, m4_fts5, m5_vectors, m6_communities];
+  const steps = [
+    m1_core,
+    m2_messages,
+    m3_signals,
+    m4_fts5,
+    m5_vectors,
+    m6_communities,
+    m7_community_signature,
+    m8_backfill_community_signatures,
+  ];
   for (let i = cur; i < steps.length; i++) {
     steps[i](db);
     db.prepare("INSERT INTO _migrations (v,at) VALUES (?,?)").run(i + 1, Date.now());
@@ -180,12 +190,49 @@ function m5_vectors(db: DatabaseSyncInstance): void {
 function m6_communities(db: DatabaseSyncInstance): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS gm_communities (
-      id          TEXT PRIMARY KEY,
-      summary     TEXT NOT NULL,
-      node_count  INTEGER NOT NULL DEFAULT 0,
-      embedding   BLOB,
-      created_at  INTEGER NOT NULL,
-      updated_at  INTEGER NOT NULL
+      id               TEXT PRIMARY KEY,
+      summary          TEXT NOT NULL,
+      node_count       INTEGER NOT NULL DEFAULT 0,
+      embedding        BLOB,
+      member_signature TEXT,
+      created_at       INTEGER NOT NULL,
+      updated_at       INTEGER NOT NULL
     );
   `);
+}
+
+function m7_community_signature(db: DatabaseSyncInstance): void {
+  const cols = db.prepare("PRAGMA table_info(gm_communities)").all() as Array<{ name?: string }>;
+  const hasMemberSignature = cols.some((col) => col.name === "member_signature");
+  if (!hasMemberSignature) {
+    db.exec("ALTER TABLE gm_communities ADD COLUMN member_signature TEXT");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS ix_gm_communities_member_signature ON gm_communities(member_signature)");
+}
+
+function m8_backfill_community_signatures(db: DatabaseSyncInstance): void {
+  const missing = db.prepare(`
+    SELECT id FROM gm_communities
+    WHERE member_signature IS NULL OR member_signature=''
+  `).all() as Array<{ id: string }>;
+
+  for (const row of missing) {
+    const members = db.prepare(`
+      SELECT id FROM gm_nodes
+      WHERE community_id=? AND status='active'
+      ORDER BY id
+    `).all(row.id) as Array<{ id: string }>;
+
+    if (!members.length) continue;
+
+    const memberSignature = createHash("sha1")
+      .update(members.map((member) => member.id).join(","))
+      .digest("hex");
+
+    db.prepare(`
+      UPDATE gm_communities
+      SET member_signature=?, updated_at=updated_at
+      WHERE id=?
+    `).run(memberSignature, row.id);
+  }
 }
