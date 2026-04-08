@@ -28,6 +28,7 @@ import { sanitizeToolUseResultPairing } from "./src/format/transcript-repair.ts"
 import { runMaintenance } from "./src/graph/maintenance.ts";
 import { invalidateGraphCache, computeGlobalPageRank } from "./src/graph/pagerank.ts";
 import { detectCommunities } from "./src/graph/community.ts";
+import { ReadonlySessionRegistry } from "./src/session-policy.ts";
 import { DEFAULT_CONFIG, type GmConfig } from "./src/types.ts";
 
 // ─── 从 OpenClaw config 读 provider/model ────────────────────
@@ -158,9 +159,23 @@ const graphMemoryPlugin = {
     const msgSeq = new Map<string, number>();
     const recalled = new Map<string, { nodes: any[]; edges: any[] }>();
     const turnCounter = new Map<string, number>(); // 社区维护计数器
+    const readonlySessions = new ReadonlySessionRegistry();
 
     // ── 提取串行化（同 session Promise chain，不同 session 并行）────
     const extractChain = new Map<string, Promise<void>>();
+
+    function isReadonlySession(sessionKey?: string): boolean {
+      return readonlySessions.has(sessionKey);
+    }
+
+    function cleanupSessionState(sessionKey: string | undefined, forgetReadonly = false): void {
+      if (!sessionKey) return;
+      extractChain.delete(sessionKey);
+      msgSeq.delete(sessionKey);
+      recalled.delete(sessionKey);
+      turnCounter.delete(sessionKey);
+      if (forgetReadonly) readonlySessions.clear(sessionKey);
+    }
 
     /** 存一条消息到 gm_messages（同步，零 LLM） */
     function ingestMessage(sessionId: string, message: any): void {
@@ -245,6 +260,7 @@ const graphMemoryPlugin = {
         if (prompt.includes("/new or /reset") || prompt.includes("new session was started")) return;
 
         const sid = ctx?.sessionId ?? ctx?.sessionKey;
+        if (isReadonlySession(sid)) return;
 
         api.logger.info(`[graph-memory] recall query: "${prompt.slice(0, 80)}"`);
 
@@ -286,6 +302,7 @@ const graphMemoryPlugin = {
         isHeartbeat?: boolean;
       }) {
         if (isHeartbeat) return { ingested: false };
+        if (isReadonlySession(sessionId)) return { ingested: false };
         ingestMessage(sessionId, message);
         return { ingested: true };
       },
@@ -301,7 +318,7 @@ const graphMemoryPlugin = {
         tokenBudget?: number;
         prompt?: string;  // Added in OpenClaw 2026.03.28: prompt-aware retrieval
       }) {
-        const activeNodes = getBySession(db, sessionId);
+        const activeNodes = isReadonlySession(sessionId) ? [] : getBySession(db, sessionId);
         const activeEdges = activeNodes.flatMap((n) => [
           ...edgesFrom(db, n.id),
           ...edgesTo(db, n.id),
@@ -378,6 +395,10 @@ const graphMemoryPlugin = {
         force?: boolean;
         currentTokenCount?: number;
       }) {
+        if (isReadonlySession(sessionId)) {
+          return { ok: true, compacted: false, reason: "readonly session" };
+        }
+
         // compact 仍然保留作为兜底，但主要提取在 afterTurn 完成
         const msgs = getUnextracted(db, sessionId, 50);
 
@@ -444,6 +465,7 @@ const graphMemoryPlugin = {
         tokenBudget?: number;
       }) {
         if (isHeartbeat) return;
+        if (isReadonlySession(sessionId)) return;
 
         // Messages are already persisted by ingest() — only slice to
         // determine the new-message count for extraction triggering.
@@ -503,20 +525,26 @@ const graphMemoryPlugin = {
         parentSessionKey: string;
         childSessionKey: string;
       }) {
+        readonlySessions.markReadonly(childSessionKey);
         const rec = recalled.get(parentSessionKey);
         if (rec) recalled.set(childSessionKey, rec);
-        return { rollback: () => { recalled.delete(childSessionKey); } };
+        return {
+          rollback: () => {
+            cleanupSessionState(childSessionKey, true);
+          },
+        };
       },
 
       async onSubagentEnded({ childSessionKey }: { childSessionKey: string }) {
-        recalled.delete(childSessionKey);
-        msgSeq.delete(childSessionKey);
+        cleanupSessionState(childSessionKey, true);
       },
 
       async dispose() {
         extractChain.clear();
         msgSeq.clear();
         recalled.clear();
+        turnCounter.clear();
+        readonlySessions.clearAll();
       },
     };
 
@@ -533,6 +561,8 @@ const graphMemoryPlugin = {
       if (!sid) return;
 
       try {
+        if (isReadonlySession(sid)) return;
+
         const nodes = getBySession(db, sid);
         if (nodes.length) {
           const summary = (
@@ -581,10 +611,7 @@ const graphMemoryPlugin = {
       } catch (err) {
         api.logger.error(`[graph-memory] session_end error: ${err}`);
       } finally {
-        extractChain.delete(sid);
-        msgSeq.delete(sid);
-        recalled.delete(sid);
-        turnCounter.delete(sid);
+        cleanupSessionState(sid, true);
       }
     });
 
@@ -651,6 +678,12 @@ const graphMemoryPlugin = {
           p: { name: string; type: string; description: string; content: string; relatedSkill?: string },
         ) {
           const sid = ctx?.sessionKey ?? ctx?.sessionId ?? "manual";
+          if (isReadonlySession(sid)) {
+            return {
+              content: [{ type: "text", text: "subagent session is running in read-only graph-memory mode." }],
+              details: { readonly: true, sessionKey: sid },
+            };
+          }
           const { node } = upsertNode(db, {
             type: p.type as any, name: p.name,
             description: p.description, content: p.content,
@@ -704,12 +737,19 @@ const graphMemoryPlugin = {
     );
 
     api.registerTool(
-      (_ctx: any) => ({
+      (ctx: any) => ({
         name: "gm_maintain",
         label: "Graph Memory Maintenance",
         description: "手动触发图维护：运行去重、PageRank 重算、社区检测。通常 session_end 时自动运行，这个工具用于手动触发。",
         parameters: Type.Object({}),
         async execute(_toolCallId: string, _params: any) {
+          const sid = ctx?.sessionKey ?? ctx?.sessionId;
+          if (isReadonlySession(sid)) {
+            return {
+              content: [{ type: "text", text: "subagent session is running in read-only graph-memory mode." }],
+              details: { readonly: true, sessionKey: sid },
+            };
+          }
           const embedFn = (recaller as any).embed ?? undefined;
           const result = await runMaintenance(db, cfg, llm, embedFn);
           const text = [
