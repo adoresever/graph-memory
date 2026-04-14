@@ -16,12 +16,12 @@
  */
 
 import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
-import type { GmConfig } from "../types.ts";
-import type { CompleteFn } from "../engine/llm.ts";
-import type { EmbedFn } from "../engine/embed.ts";
-import { computeGlobalPageRank, invalidateGraphCache, type GlobalPageRankResult } from "./pagerank.ts";
-import { detectCommunities, summarizeCommunities, type CommunityResult } from "./community.ts";
-import { dedup, type DedupResult } from "./dedup.ts";
+import type { GmConfig } from "../types.js";
+import type { CompleteFn } from "../engine/llm.js";
+import type { EmbedFn } from "../engine/embed.js";
+import { computeGlobalPageRank, invalidateGraphCache, type GlobalPageRankResult } from "./pagerank.js";
+import { detectCommunities, summarizeCommunities, type CommunityResult } from "./community.js";
+import { dedup, type DedupResult } from "./dedup.js";
 
 export interface MaintenanceResult {
   dedup: DedupResult;

@@ -25,7 +25,7 @@
  */
 
 import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
-import { updateCommunities } from "../store/store.ts";
+import { updateCommunities } from "../store/store.js";
 
 export interface CommunityResult {
   labels: Map<string, string>;
@@ -166,9 +166,9 @@ export function getCommunityPeers(db: DatabaseSyncInstance, nodeId: string, limi
 
 // ─── 社区描述生成 ────────────────────────────────────────────
 
-import type { CompleteFn } from "../engine/llm.ts";
-import type { EmbedFn } from "../engine/embed.ts";
-import { upsertCommunitySummary, pruneCommunitySummaries } from "../store/store.ts";
+import type { CompleteFn } from "../engine/llm.js";
+import type { EmbedFn } from "../engine/embed.js";
+import { upsertCommunitySummary, pruneCommunitySummaries } from "../store/store.js";
 
 const COMMUNITY_SUMMARY_SYS = `你是知识图谱摘要引擎。根据节点列表，用简短的描述概括这组节点的主题领域。
 要求：

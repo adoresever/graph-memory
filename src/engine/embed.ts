@@ -16,7 +16,7 @@
  * 内置：429/5xx 重试 3 次 + 10s 超时
  */
 
-import type { EmbeddingConfig } from "../types.ts";
+import type { EmbeddingConfig } from "../types.js";
 
 export type EmbedFn = (text: string) => Promise<number[]>;
 

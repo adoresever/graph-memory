@@ -2,7 +2,7 @@
   "name": "graph-memory",
   "version": "1.5.8",
   "description": "Knowledge Graph Memory Engine for OpenClaw — with Personalized PageRank, community detection, and vector dedup",
-  "main": "index.ts",
+  "main": "dist/index.js",
   "type": "module",
   "scripts": {
     "build": "tsc",
@@ -24,7 +24,7 @@
   },
   "openclaw": {
     "extensions": [
-      "./index.ts"
+      "./dist/index.js"
     ],
     "hooks": {}
   }

@@ -18,25 +18,35 @@
 
 import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
 import { createHash } from "crypto";
-import type { GmConfig, RecallResult, GmNode, GmEdge } from "../types.ts";
-import type { EmbedFn } from "../engine/embed.ts";
+import type { GmConfig, RecallResult, GmNode, GmEdge } from "../types.js";
+import type { EmbedFn } from "../engine/embed.js";
 import {
   searchNodes, vectorSearchWithScore,
   graphWalk, communityRepresentatives,
   communityVectorSearch, nodesByCommunityIds,
   saveVector, getVectorHash,
-} from "../store/store.ts";
-import { getCommunityPeers } from "../graph/community.ts";
-import { personalizedPageRank } from "../graph/pagerank.ts";
+} from "../store/store.js";
+import { getCommunityPeers } from "../graph/community.js";
+import { personalizedPageRank } from "../graph/pagerank.js";
 
 export class Recaller {
   private embed: EmbedFn | null = null;
+  private embedReady: Promise<void>;
+  private resolveReady!: () => void;
 
-  constructor(private db: DatabaseSyncInstance, private cfg: GmConfig) {}
+  constructor(private db: DatabaseSyncInstance, private cfg: GmConfig) {
+    this.embedReady = new Promise((resolve) => {
+      this.resolveReady = resolve;
+    });
+  }
 
-  setEmbedFn(fn: EmbedFn): void { this.embed = fn; }
+  setEmbedFn(fn: EmbedFn | null): void {
+    this.embed = fn;
+    this.resolveReady();
+  }
 
   async recall(query: string): Promise<RecallResult> {
+    await this.embedReady;
     const limit = this.cfg.recallMaxNodes;
 
     // ── 两条路径各自独立跑满，不分配额 ──────────────────

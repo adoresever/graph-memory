@@ -11,9 +11,9 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { Extractor } from "../src/extractor/extract.ts";
-import { DEFAULT_CONFIG } from "../src/types.ts";
-import type { ExtractionResult, FinalizeResult } from "../src/types.ts";
+import { Extractor } from "../src/extractor/extract.js";
+import { DEFAULT_CONFIG } from "../src/types.js";
+import type { ExtractionResult, FinalizeResult } from "../src/types.js";
 
 // ─── Mock LLM：直接返回预设 JSON ────────────────────────────────
 
