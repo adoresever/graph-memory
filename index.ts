@@ -11,24 +11,24 @@
  */
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { Type } from "@sinclair/typebox";
-import { getDb } from "./src/store/db.ts";
+import { getDb } from "./src/store/db.js";
 import {
   saveMessage, getUnextracted,
   markExtracted,
   upsertNode, upsertEdge, findByName,
   getBySession, edgesFrom, edgesTo,
   deprecate, getStats,
-} from "./src/store/store.ts";
-import { createCompleteFn } from "./src/engine/llm.ts";
-import { createEmbedFn } from "./src/engine/embed.ts";
-import { Recaller } from "./src/recaller/recall.ts";
-import { Extractor } from "./src/extractor/extract.ts";
-import { assembleContext } from "./src/format/assemble.ts";
-import { sanitizeToolUseResultPairing } from "./src/format/transcript-repair.ts";
-import { runMaintenance } from "./src/graph/maintenance.ts";
-import { invalidateGraphCache, computeGlobalPageRank } from "./src/graph/pagerank.ts";
-import { detectCommunities } from "./src/graph/community.ts";
-import { DEFAULT_CONFIG, type GmConfig } from "./src/types.ts";
+} from "./src/store/store.js";
+import { createCompleteFn } from "./src/engine/llm.js";
+import { createEmbedFn } from "./src/engine/embed.js";
+import { Recaller } from "./src/recaller/recall.js";
+import { Extractor } from "./src/extractor/extract.js";
+import { assembleContext } from "./src/format/assemble.js";
+import { sanitizeToolUseResultPairing } from "./src/format/transcript-repair.js";
+import { runMaintenance } from "./src/graph/maintenance.js";
+import { invalidateGraphCache, computeGlobalPageRank } from "./src/graph/pagerank.js";
+import { detectCommunities } from "./src/graph/community.js";
+import { DEFAULT_CONFIG, type GmConfig } from "./src/types.js";
 
 // ─── 从 OpenClaw config 读 provider/model ────────────────────
 
@@ -147,10 +147,12 @@ const graphMemoryPlugin = {
           recaller.setEmbedFn(fn);
           api.logger.info("[graph-memory] vector search ready");
         } else {
+          recaller.setEmbedFn(null);
           api.logger.info("[graph-memory] FTS5 search mode (配置 embedding 可启用语义搜索)");
         }
       })
       .catch(() => {
+        recaller.setEmbedFn(null);
         api.logger.info("[graph-memory] FTS5 search mode");
       });
 
@@ -479,7 +481,7 @@ const graphMemoryPlugin = {
             if (comm.communities.size > 0) {
               (async () => {
                 try {
-                  const { summarizeCommunities } = await import("./src/graph/community.ts");
+                  const { summarizeCommunities } = await import("./src/graph/community.js");
                   const embedFn = (recaller as any).embed ?? undefined;
                   const summaries = await summarizeCommunities(db, comm.communities, llm, embedFn);
                   api.logger.info(

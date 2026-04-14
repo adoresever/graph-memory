@@ -24,8 +24,8 @@
  */
 
 import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
-import type { GmConfig, GmNode } from "../types.ts";
-import { findById, mergeNodes, getAllVectors } from "../store/store.ts";
+import type { GmConfig, GmNode } from "../types.js";
+import { findById, mergeNodes, getAllVectors } from "../store/store.js";
 
 export interface DuplicatePair {
   nodeA: string;

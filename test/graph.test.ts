@@ -9,13 +9,13 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
-import { createTestDb, insertNode, insertEdge } from "./helpers.ts";
-import { personalizedPageRank, computeGlobalPageRank, invalidateGraphCache } from "../src/graph/pagerank.ts";
-import { detectCommunities, getCommunityPeers } from "../src/graph/community.ts";
-import { detectDuplicates, dedup } from "../src/graph/dedup.ts";
-import { runMaintenance } from "../src/graph/maintenance.ts";
-import { saveVector } from "../src/store/store.ts";
-import { DEFAULT_CONFIG, type GmConfig } from "../src/types.ts";
+import { createTestDb, insertNode, insertEdge } from "./helpers.js";
+import { personalizedPageRank, computeGlobalPageRank, invalidateGraphCache } from "../src/graph/pagerank.js";
+import { detectCommunities, getCommunityPeers } from "../src/graph/community.js";
+import { detectDuplicates, dedup } from "../src/graph/dedup.js";
+import { runMaintenance } from "../src/graph/maintenance.js";
+import { saveVector } from "../src/store/store.js";
+import { DEFAULT_CONFIG, type GmConfig } from "../src/types.js";
 
 let db: DatabaseSyncInstance;
 const cfg: GmConfig = { ...DEFAULT_CONFIG };

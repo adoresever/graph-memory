@@ -5,8 +5,8 @@
  * Email: Wywelljob@gmail.com
  */
 
-import type { GmConfig, ExtractionResult, FinalizeResult } from "../types.ts";
-import type { CompleteFn } from "../engine/llm.ts";
+import type { GmConfig, ExtractionResult, FinalizeResult } from "../types.js";
+import type { CompleteFn } from "../engine/llm.js";
 
 // ─── 节点/边合法值 ──────────────────────────────────────────────
 

@@ -7,7 +7,7 @@
 
 import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
 import { createHash } from "crypto";
-import type { GmNode, GmEdge, EdgeType, NodeType, Signal } from "../types.ts";
+import type { GmNode, GmEdge, EdgeType, NodeType, Signal } from "../types.js";
 
 // ─── 工具 ─────────────────────────────────────────────────────
 

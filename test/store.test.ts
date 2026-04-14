@@ -7,7 +7,7 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
-import { createTestDb, insertNode, insertEdge } from "./helpers.ts";
+import { createTestDb, insertNode, insertEdge } from "./helpers.js";
 import {
   findByName, findById, upsertNode, upsertEdge, deprecate,
   mergeNodes, edgesFrom, edgesTo, allActiveNodes, allEdges,
@@ -15,7 +15,7 @@ import {
   saveMessage, getMessages, getUnextracted, markExtracted,
   saveSignal, pendingSignals, markSignalsDone,
   getStats, saveVector, vectorSearch, getAllVectors,
-} from "../src/store/store.ts";
+} from "../src/store/store.js";
 
 let db: DatabaseSyncInstance;
 
