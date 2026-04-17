@@ -132,6 +132,14 @@ export interface GmConfig {
     apiKey?: string;
     baseURL?: string;
     model?: string;
+    /** Authentication mode: "api-key" (default) or "oauth" */
+    auth?: "api-key" | "oauth";
+    /** Path to OAuth session JSON file (required when auth="oauth") */
+    oauthPath?: string;
+    /** OAuth provider identifier (default: "openai-codex") */
+    oauthProvider?: string;
+    /** Timeout for OAuth requests in ms (default: 30000) */
+    timeoutMs?: number;
   };
   /** 向量去重阈值，余弦相似度超过此值视为重复 (0-1) */
   dedupThreshold: number;

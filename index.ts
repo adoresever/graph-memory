@@ -137,6 +137,13 @@ const graphMemoryPlugin = {
       ? cfg.llm.apiKey   // If apiKey set but no baseURL, assume Anthropic direct
       : undefined;
     const llm = createCompleteFn(provider, model, cfg.llm, anthropicApiKey);
+    if (cfg.llm?.auth === "oauth") {
+      if (!cfg.llm.oauthPath) {
+        api.logger.error("[graph-memory] OAuth mode enabled but llm.oauthPath is missing — LLM calls will fail");
+      } else {
+        api.logger.info("[graph-memory] OAuth mode enabled");
+      }
+    }
     const recaller = new Recaller(db, cfg);
     const extractor = new Extractor(cfg, llm);
 

@@ -60,9 +60,13 @@
         "type": "object",
         "description": "可选：LLM 配置。不配则用 OpenClaw 全局 provider",
         "properties": {
-          "apiKey": { "type": "string" },
-          "baseURL": { "type": "string" },
-          "model": { "type": "string" }
+          "apiKey": { "type": "string", "description": "API Key（传统认证）" },
+          "baseURL": { "type": "string", "description": "API 地址" },
+          "model": { "type": "string", "description": "模型名称" },
+          "auth": { "type": "string", "enum": ["api-key", "oauth"], "default": "api-key", "description": "认证模式：api-key（默认）或 oauth" },
+          "oauthPath": { "type": "string", "description": "OAuth 会话文件路径（auth=oauth 时必填）" },
+          "oauthProvider": { "type": "string", "default": "openai-codex", "description": "OAuth 提供商标识" },
+          "timeoutMs": { "type": "integer", "default": 30000, "description": "请求超时（毫秒）" }
         }
       }
     }

@@ -10,14 +10,13 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@photostructure/sqlite": "^1.0.0",
-    "@sinclair/typebox": "^0.34.48",
-    "openai": "^4.47.0"
+    "@photostructure/sqlite": "^1.2.0",
+    "@sinclair/typebox": "^0.34.49"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "typescript": "^5.4.0",
-    "vitest": "^1.4.0"
+    "@types/node": "^22.19.17",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.4"
   },
   "peerDependencies": {
     "openclaw": "*"
