@@ -33,8 +33,26 @@ export interface MaintenanceResult {
 
 export async function runMaintenance(
   db: DatabaseSyncInstance, cfg: GmConfig, llm?: CompleteFn, embedFn?: EmbedFn,
+  summaryMode: "incremental" | "full" = "incremental",
 ): Promise<MaintenanceResult> {
   const start = Date.now();
+
+  // ─── maintenance 触发计数器 ──────────────────────────────
+  try {
+    const counterKey = "maintenance_trigger_count";
+    const lastTriggerKey = "maintenance_last_trigger_at";
+    const row = db.prepare("SELECT value FROM gm_meta WHERE key = ?").get(counterKey) as any;
+    const count = row ? parseInt(row.value, 10) + 1 : 1;
+    db.prepare("INSERT OR REPLACE INTO gm_meta (key, value) VALUES (?, ?)").run(counterKey, String(count));
+    db.prepare("INSERT OR REPLACE INTO gm_meta (key, value) VALUES (?, ?)").run(lastTriggerKey, String(Date.now()));
+    if (process.env.GM_DEBUG) {
+      console.log(`  [DEBUG] maintenance: trigger #${count} at ${new Date().toISOString()}`);
+    }
+  } catch (err) {
+    if (process.env.GM_DEBUG) {
+      console.log(`  [DEBUG] maintenance: counter write failed: ${err}`);
+    }
+  }
 
   // 去重/新增节点后清除图结构缓存
   invalidateGraphCache();
@@ -55,7 +73,9 @@ export async function runMaintenance(
   let communitySummaries = 0;
   if (llm && communityResult.communities.size > 0) {
     try {
-      communitySummaries = await summarizeCommunities(db, communityResult.communities, llm, embedFn);
+      communitySummaries = await summarizeCommunities(
+        db, communityResult.communities, llm, embedFn, summaryMode,
+      );
       if (process.env.GM_DEBUG) {
         console.log(`  [DEBUG] maintenance: generated ${communitySummaries} community summaries`);
       }
@@ -66,11 +86,34 @@ export async function runMaintenance(
     }
   }
 
+  const durationMs = Date.now() - start;
+
+  // ─── 记录本次 maintenance 结果 ──────────────────────────
+  try {
+    const resultKey = "maintenance_last_result";
+    const result = {
+      at: new Date().toISOString(),
+      durationMs,
+      dedupMerged: dedupResult.merged,
+      communityCount: communityResult.communities.size,
+      communitySummaries,
+      summaryMode,
+    };
+    db.prepare("INSERT OR REPLACE INTO gm_meta (key, value) VALUES (?, ?)").run(resultKey, JSON.stringify(result));
+    if (process.env.GM_DEBUG) {
+      console.log(`  [DEBUG] maintenance: completed in ${durationMs}ms, ${communitySummaries} summaries`);
+    }
+  } catch (err) {
+    if (process.env.GM_DEBUG) {
+      console.log(`  [DEBUG] maintenance: result write failed: ${err}`);
+    }
+  }
+
   return {
     dedup: dedupResult,
     pagerank: pagerankResult,
     community: communityResult,
     communitySummaries,
-    durationMs: Date.now() - start,
+    durationMs,
   };
 }

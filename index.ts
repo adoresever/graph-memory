@@ -481,9 +481,9 @@ const graphMemoryPlugin = {
                 try {
                   const { summarizeCommunities } = await import("./src/graph/community.ts");
                   const embedFn = (recaller as any).embed ?? undefined;
-                  const summaries = await summarizeCommunities(db, comm.communities, llm, embedFn);
+                  const summaries = await summarizeCommunities(db, comm.communities, llm, embedFn, "incremental");
                   api.logger.info(
-                    `[graph-memory] community summaries refreshed: ${summaries} summaries`,
+                    `[graph-memory] community summaries refreshed: ${summaries} summaries (incremental)`,
                   );
                 } catch (e) {
                   api.logger.error(`[graph-memory] community summary failed: ${e}`);
@@ -533,6 +533,17 @@ const graphMemoryPlugin = {
       if (!sid) return;
 
       try {
+        // 【防线1】短 session（<3条消息）直接跳过 finalize + maintenance
+        const msgCount = db.prepare(
+          "SELECT COUNT(*) as cnt FROM gm_messages WHERE session_id = ?"
+        ).get(sid) as any;
+        if (msgCount.cnt < 3) {
+          api.logger.info(
+            `[graph-memory] session_end skipped: short session (${msgCount.cnt} msgs)`
+          );
+          return;
+        }
+
         const nodes = getBySession(db, sid);
         if (nodes.length) {
           const summary = (
@@ -569,8 +580,16 @@ const graphMemoryPlugin = {
           for (const id of fin.invalidations) deprecate(db, id);
         }
 
+        // 【防线2】无节点变更则跳过 maintenance
+        if (nodes.length === 0) {
+          api.logger.info(
+            `[graph-memory] session_end skipped maintenance: no nodes for session`
+          );
+          return;
+        }
+
         const embedFn = (recaller as any).embed ?? undefined;
-        const result = await runMaintenance(db, cfg, llm, embedFn);
+        const result = await runMaintenance(db, cfg, llm, embedFn, "incremental");
         api.logger.info(
           `[graph-memory] maintenance: ${result.durationMs}ms, ` +
           `dedup=${result.dedup.merged}, ` +
@@ -711,7 +730,7 @@ const graphMemoryPlugin = {
         parameters: Type.Object({}),
         async execute(_toolCallId: string, _params: any) {
           const embedFn = (recaller as any).embed ?? undefined;
-          const result = await runMaintenance(db, cfg, llm, embedFn);
+          const result = await runMaintenance(db, cfg, llm, embedFn, "full");
           const text = [
             `图维护完成（${result.durationMs}ms）`,
             `去重：发现 ${result.dedup.pairs.length} 对相似节点，合并 ${result.dedup.merged} 对`,
