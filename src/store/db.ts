@@ -51,7 +51,7 @@ export function closeDb(): void {
 function migrate(db: DatabaseSyncInstance): void {
   db.exec(`CREATE TABLE IF NOT EXISTS _migrations (v INTEGER PRIMARY KEY, at INTEGER NOT NULL)`);
   const cur = (db.prepare("SELECT MAX(v) as v FROM _migrations").get() as any)?.v ?? 0;
-  const steps = [m1_core, m2_messages, m3_signals, m4_fts5, m5_vectors, m6_communities];
+  const steps = [m1_core, m2_messages, m3_signals, m4_fts5, m5_vectors, m6_communities, m7_meta];
   for (let i = cur; i < steps.length; i++) {
     steps[i](db);
     db.prepare("INSERT INTO _migrations (v,at) VALUES (?,?)").run(i + 1, Date.now());
@@ -186,6 +186,17 @@ function m6_communities(db: DatabaseSyncInstance): void {
       embedding   BLOB,
       created_at  INTEGER NOT NULL,
       updated_at  INTEGER NOT NULL
+    );
+  `);
+}
+
+// ─── 元数据表 ──────────────────────────────────────────────
+
+function m7_meta(db: DatabaseSyncInstance): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gm_meta (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
     );
   `);
 }

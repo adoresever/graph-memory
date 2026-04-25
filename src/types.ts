@@ -132,7 +132,40 @@ export interface GmConfig {
     apiKey?: string;
     baseURL?: string;
     model?: string;
+    maxTokens?: number;
+    /** Enable OpenAI-compatible JSON mode for extraction/finalize calls. */
+    jsonMode?: boolean;
   };
+  /** Monthly LLM call budget across all graph-memory LLM tasks. 0 means unlimited. */
+  llmMonthlyCallBudget: number;
+  /** Monthly cap for community summary LLM calls. 0 means unlimited within the global budget. */
+  llmMonthlyCommunitySummaryBudget: number;
+  /** Monthly cap for session finalize LLM calls. 0 means unlimited within the global budget. */
+  llmMonthlyFinalizeBudget: number;
+  /** Time zone used to roll monthly/daily LLM counters. */
+  llmBudgetTimeZone: string;
+  /** Minimum pending messages before a normal extraction batch runs. */
+  extractBatchMinMessages: number;
+  /** Minimum pending text characters before a normal extraction batch runs. */
+  extractBatchMinChars: number;
+  /** Short low-signal user/assistant messages at or below this length are skipped. */
+  extractTrivialMaxChars: number;
+  /** Max characters retained from each message in extraction prompts. */
+  extractMaxMessageChars: number;
+  /** Max unextracted messages sent to one extraction call. */
+  extractMaxBatchMessages: number;
+  /** Quiet period before normal pending messages are flushed. 0 disables debounce. */
+  extractDebounceMs: number;
+  /** Periodic fallback flush for pending messages. 0 disables interval flush. */
+  extractFlushIntervalMs: number;
+  /** Max existing node names sent to the extractor for de-duplication hints. */
+  extractExistingNamesLimit: number;
+  /** Output cap for JSON extraction calls. */
+  extractOutputMaxTokens: number;
+  /** Output cap for session finalize calls. */
+  finalizeOutputMaxTokens: number;
+  /** Output cap for short community summary calls. */
+  communitySummaryMaxTokens: number;
   /** 向量去重阈值，余弦相似度超过此值视为重复 (0-1) */
   dedupThreshold: number;
   /** PageRank 阻尼系数 */
@@ -147,6 +180,21 @@ export const DEFAULT_CONFIG: GmConfig = {
   recallMaxNodes: 6,
   recallMaxDepth: 2,
   freshTailCount: 10,
+  llmMonthlyCallBudget: 90_000,
+  llmMonthlyCommunitySummaryBudget: 3_000,
+  llmMonthlyFinalizeBudget: 3_000,
+  llmBudgetTimeZone: "Asia/Shanghai",
+  extractBatchMinMessages: 6,
+  extractBatchMinChars: 1600,
+  extractTrivialMaxChars: 40,
+  extractMaxMessageChars: 600,
+  extractMaxBatchMessages: 30,
+  extractDebounceMs: 45_000,
+  extractFlushIntervalMs: 120_000,
+  extractExistingNamesLimit: 80,
+  extractOutputMaxTokens: 0,
+  finalizeOutputMaxTokens: 0,
+  communitySummaryMaxTokens: 0,
   dedupThreshold: 0.90,
   pagerankDamping: 0.85,
   pagerankIterations: 20,

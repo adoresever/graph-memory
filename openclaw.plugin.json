@@ -31,6 +31,61 @@
         "default": 10,
         "description": "(deprecated) 已改为按用户轮次切分，此参数不再使用"
       },
+      "llmMonthlyCallBudget": {
+        "type": "integer",
+        "default": 90000,
+        "description": "虚拟月调用计划：graph-memory 每月最多使用多少次 LLM 调用。0 表示不限制"
+      },
+      "llmMonthlyCommunitySummaryBudget": {
+        "type": "integer",
+        "default": 3000,
+        "description": "社区摘要每月最多使用多少次 LLM 调用。0 表示不单独限制"
+      },
+      "llmMonthlyFinalizeBudget": {
+        "type": "integer",
+        "default": 3000,
+        "description": "会话结束整理每月最多使用多少次 LLM 调用。0 表示不单独限制"
+      },
+      "llmBudgetTimeZone": {
+        "type": "string",
+        "default": "Asia/Shanghai",
+        "description": "月度调用计划按哪个时区切换月份"
+      },
+      "extractBatchMinMessages": {
+        "type": "integer",
+        "default": 6,
+        "description": "普通消息累计多少条后触发一次知识提取"
+      },
+      "extractBatchMinChars": {
+        "type": "integer",
+        "default": 1600,
+        "description": "普通消息累计多少字符后触发一次知识提取"
+      },
+      "extractTrivialMaxChars": {
+        "type": "integer",
+        "default": 40,
+        "description": "短于该字符数且低价值的确认/寒暄消息会跳过 LLM 提取"
+      },
+      "extractMaxMessageChars": {
+        "type": "integer",
+        "default": 600,
+        "description": "知识提取时每条消息最多保留多少字符"
+      },
+      "extractMaxBatchMessages": {
+        "type": "integer",
+        "default": 30,
+        "description": "单次知识提取最多处理多少条未提取消息"
+      },
+      "extractDebounceMs": {
+        "type": "integer",
+        "default": 45000,
+        "description": "普通消息安静多久后合批抽取。0 表示不等待"
+      },
+      "extractFlushIntervalMs": {
+        "type": "integer",
+        "default": 120000,
+        "description": "定时兜底 flush 间隔，避免普通消息长期不抽取。0 表示关闭"
+      },
       "dedupThreshold": {
         "type": "number",
         "default": 0.90,
@@ -62,7 +117,9 @@
         "properties": {
           "apiKey": { "type": "string" },
           "baseURL": { "type": "string" },
-          "model": { "type": "string" }
+          "model": { "type": "string" },
+          "maxTokens": { "type": "integer", "description": "可选：显式限制单次 LLM 输出 token。默认不限制" },
+          "jsonMode": { "type": "boolean", "default": false, "description": "可选：启用 OpenAI 兼容 JSON mode。模型不支持时请保持 false" }
         }
       }
     }

@@ -253,6 +253,10 @@ pnpm openclaw plugins install .
             "baseURL": "https://api.openai.com/v1",
             "model": "gpt-4o-mini"
           },
+          "llmMonthlyCallBudget": 90000,
+          "llmMonthlyCommunitySummaryBudget": 3000,
+          "llmMonthlyFinalizeBudget": 3000,
+          "llmBudgetTimeZone": "Asia/Shanghai",
           "embedding": {
             "apiKey": "你的Embedding-API密钥",
             "baseURL": "https://api.openai.com/v1",
@@ -267,6 +271,14 @@ pnpm openclaw plugins install .
 ```
 
 **LLM**（`config.llm`）— 必填。用于知识提取和社区摘要生成。支持任何 OpenAI 兼容端点。建议用便宜/快速的模型。
+
+**虚拟月调用计划**（`llmMonthlyCallBudget`）— 可选但推荐，适合 CodePlan 这类按调用次数限制的套餐。graph-memory 会在 SQLite 中按月份（`YYYY-MM`）记录自己的 LLM 调用次数，并按下面的公式动态计算当天额度：
+
+```
+本月剩余调用次数 / 含今天在内的本月剩余天数
+```
+
+某几天少用，后面每天的可用额度会自动变高。若你在月中启用，建议先把 `llmMonthlyCallBudget` 设置成本月剩余调用次数；下个月再改回完整套餐额度。
 
 **Embedding**（`config.embedding`）— 可选但推荐。启用语义向量搜索、社区级召回和向量去重。不配则降级为 FTS5 全文搜索（仍然可用，只是基于关键词匹配）。
 
@@ -348,6 +360,17 @@ sqlite3 ~/.openclaw/graph-memory.db "SELECT id, summary FROM gm_communities;"
 | `compactTurnCount` | `7` | 维护周期（每隔多少轮触发 PageRank + 社区检测 + 摘要） |
 | `recallMaxNodes` | `6` | 每次召回最多注入的节点数 |
 | `recallMaxDepth` | `2` | 图遍历跳数 |
+| `llmMonthlyCallBudget` | `90000` | 虚拟月调用计划。每日额度按本月剩余调用数 / 本月剩余天数动态计算 |
+| `llmMonthlyCommunitySummaryBudget` | `3000` | 社区摘要 LLM 调用的月度子预算 |
+| `llmMonthlyFinalizeBudget` | `3000` | 会话结束整理 LLM 调用的月度子预算 |
+| `llmBudgetTimeZone` | `Asia/Shanghai` | 月度/每日预算计数切换使用的时区 |
+| `extractBatchMinMessages` | `6` | 普通内容累计多少条消息后触发知识提取 |
+| `extractBatchMinChars` | `1600` | 普通内容累计多少字符后触发知识提取 |
+| `extractTrivialMaxChars` | `40` | 低价值短确认/寒暄消息在该长度内会跳过 LLM 提取 |
+| `extractMaxMessageChars` | `600` | 知识提取时每条消息最多保留的字符数 |
+| `extractMaxBatchMessages` | `30` | 单次知识提取最多处理的未提取消息数 |
+| `extractDebounceMs` | `45000` | 普通消息安静多久后合批抽取 |
+| `extractFlushIntervalMs` | `120000` | 定时兜底 flush 间隔，避免普通消息长期不抽取 |
 | `dedupThreshold` | `0.90` | 向量去重的余弦相似度阈值 |
 | `pagerankDamping` | `0.85` | PPR 阻尼系数 |
 | `pagerankIterations` | `20` | PPR 迭代次数 |

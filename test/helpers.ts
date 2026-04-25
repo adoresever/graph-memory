@@ -113,6 +113,14 @@ export function createTestDb(): DatabaseSyncInstance {
     );
   `);
 
+  // m7: 元数据
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gm_meta (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
+
   return db;
 }
 
