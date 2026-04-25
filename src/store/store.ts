@@ -641,3 +641,48 @@ export function pruneCommunitySummaries(db: DatabaseSyncInstance): number {
   `).run();
   return result.changes;
 }
+
+// ─── 元数据读写 ──────────────────────────────────────────────
+
+export function getMeta(db: DatabaseSyncInstance, key: string): string | null {
+  const row = db.prepare("SELECT value FROM gm_meta WHERE key=?").get(key) as any;
+  return row?.value ?? null;
+}
+
+export function setMeta(db: DatabaseSyncInstance, key: string, value: string): void {
+  db.prepare("INSERT OR REPLACE INTO gm_meta (key, value) VALUES (?, ?)").run(key, value);
+}
+
+/**
+ * 获取需要增量摘要的社区列表（新增 + 成员数变化的社区）
+ *
+ * 判断逻辑：
+ *   - gm_communities 中无记录 → 新增社区
+ *   - gm_communities.node_count != 实际活跃节点数 → 成员变化
+ *   - 其余跳过
+ */
+export function getIncrementalCommunities(
+  db: DatabaseSyncInstance,
+  communities: Map<string, string[]>,
+): Map<string, string[]> {
+  const result = new Map<string, string[]>();
+
+  for (const [communityId, memberIds] of communities) {
+    if (memberIds.length === 0) continue;
+
+    const existing = db.prepare(
+      "SELECT node_count FROM gm_communities WHERE id=?"
+    ).get(communityId) as any;
+
+    if (!existing) {
+      // 新增社区：无摘要记录
+      result.set(communityId, memberIds);
+    } else if (existing.node_count !== memberIds.length) {
+      // 成员数变化
+      result.set(communityId, memberIds);
+    }
+    // else: 无变化，跳过
+  }
+
+  return result;
+}

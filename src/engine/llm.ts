@@ -18,9 +18,18 @@ export interface LlmConfig {
   apiKey?: string;
   baseURL?: string;
   model?: string;
+  maxTokens?: number;
+  jsonMode?: boolean;
 }
 
-export type CompleteFn = (system: string, user: string) => Promise<string>;
+export interface CompleteOptions {
+  maxTokens?: number;
+  json?: boolean;
+  temperature?: number;
+  kind?: "extract" | "finalize" | "community_summary" | "other";
+}
+
+export type CompleteFn = (system: string, user: string, options?: CompleteOptions) => Promise<string>;
 
 // ─── 带重试+超时的 fetch ─────────────────────────────────────
 
@@ -52,25 +61,33 @@ export function createCompleteFn(
   llmConfig?: LlmConfig,
   anthropicApiKey?: string,
 ): CompleteFn {
-  return async (system, user) => {
+  return async (system, user, options = {}) => {
     // ── 路径 A（优先）：pluginConfig.llm 直接调 OpenAI 兼容 API ──
     if (llmConfig?.apiKey && llmConfig?.baseURL) {
       const baseURL = llmConfig.baseURL.replace(/\/+$/, "");
       const llmModel = llmConfig.model ?? model;
+      const body: Record<string, unknown> = {
+        model: llmModel,
+        messages: [
+          ...(system.trim() ? [{ role: "system", content: system.trim() }] : []),
+          { role: "user", content: user },
+        ],
+        temperature: options.temperature ?? 0.1,
+      };
+
+      const maxTokens = options.maxTokens ?? llmConfig.maxTokens;
+      if (maxTokens && maxTokens > 0) body.max_tokens = maxTokens;
+      if (options.json && llmConfig.jsonMode) {
+        body.response_format = { type: "json_object" };
+      }
+
       const res = await fetchRetry(`${baseURL}/chat/completions`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${llmConfig.apiKey}`,
         },
-        body: JSON.stringify({
-          model: llmModel,
-          messages: [
-            ...(system.trim() ? [{ role: "system", content: system.trim() }] : []),
-            { role: "user", content: user },
-          ],
-          temperature: 0.1,
-        }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         const errText = await res.text().catch(() => "");
@@ -91,7 +108,12 @@ export function createCompleteFn(
     const res = await fetchRetry("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": anthropicApiKey, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model: llmConfig?.model ?? model, max_tokens: 4096, system, messages: [{ role: "user", content: user }] }),
+      body: JSON.stringify({
+        model: llmConfig?.model ?? model,
+        max_tokens: options.maxTokens ?? llmConfig?.maxTokens ?? 4096,
+        system,
+        messages: [{ role: "user", content: user }],
+      }),
     });
     if (!res.ok) throw new Error(`[graph-memory] Anthropic API ${res.status}`);
     const data = await res.json() as any;

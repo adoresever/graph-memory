@@ -19,10 +19,12 @@ import {
   getBySession, edgesFrom, edgesTo,
   deprecate, getStats,
 } from "./src/store/store.ts";
-import { createCompleteFn } from "./src/engine/llm.ts";
+import { createCompleteFn, type CompleteFn } from "./src/engine/llm.ts";
+import { reserveLlmCall } from "./src/engine/budget.ts";
 import { createEmbedFn } from "./src/engine/embed.ts";
 import { Recaller } from "./src/recaller/recall.ts";
 import { Extractor } from "./src/extractor/extract.ts";
+import { classifyExtractionBatch, isImmediateExtraction } from "./src/extractor/gate.ts";
 import { assembleContext } from "./src/format/assemble.ts";
 import { sanitizeToolUseResultPairing } from "./src/format/transcript-repair.ts";
 import { runMaintenance } from "./src/graph/maintenance.ts";
@@ -136,7 +138,21 @@ const graphMemoryPlugin = {
     const anthropicApiKey = cfg.llm?.apiKey && !cfg.llm?.baseURL
       ? cfg.llm.apiKey   // If apiKey set but no baseURL, assume Anthropic direct
       : undefined;
-    const llm = createCompleteFn(provider, model, cfg.llm, anthropicApiKey);
+    const rawLlm = createCompleteFn(provider, model, cfg.llm, anthropicApiKey);
+    const llm: CompleteFn = async (system, user, options = {}) => {
+      const kind = options.kind ?? "other";
+      const reservation = reserveLlmCall(db, cfg, kind);
+      if (!reservation.allowed) {
+        api.logger.warn(
+          `[graph-memory] LLM budget skipped ${kind}: ${reservation.reason} ` +
+          `(day=${reservation.day}, today=${reservation.todayUsed}/${reservation.todayLimit || "∞"}, ` +
+          `month=${reservation.monthUsed}/${reservation.monthlyLimit || "∞"}, ` +
+          `${kind}_today=${reservation.todayKindUsed}/${reservation.todayKindLimit || "∞"})`,
+        );
+        throw new Error(`[graph-memory] ${reservation.reason}`);
+      }
+      return rawLlm(system, user, options);
+    };
     const recaller = new Recaller(db, cfg);
     const extractor = new Extractor(cfg, llm);
 
@@ -158,9 +174,12 @@ const graphMemoryPlugin = {
     const msgSeq = new Map<string, number>();
     const recalled = new Map<string, { nodes: any[]; edges: any[] }>();
     const turnCounter = new Map<string, number>(); // 社区维护计数器
+    const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    const flushTimers = new Map<string, ReturnType<typeof setInterval>>();
 
     // ── 提取串行化（同 session Promise chain，不同 session 并行）────
-    const extractChain = new Map<string, Promise<void>>();
+    type ExtractRunResult = "empty" | "skipped" | "deferred" | "extracted" | "failed";
+    const extractChain = new Map<string, Promise<ExtractRunResult>>();
 
     /** 存一条消息到 gm_messages（同步，零 LLM） */
     function ingestMessage(sessionId: string, message: any): void {
@@ -177,18 +196,77 @@ const graphMemoryPlugin = {
       saveMessage(db, sessionId, seq, message.role ?? "unknown", message);
     }
 
-    /** 每轮结束后直接提取当前轮的消息（同 session 串行，不丢消息） */
-    async function runTurnExtract(sessionId: string, newMessages: any[]): Promise<void> {
-      if (!newMessages.length) return;
+    function clearDebounce(sessionId: string): void {
+      const timer = debounceTimers.get(sessionId);
+      if (timer) clearTimeout(timer);
+      debounceTimers.delete(sessionId);
+    }
+
+    function clearFlushTimer(sessionId: string): void {
+      const timer = flushTimers.get(sessionId);
+      if (timer) clearInterval(timer);
+      flushTimers.delete(sessionId);
+    }
+
+    function ensureFlushTimer(sessionId: string): void {
+      if (cfg.extractFlushIntervalMs <= 0 || flushTimers.has(sessionId)) return;
+      const timer = setInterval(() => {
+        forceFlushSession(sessionId, "interval").catch((err) => {
+          api.logger.error(`[graph-memory] interval flush failed: ${err}`);
+        });
+      }, cfg.extractFlushIntervalMs);
+      flushTimers.set(sessionId, timer);
+    }
+
+    function scheduleDebounce(sessionId: string): void {
+      if (cfg.extractDebounceMs <= 0) {
+        forceFlushSession(sessionId, "debounce-disabled").catch((err) => {
+          api.logger.error(`[graph-memory] debounce flush failed: ${err}`);
+        });
+        return;
+      }
+      clearDebounce(sessionId);
+      const timer = setTimeout(() => {
+        debounceTimers.delete(sessionId);
+        forceFlushSession(sessionId, "debounce").catch((err) => {
+          api.logger.error(`[graph-memory] debounce flush failed: ${err}`);
+        });
+      }, cfg.extractDebounceMs);
+      debounceTimers.set(sessionId, timer);
+    }
+
+    /** 按门控策略抽取一批消息（同 session 串行，不丢消息） */
+    async function runTurnExtract(
+      sessionId: string,
+      newMessages: any[],
+      force = false,
+    ): Promise<ExtractRunResult> {
+      if (!newMessages.length && !force) return "empty";
 
       // Promise chain：上一次提取完了才跑下一次，不会跳过
-      const prev = extractChain.get(sessionId) ?? Promise.resolve();
-      const next = prev.then(async () => {
+      const prev = extractChain.get(sessionId) ?? Promise.resolve("empty" as ExtractRunResult);
+      const next = prev.then(async (): Promise<ExtractRunResult> => {
         try {
-          const msgs = getUnextracted(db, sessionId, 50);
-          if (!msgs.length) return;
+          const msgs = getUnextracted(db, sessionId, cfg.extractMaxBatchMessages);
+          if (!msgs.length) return "empty";
 
-          const existing = getBySession(db, sessionId).map((n) => n.name);
+          const decision = classifyExtractionBatch(msgs, cfg, force);
+          const maxTurn = Math.max(...msgs.map((m: any) => m.turn_index));
+          if (decision.action === "skip") {
+            markExtracted(db, sessionId, maxTurn);
+            api.logger.info(`[graph-memory] extraction skipped: ${decision.reason}, msgs=${msgs.length}`);
+            return "skipped";
+          }
+          if (decision.action === "defer") {
+            if (process.env.GM_DEBUG) {
+              api.logger.info(`[graph-memory] extraction deferred: ${decision.reason}, msgs=${msgs.length}`);
+            }
+            return "deferred";
+          }
+
+          const existing = getBySession(db, sessionId)
+            .map((n) => n.name)
+            .slice(-cfg.extractExistingNamesLimit);
           const result = await extractor.extract({
             messages: msgs,
             existingNames: existing,
@@ -215,7 +293,6 @@ const graphMemoryPlugin = {
             }
           }
 
-          const maxTurn = Math.max(...msgs.map((m: any) => m.turn_index));
           markExtracted(db, sessionId, maxTurn);
 
           if (result.nodes.length || result.edges.length) {
@@ -226,13 +303,63 @@ const graphMemoryPlugin = {
               `[graph-memory] extracted ${result.nodes.length} nodes [${nodeDetails}], ${result.edges.length} edges [${edgeDetails}]`,
             );
           }
+          return "extracted";
         } catch (err) {
           api.logger.error(`[graph-memory] turn extract failed: ${err}`);
           // 不 throw — 失败不阻塞 chain 中下一次提取
+          return "failed";
         }
       });
       extractChain.set(sessionId, next);
       return next;
+    }
+
+    async function forceFlushSession(sessionId: string, reason: string): Promise<void> {
+      clearDebounce(sessionId);
+      for (let i = 0; i < 100; i++) {
+        const pending = getUnextracted(db, sessionId, cfg.extractMaxBatchMessages);
+        if (!pending.length) return;
+
+        const result = await runTurnExtract(sessionId, pending, true);
+        if (result === "empty" || result === "deferred" || result === "failed") {
+          api.logger.warn(`[graph-memory] ${reason} flush stopped: ${result}, pending=${pending.length}`);
+          return;
+        }
+      }
+      api.logger.warn(`[graph-memory] ${reason} flush stopped after safety limit`);
+    }
+
+    function scheduleTurnExtract(sessionId: string, newMessages: any[]): void {
+      if (!newMessages.length) return;
+      ensureFlushTimer(sessionId);
+
+      const pending = getUnextracted(db, sessionId, cfg.extractMaxBatchMessages);
+      if (!pending.length) return;
+
+      const decision = classifyExtractionBatch(pending, cfg, false);
+      if (decision.action === "skip") {
+        runTurnExtract(sessionId, newMessages).catch((err) => {
+          api.logger.error(`[graph-memory] skip extraction failed: ${err}`);
+        });
+        return;
+      }
+
+      if (isImmediateExtraction(decision)) {
+        clearDebounce(sessionId);
+        runTurnExtract(sessionId, newMessages).catch((err) => {
+          api.logger.error(`[graph-memory] immediate extraction failed: ${err}`);
+        });
+        return;
+      }
+
+      if (pending.length >= cfg.extractMaxBatchMessages) {
+        forceFlushSession(sessionId, "max-batch").catch((err) => {
+          api.logger.error(`[graph-memory] max-batch flush failed: ${err}`);
+        });
+        return;
+      }
+
+      scheduleDebounce(sessionId);
     }
 
     // ── before_prompt_build：召回 ────────────────────────────
@@ -454,10 +581,12 @@ const graphMemoryPlugin = {
           `[graph-memory] afterTurn sid=${sessionId.slice(0, 8)} newMsgs=${newMessages.length} totalMsgs=${totalMsgs}`,
         );
 
-        // ★ 每轮直接提取
-        runTurnExtract(sessionId, newMessages).catch((err) => {
-          api.logger.error(`[graph-memory] turn extract failed: ${err}`);
-        });
+        // ★ 调度策略：
+        //   - error / 用户纠正 / 明确完成：立即抽取
+        //   - 普通消息：debounce 后合批抽取
+        //   - 到 extractMaxBatchMessages：强制抽取
+        //   - extractFlushIntervalMs：定时兜底 flush
+        scheduleTurnExtract(sessionId, newMessages);
 
         // ★ 社区维护：每 N 轮触发一次（纯计算，<5ms）
         const turns = (turnCounter.get(sessionId) ?? 0) + 1;
@@ -481,9 +610,11 @@ const graphMemoryPlugin = {
                 try {
                   const { summarizeCommunities } = await import("./src/graph/community.ts");
                   const embedFn = (recaller as any).embed ?? undefined;
-                  const summaries = await summarizeCommunities(db, comm.communities, llm, embedFn);
+                  const summaries = await summarizeCommunities(
+                    db, comm.communities, llm, embedFn, "incremental", cfg.communitySummaryMaxTokens,
+                  );
                   api.logger.info(
-                    `[graph-memory] community summaries refreshed: ${summaries} summaries`,
+                    `[graph-memory] community summaries refreshed: ${summaries} summaries (incremental)`,
                   );
                 } catch (e) {
                   api.logger.error(`[graph-memory] community summary failed: ${e}`);
@@ -511,12 +642,18 @@ const graphMemoryPlugin = {
       async onSubagentEnded({ childSessionKey }: { childSessionKey: string }) {
         recalled.delete(childSessionKey);
         msgSeq.delete(childSessionKey);
+        clearDebounce(childSessionKey);
+        clearFlushTimer(childSessionKey);
       },
 
       async dispose() {
         extractChain.clear();
         msgSeq.clear();
         recalled.clear();
+        for (const timer of debounceTimers.values()) clearTimeout(timer);
+        for (const timer of flushTimers.values()) clearInterval(timer);
+        debounceTimers.clear();
+        flushTimers.clear();
       },
     };
 
@@ -533,6 +670,20 @@ const graphMemoryPlugin = {
       if (!sid) return;
 
       try {
+        // session_end 强制 flush，确保 debounce/interval 里积累的普通消息落入图谱。
+        await forceFlushSession(sid, "session_end");
+
+        // 【防线1】短 session（<3条消息）只跳过 finalize + maintenance
+        const msgCount = db.prepare(
+          "SELECT COUNT(*) as cnt FROM gm_messages WHERE session_id = ?"
+        ).get(sid) as any;
+        if (msgCount.cnt < 3) {
+          api.logger.info(
+            `[graph-memory] session_end skipped: short session (${msgCount.cnt} msgs)`
+          );
+          return;
+        }
+
         const nodes = getBySession(db, sid);
         if (nodes.length) {
           const summary = (
@@ -569,8 +720,16 @@ const graphMemoryPlugin = {
           for (const id of fin.invalidations) deprecate(db, id);
         }
 
+        // 【防线2】无节点变更则跳过 maintenance
+        if (nodes.length === 0) {
+          api.logger.info(
+            `[graph-memory] session_end skipped maintenance: no nodes for session`
+          );
+          return;
+        }
+
         const embedFn = (recaller as any).embed ?? undefined;
-        const result = await runMaintenance(db, cfg, llm, embedFn);
+        const result = await runMaintenance(db, cfg, llm, embedFn, "incremental");
         api.logger.info(
           `[graph-memory] maintenance: ${result.durationMs}ms, ` +
           `dedup=${result.dedup.merged}, ` +
@@ -581,6 +740,8 @@ const graphMemoryPlugin = {
       } catch (err) {
         api.logger.error(`[graph-memory] session_end error: ${err}`);
       } finally {
+        clearDebounce(sid);
+        clearFlushTimer(sid);
         extractChain.delete(sid);
         msgSeq.delete(sid);
         recalled.delete(sid);
@@ -711,7 +872,7 @@ const graphMemoryPlugin = {
         parameters: Type.Object({}),
         async execute(_toolCallId: string, _params: any) {
           const embedFn = (recaller as any).embed ?? undefined;
-          const result = await runMaintenance(db, cfg, llm, embedFn);
+          const result = await runMaintenance(db, cfg, llm, embedFn, "full");
           const text = [
             `图维护完成（${result.durationMs}ms）`,
             `去重：发现 ${result.dedup.pairs.length} 对相似节点，合并 ${result.dedup.merged} 对`,
