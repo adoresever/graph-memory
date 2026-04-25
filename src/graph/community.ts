@@ -202,6 +202,7 @@ export async function summarizeCommunities(
   llm: CompleteFn,
   embedFn?: EmbedFn,
   mode: SummaryMode = "incremental",
+  maxTokens = 0,
 ): Promise<number> {
   pruneCommunitySummaries(db);
 
@@ -256,6 +257,11 @@ export async function summarizeCommunities(
       const summary = await llm(
         COMMUNITY_SUMMARY_SYS,
         `社区成员：\n${memberText}`,
+        {
+          kind: "community_summary",
+          maxTokens: maxTokens || undefined,
+          temperature: 0,
+        },
       );
 
       const cleaned = summary.trim()

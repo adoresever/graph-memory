@@ -7,6 +7,7 @@
 
 import type { GmConfig, ExtractionResult, FinalizeResult } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
+import { messageTextForExtraction } from "./gate.ts";
 
 // ─── 节点/边合法值 ──────────────────────────────────────────────
 
@@ -233,12 +234,17 @@ export class Extractor {
   }): Promise<ExtractionResult> {
     const msgs = params.messages
       .map(m => `[${(m.role ?? "?").toUpperCase()} t=${m.turn_index ?? 0}]\n${
-        String(typeof m.content === "string" ? m.content : JSON.stringify(m.content)).slice(0, 800)
+        messageTextForExtraction(m).slice(0, this._cfg.extractMaxMessageChars)
       }`).join("\n\n---\n\n");
 
     const raw = await this.llm(
       EXTRACT_SYS,
       EXTRACT_USER(msgs, params.existingNames.join(", ")),
+      {
+        json: true,
+        kind: "extract",
+        maxTokens: this._cfg.extractOutputMaxTokens || undefined,
+      },
     );
 
     if (process.env.GM_DEBUG) {
@@ -250,7 +256,15 @@ export class Extractor {
   }
 
   async finalize(params: { sessionNodes: any[]; graphSummary: string }): Promise<FinalizeResult> {
-    const raw = await this.llm(FINALIZE_SYS, FINALIZE_USER(params.sessionNodes, params.graphSummary));
+    const raw = await this.llm(
+      FINALIZE_SYS,
+      FINALIZE_USER(params.sessionNodes, params.graphSummary),
+      {
+        json: true,
+        kind: "finalize",
+        maxTokens: this._cfg.finalizeOutputMaxTokens || undefined,
+      },
+    );
     return this.parseFinalize(raw, params.sessionNodes);
   }
 

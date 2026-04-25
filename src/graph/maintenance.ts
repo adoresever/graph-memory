@@ -74,7 +74,7 @@ export async function runMaintenance(
   if (llm && communityResult.communities.size > 0) {
     try {
       communitySummaries = await summarizeCommunities(
-        db, communityResult.communities, llm, embedFn, summaryMode,
+        db, communityResult.communities, llm, embedFn, summaryMode, cfg.communitySummaryMaxTokens,
       );
       if (process.env.GM_DEBUG) {
         console.log(`  [DEBUG] maintenance: generated ${communitySummaries} community summaries`);

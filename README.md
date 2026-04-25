@@ -251,6 +251,10 @@ Add your API credentials inside `plugins.entries.graph-memory.config`:
             "baseURL": "https://api.openai.com/v1",
             "model": "gpt-4o-mini"
           },
+          "llmMonthlyCallBudget": 90000,
+          "llmMonthlyCommunitySummaryBudget": 3000,
+          "llmMonthlyFinalizeBudget": 3000,
+          "llmBudgetTimeZone": "Asia/Shanghai",
           "embedding": {
             "apiKey": "your-embedding-api-key",
             "baseURL": "https://api.openai.com/v1",
@@ -265,6 +269,14 @@ Add your API credentials inside `plugins.entries.graph-memory.config`:
 ```
 
 **LLM** (`config.llm`) — Required. Used for knowledge extraction and community summaries. Any OpenAI-compatible endpoint works. Use a cheap/fast model.
+
+**Virtual monthly LLM plan** (`llmMonthlyCallBudget`) — Optional but recommended for call-count-limited plans such as CodePlan. graph-memory tracks its own LLM calls in SQLite by month (`YYYY-MM`) and computes each day's dynamic allowance as:
+
+```
+remaining monthly calls / remaining days in the month, including today
+```
+
+Quiet days automatically increase the allowance for later days. If you start using this mid-month, set `llmMonthlyCallBudget` to your remaining calls for the current month; next month you can set it back to your full plan size.
 
 **Embedding** (`config.embedding`) — Optional but recommended. Enables semantic vector search, community-level recall, and vector dedup. Without it, falls back to FTS5 full-text search (still works, just keyword-based).
 
@@ -346,6 +358,17 @@ All parameters have defaults. Only set what you want to override.
 | `compactTurnCount` | `7` | Turns between maintenance cycles (PageRank + community + summaries) |
 | `recallMaxNodes` | `6` | Max nodes injected per recall |
 | `recallMaxDepth` | `2` | Graph traversal hops from seed nodes |
+| `llmMonthlyCallBudget` | `90000` | Virtual monthly LLM call plan. Daily allowance is computed from remaining monthly calls / remaining days |
+| `llmMonthlyCommunitySummaryBudget` | `3000` | Monthly sub-budget for community summary LLM calls |
+| `llmMonthlyFinalizeBudget` | `3000` | Monthly sub-budget for session-end finalize LLM calls |
+| `llmBudgetTimeZone` | `Asia/Shanghai` | Time zone used to roll monthly/daily budget counters |
+| `extractBatchMinMessages` | `6` | Pending meaningful messages before normal extraction runs |
+| `extractBatchMinChars` | `1600` | Pending meaningful characters before normal extraction runs |
+| `extractTrivialMaxChars` | `40` | Low-signal short confirmations at or below this length are skipped |
+| `extractMaxMessageChars` | `600` | Max text kept per message in extraction prompts |
+| `extractMaxBatchMessages` | `30` | Max unextracted messages sent to one extraction call |
+| `extractDebounceMs` | `45000` | Quiet period before normal pending messages are flushed |
+| `extractFlushIntervalMs` | `120000` | Periodic fallback flush interval for pending messages |
 | `dedupThreshold` | `0.90` | Cosine similarity threshold for node dedup |
 | `pagerankDamping` | `0.85` | PPR damping factor |
 | `pagerankIterations` | `20` | PPR iteration count |
