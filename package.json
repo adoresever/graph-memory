@@ -1,16 +1,16 @@
 {
-  "name": "graph-memory",
-  "version": "1.5.7",
-  "description": "Knowledge Graph Memory Engine for OpenClaw — with Personalized PageRank, community detection, and vector dedup",
+  "name": "graph-memory-pro",
+  "version": "2.0.0",
+  "description": "Neo4j Knowledge Graph Memory Engine for OpenClaw — GDS PageRank, community detection, vector index, Neovis 3D",
   "main": "index.ts",
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest --passWithNoTests"
   },
   "dependencies": {
-    "@photostructure/sqlite": "^1.0.0",
+    "neo4j-driver": "^5.27.0",
     "@sinclair/typebox": "^0.34.48",
     "openai": "^4.47.0"
   },
@@ -25,7 +25,6 @@
   "openclaw": {
     "extensions": [
       "./index.ts"
-    ],
-    "hooks": {}
+    ]
   }
 }

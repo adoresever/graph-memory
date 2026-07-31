@@ -1,191 +1,103 @@
 /**
- * graph-memory
+ * graph-memory-pro — Neo4j 连接管理（加固版）
  *
- * By: adoresever
- * Email: Wywelljob@gmail.com
+ * 解决 "Pool is closed" 问题：
+ * - driver 是长生命周期单例，不在 dispose 时关闭
+ * - getSession 在 driver 被意外关闭时自动重建
  */
 
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
-import { mkdirSync } from "fs";
-import { homedir } from "os";
+import neo4j, { type Driver, type Session } from "neo4j-driver";
+import type { EmbeddingConfig, Neo4jConfig } from "../types.ts";
 
-let _db: DatabaseSyncInstance | null = null;
+let _driver: Driver | null = null;
+let _cfg: Neo4jConfig | null = null;
 
-export function resolvePath(p: string): string {
-  return p.replace(/^~/, homedir());
+/**
+ * 获取 Neo4j Driver 单例
+ * 保存配置，支持自动重连
+ */
+export function getDriver(cfg: Neo4jConfig): Driver {
+  _cfg = cfg;
+  if (_driver) return _driver;
+  _driver = neo4j.driver(cfg.uri, neo4j.auth.basic(cfg.user, cfg.password), {
+    maxConnectionPoolSize: 50,
+    connectionAcquisitionTimeout: 60000,
+    maxTransactionRetryTime: 30000,
+  });
+  return _driver;
 }
 
-export function getDb(dbPath: string): DatabaseSyncInstance {
-  if (_db) return _db;
-  const resolved = resolvePath(dbPath);
-  
-  // 修复：同时处理 Windows 和 Unix 路径分隔符
-  const lastSeparator = Math.max(
-    resolved.lastIndexOf("/"),
-    resolved.lastIndexOf("\\")
-  );
-  
-  if (lastSeparator > 0) {
-    const dirPath = resolved.substring(0, lastSeparator);
-    mkdirSync(dirPath, { recursive: true });
-  } else if (lastSeparator === 0) {
-    // 路径像是 "/file.db" 或 "C:file.db"
-    // 在根目录或驱动器根目录，不需要创建目录
-  } else {
-    // lastSeparator === -1，路径没有分隔符
-    // 像是 "file.db"，使用当前目录，不需要创建目录
-  }
-
-  _db = new DatabaseSync(resolved);
-  _db.exec("PRAGMA journal_mode = WAL");
-  _db.exec("PRAGMA foreign_keys = ON");
-  migrate(_db);
-  return _db;
-}
-
-/** 仅用于测试：关闭并重置单例 */
-export function closeDb(): void {
-  if (_db) { _db.close(); _db = null; }
-}
-
-function migrate(db: DatabaseSyncInstance): void {
-  db.exec(`CREATE TABLE IF NOT EXISTS _migrations (v INTEGER PRIMARY KEY, at INTEGER NOT NULL)`);
-  const cur = (db.prepare("SELECT MAX(v) as v FROM _migrations").get() as any)?.v ?? 0;
-  const steps = [m1_core, m2_messages, m3_signals, m4_fts5, m5_vectors, m6_communities];
-  for (let i = cur; i < steps.length; i++) {
-    steps[i](db);
-    db.prepare("INSERT INTO _migrations (v,at) VALUES (?,?)").run(i + 1, Date.now());
-  }
-}
-
-// ─── 核心表：节点 + 边 ──────────────────────────────────────
-
-function m1_core(db: DatabaseSyncInstance): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS gm_nodes (
-      id              TEXT PRIMARY KEY,
-      type            TEXT NOT NULL CHECK(type IN ('TASK','SKILL','EVENT')),
-      name            TEXT NOT NULL,
-      description     TEXT NOT NULL DEFAULT '',
-      content         TEXT NOT NULL,
-      status          TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','deprecated')),
-      validated_count INTEGER NOT NULL DEFAULT 1,
-      source_sessions TEXT NOT NULL DEFAULT '[]',
-      community_id    TEXT,
-      pagerank        REAL NOT NULL DEFAULT 0,
-      created_at      INTEGER NOT NULL,
-      updated_at      INTEGER NOT NULL
-    );
-    CREATE UNIQUE INDEX IF NOT EXISTS ux_gm_nodes_name ON gm_nodes(name);
-    CREATE INDEX IF NOT EXISTS ix_gm_nodes_type_status ON gm_nodes(type, status);
-    CREATE INDEX IF NOT EXISTS ix_gm_nodes_community ON gm_nodes(community_id);
-
-    CREATE TABLE IF NOT EXISTS gm_edges (
-      id          TEXT PRIMARY KEY,
-      from_id     TEXT NOT NULL REFERENCES gm_nodes(id),
-      to_id       TEXT NOT NULL REFERENCES gm_nodes(id),
-      type        TEXT NOT NULL CHECK(type IN ('USED_SKILL','SOLVED_BY','REQUIRES','PATCHES','CONFLICTS_WITH')),
-      instruction TEXT NOT NULL,
-      condition   TEXT,
-      session_id  TEXT NOT NULL,
-      created_at  INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS ix_gm_edges_from ON gm_edges(from_id);
-    CREATE INDEX IF NOT EXISTS ix_gm_edges_to   ON gm_edges(to_id);
-  `);
-}
-
-// ─── 消息存储 ────────────────────────────────────────────────
-
-function m2_messages(db: DatabaseSyncInstance): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS gm_messages (
-      id          TEXT PRIMARY KEY,
-      session_id  TEXT NOT NULL,
-      turn_index  INTEGER NOT NULL,
-      role        TEXT NOT NULL,
-      content     TEXT NOT NULL,
-      extracted   INTEGER NOT NULL DEFAULT 0,
-      created_at  INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS ix_gm_msg_session ON gm_messages(session_id, turn_index);
-  `);
-}
-
-// ─── 信号存储 ────────────────────────────────────────────────
-
-function m3_signals(db: DatabaseSyncInstance): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS gm_signals (
-      id          TEXT PRIMARY KEY,
-      session_id  TEXT NOT NULL,
-      turn_index  INTEGER NOT NULL,
-      type        TEXT NOT NULL,
-      data        TEXT NOT NULL DEFAULT '{}',
-      processed   INTEGER NOT NULL DEFAULT 0,
-      created_at  INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS ix_gm_sig_session ON gm_signals(session_id, processed);
-  `);
-}
-
-// ─── FTS5 全文索引 ───────────────────────────────────────────
-
-function m4_fts5(db: DatabaseSyncInstance): void {
+/**
+ * 获取一个 Session（用完必须 close）
+ * 如果 driver 被关闭了，自动用保存的配置重建
+ */
+export function getSession(driver: Driver): Session {
   try {
-    db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS gm_nodes_fts USING fts5(
-        name,
-        description,
-        content,
-        content=gm_nodes,
-        content_rowid=rowid
-      );
-    `);
-    db.exec(`
-      CREATE TRIGGER IF NOT EXISTS gm_nodes_ai AFTER INSERT ON gm_nodes BEGIN
-        INSERT INTO gm_nodes_fts(rowid, name, description, content)
-        VALUES (NEW.rowid, NEW.name, NEW.description, NEW.content);
-      END;
-      CREATE TRIGGER IF NOT EXISTS gm_nodes_ad AFTER DELETE ON gm_nodes BEGIN
-        INSERT INTO gm_nodes_fts(gm_nodes_fts, rowid, name, description, content)
-        VALUES ('delete', OLD.rowid, OLD.name, OLD.description, OLD.content);
-      END;
-      CREATE TRIGGER IF NOT EXISTS gm_nodes_au AFTER UPDATE ON gm_nodes BEGIN
-        INSERT INTO gm_nodes_fts(gm_nodes_fts, rowid, name, description, content)
-        VALUES ('delete', OLD.rowid, OLD.name, OLD.description, OLD.content);
-        INSERT INTO gm_nodes_fts(rowid, name, description, content)
-        VALUES (NEW.rowid, NEW.name, NEW.description, NEW.content);
-      END;
-    `);
-  } catch {
-    // FTS5 不可用时静默降级到 LIKE 搜索
+    return driver.session({ database: "neo4j" });
+  } catch (err) {
+    // Pool is closed — 尝试重建 driver
+    if (_cfg && String(err).includes("closed")) {
+      console.log("[graph-memory-pro] reconnecting Neo4j driver...");
+      _driver = neo4j.driver(_cfg.uri, neo4j.auth.basic(_cfg.user, _cfg.password), {
+        maxConnectionPoolSize: 50,
+        connectionAcquisitionTimeout: 60000,
+        maxTransactionRetryTime: 30000,
+      });
+      return _driver.session({ database: "neo4j" });
+    }
+    throw err;
   }
 }
 
-// ─── 向量存储 ────────────────────────────────────────────────
-
-function m5_vectors(db: DatabaseSyncInstance): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS gm_vectors (
-      node_id      TEXT PRIMARY KEY REFERENCES gm_nodes(id),
-      content_hash TEXT NOT NULL,
-      embedding    BLOB NOT NULL
-    );
-  `);
+/**
+ * 关闭 Driver（仅进程退出时调用）
+ */
+export async function closeDriver(): Promise<void> {
+  if (_driver) {
+    await _driver.close();
+    _driver = null;
+  }
 }
 
-// ─── 社区描述存储 ────────────────────────────────────────────
+/**
+ * 初始化 Schema
+ */
+export async function initSchema(driver: Driver, embedding?: EmbeddingConfig): Promise<void> {
+  const session = getSession(driver);
+  try {
+    // Per-label unique constraints
+    for (const label of ["Task", "Skill", "Event"]) {
+      await session.run(`CREATE CONSTRAINT ${label.toLowerCase()}_id IF NOT EXISTS FOR (n:${label}) REQUIRE n.id IS UNIQUE`);
+      await session.run(`CREATE CONSTRAINT ${label.toLowerCase()}_name IF NOT EXISTS FOR (n:${label}) REQUIRE n.name IS UNIQUE`);
+      await session.run(`CREATE INDEX ${label.toLowerCase()}_status IF NOT EXISTS FOR (n:${label}) ON (n.status)`);
+      await session.run(`CREATE INDEX ${label.toLowerCase()}_community IF NOT EXISTS FOR (n:${label}) ON (n.communityId)`);
+    }
 
-function m6_communities(db: DatabaseSyncInstance): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS gm_communities (
-      id          TEXT PRIMARY KEY,
-      summary     TEXT NOT NULL,
-      node_count  INTEGER NOT NULL DEFAULT 0,
-      embedding   BLOB,
-      created_at  INTEGER NOT NULL,
-      updated_at  INTEGER NOT NULL
-    );
-  `);
+    // Community
+    await session.run("CREATE CONSTRAINT community_id IF NOT EXISTS FOR (c:Community) REQUIRE c.id IS UNIQUE");
+
+    // Message (temporary extraction buffer)
+    await session.run("CREATE CONSTRAINT gm_msg_id IF NOT EXISTS FOR (m:GmMessage) REQUIRE m.id IS UNIQUE");
+    await session.run("CREATE INDEX gm_msg_session IF NOT EXISTS FOR (m:GmMessage) ON (m.sessionId, m.turnIndex)");
+
+    const configuredDimensions = embedding?.dimensions;
+    const dimensions = typeof configuredDimensions === "number" && Number.isInteger(configuredDimensions) && configuredDimensions > 0
+      ? configuredDimensions
+      : 1024;
+
+    // The search code queries one index across all knowledge labels.
+    await session.run("MATCH (n:Task|Skill|Event) SET n:MemoryNode");
+    await session.run(`
+      CREATE VECTOR INDEX gm_node_embedding IF NOT EXISTS
+      FOR (n:MemoryNode) ON (n.embedding)
+      OPTIONS {indexConfig: {\`vector.dimensions\`: ${dimensions}, \`vector.similarity_function\`: 'cosine'}}
+    `);
+    await session.run(`
+      CREATE VECTOR INDEX gm_community_embedding IF NOT EXISTS
+      FOR (c:Community) ON (c.embedding)
+      OPTIONS {indexConfig: {\`vector.dimensions\`: ${dimensions}, \`vector.similarity_function\`: 'cosine'}}
+    `);
+  } finally {
+    await session.close();
+  }
 }

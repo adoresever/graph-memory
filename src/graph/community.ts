@@ -1,222 +1,208 @@
 /**
- * graph-memory
+ * graph-memory-pro — 社区检测 (Neo4j GDS)
  *
- * By: adoresever
- * Email: Wywelljob@gmail.com
+ * 替代原版手写的 Label Propagation 算法
+ * 使用 GDS gds.labelPropagation
+ * 保留 summarizeCommunities()（需要 LLM）
  */
 
-/**
- * 社区检测 — Label Propagation Algorithm
- *
- * 原理：每个节点初始自成一个社区，迭代中每个节点采纳邻居中最频繁的社区标签。
- *       收敛后自然形成社区划分。
- *
- * 为什么选 Label Propagation 而不是 Louvain：
- *   - 实现简单（50 行核心逻辑）
- *   - 不需要外部库
- *   - 对小图（< 10000 节点）效果够好
- *   - O(iterations * edges)，几千节点 < 5ms
- *
- * 用途：
- *   - 发现知识域（Docker 相关技能自动聚成一组）
- *   - recall 时可以拉整个社区的节点
- *   - assemble 时同社区节点放一起，上下文更连贯
- *   - kg_stats 展示社区分布
- */
+import type { Driver } from "neo4j-driver";
+import neo4j from "neo4j-driver";
+import { getSession } from "../store/db.ts";
+import { updateCommunities, upsertCommunitySummary, pruneCommunitySummaries } from "../store/store.ts";
 
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
-import { updateCommunities } from "../store/store.ts";
+const ALL_REL_TYPES = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH"];
+
+async function getExistingRelTypes(session: any): Promise<string[]> {
+  const result = await session.run(`
+    MATCH (:Task|Skill|Event)-[r]->(:Task|Skill|Event)
+    WHERE type(r) IN $types
+    RETURN DISTINCT type(r) AS t
+  `, { types: ALL_REL_TYPES });
+  return result.records.map((r: any) => r.get("t"));
+}
+
+function buildRelProjection(existingTypes: string[]): string {
+  if (existingTypes.length === 0) return "'*'";
+  const parts = existingTypes.map(t => `${t}: {orientation: 'UNDIRECTED'}`);
+  return `{${parts.join(", ")}}`;
+}
 
 export interface CommunityResult {
   labels: Map<string, string>;
-  /** 社区 ID → 成员节点 ID 列表 */
   communities: Map<string, string[]>;
   count: number;
 }
 
 /**
- * 运行 Label Propagation 并写回 gm_nodes.community_id
- *
- * 把有向边当无向边处理（知识关联不分方向）
+ * 社区检测 — 使用 GDS labelPropagation
  */
-export function detectCommunities(db: DatabaseSyncInstance, maxIter = 50): CommunityResult {
-  // 读取活跃节点
-  const nodeRows = db.prepare(
-    "SELECT id FROM gm_nodes WHERE status='active'"
-  ).all() as any[];
+export async function detectCommunities(driver: Driver, maxIter = 50): Promise<CommunityResult> {
+  const session = getSession(driver);
+  const graphName = `gm-community-${Date.now()}`;
 
-  if (nodeRows.length === 0) {
+  try {
+    // 检查节点数
+    const countResult = await session.run(
+      "MATCH (n:Task|Skill|Event {status: 'active'}) RETURN count(n) AS c"
+    );
+    const nodeCount = countResult.records[0]?.get("c")?.toNumber?.() ?? 0;
+    if (nodeCount === 0) {
+      return { labels: new Map(), communities: new Map(), count: 0 };
+    }
+
+    const existingTypes = await getExistingRelTypes(session);
+    if (existingTypes.length === 0) {
+      return { labels: new Map(), communities: new Map(), count: 0 };
+    }
+
+    const relProjection = buildRelProjection(existingTypes);
+
+    // 标准投影（只包含实际存在的关系类型）
+    await session.run(
+      `CALL gds.graph.project('${graphName}', ['Task', 'Skill', 'Event'], ${relProjection})`
+    );
+
+    // 运行 Label Propagation
+    const lpResult = await session.run(`
+      CALL gds.labelPropagation.stream('${graphName}', {
+        maxIterations: toInteger($maxIter)
+      })
+      YIELD nodeId, communityId
+      WITH gds.util.asNode(nodeId) AS node, communityId
+      WHERE node.status = 'active'
+      RETURN node.id AS id, toString(communityId) AS rawCommunityId
+    `, { maxIter });
+
+    // 清理图投影
+    await session.run(`CALL gds.graph.drop('${graphName}')`);
+
+
+    // 构建社区映射
+    const rawLabels = new Map<string, string>();
+    const rawCommunities = new Map<string, string[]>();
+
+    for (const r of lpResult.records) {
+      const nodeId = r.get("id");
+      const rawCid = r.get("rawCommunityId");
+      rawLabels.set(nodeId, rawCid);
+      if (!rawCommunities.has(rawCid)) rawCommunities.set(rawCid, []);
+      rawCommunities.get(rawCid)!.push(nodeId);
+    }
+
+    // 按成员数排序，重新编号 c-1, c-2, ...
+    const sorted = Array.from(rawCommunities.entries())
+      .sort((a, b) => b[1].length - a[1].length);
+
+    const renameMap = new Map<string, string>();
+    sorted.forEach(([oldId], i) => renameMap.set(oldId, `c-${i + 1}`));
+
+    const finalLabels = new Map<string, string>();
+    for (const [nodeId, oldLabel] of rawLabels) {
+      finalLabels.set(nodeId, renameMap.get(oldLabel) || oldLabel);
+    }
+
+    const finalCommunities = new Map<string, string[]>();
+    for (const [oldId, members] of rawCommunities) {
+      finalCommunities.set(renameMap.get(oldId) || oldId, members);
+    }
+
+    // 写回数据库
+    await updateCommunities(driver, finalLabels);
+
+    return {
+      labels: finalLabels,
+      communities: finalCommunities,
+      count: finalCommunities.size,
+    };
+  } catch {
+    try { await session.run("CALL gds.graph.drop($graphName)", { graphName }); } catch {}
     return { labels: new Map(), communities: new Map(), count: 0 };
+  } finally {
+    await session.close();
   }
-
-  const nodeIds = nodeRows.map((r: any) => r.id);
-
-  // 读取边，构建无向邻接表
-  const edgeRows = db.prepare("SELECT from_id, to_id FROM gm_edges").all() as any[];
-  const nodeSet = new Set(nodeIds);
-  const adj = new Map<string, string[]>();
-
-  for (const id of nodeIds) adj.set(id, []);
-
-  for (const e of edgeRows) {
-    if (!nodeSet.has(e.from_id) || !nodeSet.has(e.to_id)) continue;
-    adj.get(e.from_id)!.push(e.to_id);
-    adj.get(e.to_id)!.push(e.from_id);
-  }
-
-  // 初始标签：每个节点 = 自己的 ID
-  const label = new Map<string, string>();
-  for (const id of nodeIds) label.set(id, id);
-
-  // 迭代
-  for (let iter = 0; iter < maxIter; iter++) {
-    let changed = false;
-
-    // 随机打乱遍历顺序（减少震荡）
-    const shuffled = [...nodeIds];
-    for (let i = shuffled.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-    }
-
-    for (const nodeId of shuffled) {
-      const neighbors = adj.get(nodeId) || [];
-      if (neighbors.length === 0) continue;
-
-      // 统计邻居标签频次
-      const freq = new Map<string, number>();
-      for (const nb of neighbors) {
-        const l = label.get(nb)!;
-        freq.set(l, (freq.get(l) || 0) + 1);
-      }
-
-      // 取频次最高的标签（相同频次取字典序最小，保证确定性）
-      let bestLabel = label.get(nodeId)!;
-      let bestCount = 0;
-      for (const [l, c] of freq) {
-        if (c > bestCount || (c === bestCount && l < bestLabel)) {
-          bestLabel = l;
-          bestCount = c;
-        }
-      }
-
-      if (label.get(nodeId) !== bestLabel) {
-        label.set(nodeId, bestLabel);
-        changed = true;
-      }
-    }
-
-    if (!changed) break;
-  }
-
-  // 构建社区映射
-  const communities = new Map<string, string[]>();
-  for (const [nodeId, communityId] of label) {
-    if (!communities.has(communityId)) communities.set(communityId, []);
-    communities.get(communityId)!.push(nodeId);
-  }
-
-  // 给社区编号（用最大成员数排序，编号 c-1, c-2, ...）
-  const sorted = Array.from(communities.entries())
-    .sort((a, b) => b[1].length - a[1].length);
-
-  const renameMap = new Map<string, string>();
-  sorted.forEach(([oldId], i) => renameMap.set(oldId, `c-${i + 1}`));
-
-  // 重命名标签
-  const finalLabels = new Map<string, string>();
-  for (const [nodeId, oldLabel] of label) {
-    finalLabels.set(nodeId, renameMap.get(oldLabel) || oldLabel);
-  }
-
-  const finalCommunities = new Map<string, string[]>();
-  for (const [oldId, members] of communities) {
-    const newId = renameMap.get(oldId) || oldId;
-    finalCommunities.set(newId, members);
-  }
-
-  // 写回数据库
-  updateCommunities(db, finalLabels);
-
-  return {
-    labels: finalLabels,
-    communities: finalCommunities,
-    count: finalCommunities.size,
-  };
 }
 
 /**
  * 获取同社区的节点 ID 列表
- * recall 时用：找到种子节点 → 拉同社区的其他节点作为补充
  */
-export function getCommunityPeers(db: DatabaseSyncInstance, nodeId: string, limit = 5): string[] {
-  const row = db.prepare(
-    "SELECT community_id FROM gm_nodes WHERE id=? AND status='active'"
-  ).get(nodeId) as any;
-
-  if (!row?.community_id) return [];
-
-  return (db.prepare(`
-    SELECT id FROM gm_nodes
-    WHERE community_id=? AND id!=? AND status='active'
-    ORDER BY validated_count DESC, updated_at DESC
-    LIMIT ?
-  `).all(row.community_id, nodeId, limit) as any[]).map(r => r.id);
+export async function getCommunityPeers(driver: Driver, nodeId: string, limit = 5): Promise<string[]> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(`
+      MATCH (n:Task|Skill|Event {id: $nodeId, status: 'active'})
+      WITH n.communityId AS cid
+      WHERE cid IS NOT NULL
+      MATCH (peer:Task|Skill|Event {communityId: cid, status: 'active'})
+      WHERE peer.id <> $nodeId
+      RETURN peer.id AS id
+      ORDER BY peer.validatedCount DESC, peer.updatedAt DESC
+      LIMIT toInteger($limit)
+    `, { nodeId, limit });
+    return result.records.map(r => r.get("id"));
+  } finally {
+    await session.close();
+  }
 }
 
-// ─── 社区描述生成 ────────────────────────────────────────────
+// ─── 社区描述生成（保留原版逻辑，改为 async + Neo4j） ────────
 
 import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn } from "../engine/embed.ts";
-import { upsertCommunitySummary, pruneCommunitySummaries } from "../store/store.ts";
 
-const COMMUNITY_SUMMARY_SYS = `你是知识图谱摘要引擎。根据节点列表，用简短的描述概括这组节点的主题领域。
+const COMMUNITY_SUMMARY_SYS = `你是知识图谱社区摘要引擎。根据社区内的节点列表，生成一句话描述该社区的主题领域。
 要求：
-- 只返回短语本身，不要解释
-- 描述涵盖的工具/技术/任务领域
-- 不要使用"社区"这个词`;
+- 只返回一句话，不超过 30 个字
+- 描述该社区涵盖的工具/技术/任务领域
+- 不要使用"社区"这个词
+- 不要加引号或标点以外的格式`;
 
-/**
- * 为所有社区生成 LLM 摘要描述 + embedding 向量
- *
- * 调用时机：runMaintenance → detectCommunities 之后
- */
 export async function summarizeCommunities(
-  db: DatabaseSyncInstance,
+  driver: Driver,
   communities: Map<string, string[]>,
   llm: CompleteFn,
   embedFn?: EmbedFn,
 ): Promise<number> {
-  pruneCommunitySummaries(db);
+  await pruneCommunitySummaries(driver);
   let generated = 0;
 
   for (const [communityId, memberIds] of communities) {
     if (memberIds.length === 0) continue;
 
-    const placeholders = memberIds.map(() => "?").join(",");
-    const members = db.prepare(`
-      SELECT name, type, description FROM gm_nodes
-      WHERE id IN (${placeholders}) AND status='active'
-      ORDER BY validated_count DESC
-      LIMIT 10
-    `).all(...memberIds) as any[];
+    const session = getSession(driver);
+    let members: any[];
+    try {
+      const result = await session.run(`
+        MATCH (n:Task|Skill|Event {status: 'active'})
+        WHERE n.id IN $memberIds
+        RETURN n.name AS name, n.type AS type, n.description AS description
+        ORDER BY n.validatedCount DESC
+        LIMIT 10
+      `, { memberIds });
+      members = result.records.map(r => ({
+        name: r.get("name"),
+        type: r.get("type"),
+        description: r.get("description"),
+      }));
+    } finally {
+      await session.close();
+    }
 
     if (members.length === 0) continue;
 
     const memberText = members
-      .map((m: any) => `${m.type}:${m.name} — ${m.description}`)
+      .map(m => `${m.type}:${m.name} — ${m.description}`)
       .join("\n");
 
     try {
-      // LLM 生成描述
       const summary = await llm(
         COMMUNITY_SUMMARY_SYS,
         `社区成员：\n${memberText}`,
       );
 
       const cleaned = summary.trim()
-        .replace(/<think>[\s\S]*?<\/think>/gi, "")  // 去掉思维链
-        .replace(/<think>[\s\S]*/gi, "")              // 去掉未闭合的 <think>
+        .replace(/<think>[\s\S]*?<\/think>/gi, "")
+        .replace(/<think>[\s\S]*/gi, "")
         .replace(/^["'「」]|["'「」]$/g, "")
         .replace(/\n/g, " ")
         .replace(/\s{2,}/g, " ")
@@ -225,20 +211,15 @@ export async function summarizeCommunities(
 
       if (cleaned.length === 0) continue;
 
-      // 生成社区 embedding（用描述 + 成员名拼接）
       let embedding: number[] | undefined;
       if (embedFn) {
         try {
-          const embedText = `${cleaned}\n${members.map((m: any) => m.name).join(", ")}`;
+          const embedText = `${cleaned}\n${members.map(m => m.name).join(", ")}`;
           embedding = await embedFn(embedText);
-        } catch {
-          if (process.env.GM_DEBUG) {
-            console.log(`  [DEBUG] community embedding failed for ${communityId}`);
-          }
-        }
+        } catch {}
       }
 
-      upsertCommunitySummary(db, communityId, cleaned, memberIds.length, embedding);
+      await upsertCommunitySummary(driver, communityId, cleaned, memberIds.length, embedding);
       generated++;
     } catch (err) {
       console.log(`  [WARN] community summary failed for ${communityId}: ${err}`);

@@ -1,13 +1,21 @@
 /**
- * graph-memory
+ * graph-memory-pro — Neo4j 存储层
  *
- * By: adoresever
- * Email: Wywelljob@gmail.com
+ * 替代原版 SQLite store.ts
+ * 所有操作改为 async，使用 Cypher 查询
  */
 
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
+import type { Driver, Session } from "neo4j-driver";
+import neo4j from "neo4j-driver";
 import { createHash } from "crypto";
-import type { GmNode, GmEdge, EdgeType, NodeType, Signal } from "../types.ts";
+import type { GmNode, GmEdge, EdgeType, NodeType } from "../types.ts";
+import { NODE_TYPE_TO_LABEL } from "../types.ts";
+import { getSession } from "./db.ts";
+
+/** Neo4j LIMIT/索引参数必须是 Integer */
+function nint(v: number): any {
+  return neo4j.int(Math.round(v));
+}
 
 // ─── 工具 ─────────────────────────────────────────────────────
 
@@ -16,23 +24,52 @@ function uid(p: string): string {
 }
 
 function toNode(r: any): GmNode {
+  const n = r.properties ?? r;
   return {
-    id: r.id, type: r.type, name: r.name,
-    description: r.description ?? "", content: r.content,
-    status: r.status, validatedCount: r.validated_count,
-    sourceSessions: JSON.parse(r.source_sessions ?? "[]"),
-    communityId: r.community_id ?? null,
-    pagerank: r.pagerank ?? 0,
-    createdAt: r.created_at, updatedAt: r.updated_at,
+    id: n.id,
+    type: n.type,
+    name: n.name,
+    description: n.description ?? "",
+    content: n.content,
+    status: n.status,
+    validatedCount: toInt(n.validatedCount ?? n.validated_count ?? 1),
+    sourceSessions: typeof n.sourceSessions === "string"
+      ? JSON.parse(n.sourceSessions)
+      : (n.sourceSessions ?? []),
+    communityId: n.communityId ?? null,
+    pagerank: toFloat(n.pagerank ?? 0),
+    createdAt: toInt(n.createdAt ?? n.created_at ?? 0),
+    updatedAt: toInt(n.updatedAt ?? n.updated_at ?? 0),
   };
 }
 
 function toEdge(r: any): GmEdge {
+  const e = r.properties ?? r;
   return {
-    id: r.id, fromId: r.from_id, toId: r.to_id, type: r.type,
-    instruction: r.instruction, condition: r.condition ?? undefined,
-    sessionId: r.session_id, createdAt: r.created_at,
+    id: e.id,
+    fromId: e.fromId ?? e.from_id,
+    toId: e.toId ?? e.to_id,
+    type: e.type,
+    instruction: e.instruction,
+    condition: e.condition ?? undefined,
+    sessionId: e.sessionId ?? e.session_id,
+    createdAt: toInt(e.createdAt ?? e.created_at ?? 0),
   };
+}
+
+/** Neo4j Integer → JS number */
+function toInt(v: any): number {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "number") return v;
+  if (typeof v?.toNumber === "function") return v.toNumber();
+  return Number(v) || 0;
+}
+
+function toFloat(v: any): number {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "number") return v;
+  if (typeof v?.toNumber === "function") return v.toNumber();
+  return parseFloat(String(v)) || 0;
 }
 
 /** 标准化 name：全小写，空格转连字符，保留中文 */
@@ -44,485 +81,760 @@ function normalizeName(name: string): string {
     .replace(/^-|-$/g, "");
 }
 
+export { normalizeName };
+
 // ─── 节点 CRUD ───────────────────────────────────────────────
 
-export function findByName(db: DatabaseSyncInstance, name: string): GmNode | null {
-  const r = db.prepare("SELECT * FROM gm_nodes WHERE name = ?").get(normalizeName(name)) as any;
-  return r ? toNode(r) : null;
+export async function findByName(driver: Driver, name: string): Promise<GmNode | null> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(
+      "MATCH (n:Task|Skill|Event {name: $name}) RETURN n",
+      { name: normalizeName(name) },
+    );
+    if (result.records.length === 0) return null;
+    return toNode(result.records[0].get("n"));
+  } finally {
+    await session.close();
+  }
 }
 
-export function findById(db: DatabaseSyncInstance, id: string): GmNode | null {
-  const r = db.prepare("SELECT * FROM gm_nodes WHERE id = ?").get(id) as any;
-  return r ? toNode(r) : null;
+export async function findById(driver: Driver, id: string): Promise<GmNode | null> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(
+      "MATCH (n:Task|Skill|Event {id: $id}) RETURN n",
+      { id },
+    );
+    if (result.records.length === 0) return null;
+    return toNode(result.records[0].get("n"));
+  } finally {
+    await session.close();
+  }
 }
 
-export function allActiveNodes(db: DatabaseSyncInstance): GmNode[] {
-  return (db.prepare("SELECT * FROM gm_nodes WHERE status='active'").all() as any[]).map(toNode);
+export async function allActiveNodes(driver: Driver): Promise<GmNode[]> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(
+      "MATCH (n:Task|Skill|Event {status: 'active'}) RETURN n"
+    );
+    return result.records.map(r => toNode(r.get("n")));
+  } finally {
+    await session.close();
+  }
 }
 
-export function allEdges(db: DatabaseSyncInstance): GmEdge[] {
-  return (db.prepare("SELECT * FROM gm_edges").all() as any[]).map(toEdge);
+export async function allEdges(driver: Driver): Promise<GmEdge[]> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(`
+      MATCH (a:Task|Skill|Event)-[r]->(b:Task|Skill|Event)
+      WHERE type(r) IN ['USED_SKILL','SOLVED_BY','REQUIRES','PATCHES','CONFLICTS_WITH']
+      RETURN r.id AS id, a.id AS fromId, b.id AS toId, type(r) AS type,
+             r.instruction AS instruction, r.condition AS condition,
+             r.sessionId AS sessionId, r.createdAt AS createdAt
+    `);
+    return result.records.map(r => ({
+      id: r.get("id"),
+      fromId: r.get("fromId"),
+      toId: r.get("toId"),
+      type: r.get("type") as EdgeType,
+      instruction: r.get("instruction"),
+      condition: r.get("condition") ?? undefined,
+      sessionId: r.get("sessionId"),
+      createdAt: toInt(r.get("createdAt")),
+    }));
+  } finally {
+    await session.close();
+  }
 }
 
-export function upsertNode(
-  db: DatabaseSyncInstance,
+export async function upsertNode(
+  driver: Driver,
   c: { type: NodeType; name: string; description: string; content: string },
   sessionId: string,
-): { node: GmNode; isNew: boolean } {
+): Promise<{ node: GmNode; isNew: boolean }> {
   const name = normalizeName(c.name);
-  const ex = findByName(db, name);
+  const label = NODE_TYPE_TO_LABEL[c.type as NodeType] ?? "Skill";
+  const session = getSession(driver);
+  try {
+    // Try to find existing node with this name across all knowledge labels
+    const existing = await session.run(
+      "MATCH (n:Task|Skill|Event {name: $name}) RETURN n",
+      { name },
+    );
 
-  if (ex) {
-    const sessions = JSON.stringify(Array.from(new Set([...ex.sourceSessions, sessionId])));
-    const content = c.content.length > ex.content.length ? c.content : ex.content;
-    const desc = c.description.length > ex.description.length ? c.description : ex.description;
-    const count = ex.validatedCount + 1;
-    db.prepare(`UPDATE gm_nodes SET content=?, description=?, validated_count=?,
-      source_sessions=?, updated_at=? WHERE id=?`)
-      .run(content, desc, count, sessions, Date.now(), ex.id);
-    return { node: { ...ex, content, description: desc, validatedCount: count }, isNew: false };
+    if (existing.records.length > 0) {
+      // Update existing node
+      await session.run(`
+        MATCH (n:Task|Skill|Event {name: $name})
+        SET n.content = CASE WHEN size($content) > size(n.content) THEN $content ELSE n.content END,
+            n.description = CASE WHEN size($description) > size(n.description) THEN $description ELSE n.description END,
+            n.validatedCount = n.validatedCount + 1,
+            n.sourceSessions = CASE
+              WHEN NOT $sessionId IN n.sourceSessions
+              THEN n.sourceSessions + $sessionId
+              ELSE n.sourceSessions
+            END,
+            n.updatedAt = $now
+        RETURN n
+      `, { name, content: c.content, description: c.description, sessionId, now: Date.now() });
+
+      const updated = await session.run(
+        "MATCH (n:Task|Skill|Event {name: $name}) RETURN n",
+        { name },
+      );
+      return { node: toNode(updated.records[0].get("n")), isNew: false };
+    } else {
+      // Create new node with specific label
+      const now = Date.now();
+      const result = await session.run(`
+        CREATE (n:MemoryNode:${label} {
+          id: $id, name: $name, type: $type,
+          description: $description, content: $content,
+          status: 'active', validatedCount: 1,
+          sourceSessions: $sessions, communityId: null,
+          pagerank: 0.0, createdAt: $now, updatedAt: $now
+        })
+        RETURN n
+      `, {
+        id: uid("n"), name, type: c.type,
+        description: c.description, content: c.content,
+        sessions: [sessionId], now,
+      });
+      return { node: toNode(result.records[0].get("n")), isNew: true };
+    }
+  } finally {
+    await session.close();
   }
-
-  const id = uid("n");
-  db.prepare(`INSERT INTO gm_nodes
-    (id, type, name, description, content, status, validated_count, source_sessions, created_at, updated_at)
-    VALUES (?,?,?,?,?,'active',1,?,?,?)`)
-    .run(id, c.type, name, c.description, c.content, JSON.stringify([sessionId]), Date.now(), Date.now());
-  return { node: findByName(db, name)!, isNew: true };
 }
 
-export function deprecate(db: DatabaseSyncInstance, nodeId: string): void {
-  db.prepare("UPDATE gm_nodes SET status='deprecated', updated_at=? WHERE id=?")
-    .run(Date.now(), nodeId);
+export function applyNodePatch(
+  ex: Pick<GmNode, "description" | "content">,
+  patch: { description?: string; content?: string },
+): { description: string; content: string } {
+  return {
+    description: patch.description ?? ex.description,
+    content: patch.content ?? ex.content,
+  };
+}
+
+/** 按 name 精确更新 description / content；找不到返回 null（调用方决定报错语义） */
+export async function updateNode(
+  driver: Driver,
+  name: string,
+  patch: { description?: string; content?: string },
+): Promise<GmNode | null> {
+  const ex = await findByName(driver, name);
+  if (!ex) return null;
+  const now = Date.now();
+  const { description, content } = applyNodePatch(ex, patch);
+  const session = getSession(driver);
+  try {
+    await session.run(
+      `MATCH (n:Task|Skill|Event {id: $id})
+       SET n.description = $description,
+           n.content = $content,
+           n.updatedAt = $now`,
+      { id: ex.id, description, content, now },
+    );
+  } finally {
+    await session.close();
+  }
+  return { ...ex, description, content, updatedAt: now };
+}
+
+export async function deprecate(driver: Driver, nodeId: string): Promise<void> {
+  const session = getSession(driver);
+  try {
+    await session.run(
+      "MATCH (n:Task|Skill|Event {id: $id}) SET n.status = 'deprecated', n.updatedAt = $now",
+      { id: nodeId, now: Date.now() },
+    );
+  } finally {
+    await session.close();
+  }
 }
 
 /** 合并两个节点：keepId 保留，mergeId 标记 deprecated，边迁移 */
-export function mergeNodes(db: DatabaseSyncInstance, keepId: string, mergeId: string): void {
-  const keep = findById(db, keepId);
-  const merge = findById(db, mergeId);
-  if (!keep || !merge) return;
+export async function mergeNodes(driver: Driver, keepId: string, mergeId: string): Promise<void> {
+  const session = getSession(driver);
+  try {
+    await session.executeWrite(async tx => {
+      // 合并属性
+      await tx.run(`
+        MATCH (keep:Task|Skill|Event {id: $keepId}), (merge:Task|Skill|Event {id: $mergeId})
+        SET keep.validatedCount = keep.validatedCount + merge.validatedCount,
+            keep.content = CASE WHEN size(keep.content) >= size(merge.content)
+                           THEN keep.content ELSE merge.content END,
+            keep.description = CASE WHEN size(keep.description) >= size(merge.description)
+                               THEN keep.description ELSE merge.description END,
+            keep.sourceSessions = apoc.coll.union(keep.sourceSessions, merge.sourceSessions),
+            keep.updatedAt = $now
+      `, { keepId, mergeId, now: Date.now() });
 
-  // 合并 validatedCount + sourceSessions
-  const sessions = JSON.stringify(
-    Array.from(new Set([...keep.sourceSessions, ...merge.sourceSessions]))
-  );
-  const count = keep.validatedCount + merge.validatedCount;
-  const content = keep.content.length >= merge.content.length ? keep.content : merge.content;
-  const desc = keep.description.length >= merge.description.length ? keep.description : merge.description;
+      // 迁移入边：指向 mergeId 的边改指向 keepId
+      await tx.run(`
+        MATCH (a:Task|Skill|Event)-[r]->(merge:Task|Skill|Event {id: $mergeId})
+        WHERE a.id <> $keepId
+        WITH a, r, type(r) AS rType, properties(r) AS props
+        MATCH (keep:Task|Skill|Event {id: $keepId})
+        CALL apoc.create.relationship(a, rType, props, keep) YIELD rel
+        DELETE r
+      `, { mergeId, keepId });
 
-  db.prepare(`UPDATE gm_nodes SET content=?, description=?, validated_count=?,
-    source_sessions=?, updated_at=? WHERE id=?`)
-    .run(content, desc, count, sessions, Date.now(), keepId);
+      // 迁移出边：从 mergeId 出发的边改从 keepId 出发
+      await tx.run(`
+        MATCH (merge:Task|Skill|Event {id: $mergeId})-[r]->(b:Task|Skill|Event)
+        WHERE b.id <> $keepId
+        WITH b, r, type(r) AS rType, properties(r) AS props
+        MATCH (keep:Task|Skill|Event {id: $keepId})
+        CALL apoc.create.relationship(keep, rType, props, b) YIELD rel
+        DELETE r
+      `, { mergeId, keepId });
 
-  // 迁移边：mergeId 的边指向 keepId
-  db.prepare("UPDATE gm_edges SET from_id=? WHERE from_id=?").run(keepId, mergeId);
-  db.prepare("UPDATE gm_edges SET to_id=? WHERE to_id=?").run(keepId, mergeId);
+      // 删除自环
+      await tx.run(`
+        MATCH (n:Task|Skill|Event {id: $keepId})-[r]->(n)
+        DELETE r
+      `, { keepId });
 
-  // 删除自环（合并后可能出现 keepId → keepId）
-  db.prepare("DELETE FROM gm_edges WHERE from_id = to_id").run();
-
-  // 删除重复边（同 from+to+type 只保留一条）
-  db.prepare(`
-    DELETE FROM gm_edges WHERE id NOT IN (
-      SELECT MIN(id) FROM gm_edges GROUP BY from_id, to_id, type
-    )
-  `).run();
-
-  deprecate(db, mergeId);
+      // 标记 deprecated
+      await tx.run(
+        "MATCH (n:Task|Skill|Event {id: $mergeId}) SET n.status = 'deprecated', n.updatedAt = $now",
+        { mergeId, now: Date.now() },
+      );
+    });
+  } finally {
+    await session.close();
+  }
 }
 
 /** 批量更新 PageRank 分数 */
-export function updatePageranks(db: DatabaseSyncInstance, scores: Map<string, number>): void {
-  const stmt = db.prepare("UPDATE gm_nodes SET pagerank=? WHERE id=?");
-  db.exec("BEGIN");
+export async function updatePageranks(driver: Driver, scores: Map<string, number>): Promise<void> {
+  if (scores.size === 0) return;
+  const session = getSession(driver);
   try {
-    for (const [id, score] of scores) {
-      stmt.run(score, id);
-    }
-    db.exec("COMMIT");
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
+    const entries = Array.from(scores.entries()).map(([id, score]) => ({ id, score }));
+    await session.run(`
+      UNWIND $entries AS entry
+      MATCH (n:Task|Skill|Event {id: entry.id})
+      SET n.pagerank = entry.score
+    `, { entries });
+  } finally {
+    await session.close();
   }
 }
 
 /** 批量更新社区 ID */
-export function updateCommunities(db: DatabaseSyncInstance, labels: Map<string, string>): void {
-  const stmt = db.prepare("UPDATE gm_nodes SET community_id=? WHERE id=?");
-  db.exec("BEGIN");
+export async function updateCommunities(driver: Driver, labels: Map<string, string>): Promise<void> {
+  if (labels.size === 0) return;
+  const session = getSession(driver);
   try {
-    for (const [id, cid] of labels) {
-      stmt.run(cid, id);
-    }
-    db.exec("COMMIT");
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
+    const entries = Array.from(labels.entries()).map(([id, cid]) => ({ id, cid }));
+    await session.run(`
+      UNWIND $entries AS entry
+      MATCH (n:Task|Skill|Event {id: entry.id})
+      SET n.communityId = entry.cid
+    `, { entries });
+  } finally {
+    await session.close();
   }
 }
 
 // ─── 边 CRUD ─────────────────────────────────────────────────
 
-export function upsertEdge(
-  db: DatabaseSyncInstance,
+export async function upsertEdge(
+  driver: Driver,
   e: { fromId: string; toId: string; type: EdgeType; instruction: string; condition?: string; sessionId: string },
-): void {
-  const ex = db.prepare("SELECT id FROM gm_edges WHERE from_id=? AND to_id=? AND type=?")
-    .get(e.fromId, e.toId, e.type) as any;
-  if (ex) {
-    db.prepare("UPDATE gm_edges SET instruction=? WHERE id=?")
-      .run(e.instruction, ex.id);
-    return;
-  }
-  db.prepare(`INSERT INTO gm_edges (id, from_id, to_id, type, instruction, condition, session_id, created_at)
-    VALUES (?,?,?,?,?,?,?,?)`)
-    .run(uid("e"), e.fromId, e.toId, e.type, e.instruction, e.condition ?? null, e.sessionId, Date.now());
-}
-
-export function edgesFrom(db: DatabaseSyncInstance, id: string): GmEdge[] {
-  return (db.prepare("SELECT * FROM gm_edges WHERE from_id=?").all(id) as any[]).map(toEdge);
-}
-
-export function edgesTo(db: DatabaseSyncInstance, id: string): GmEdge[] {
-  return (db.prepare("SELECT * FROM gm_edges WHERE to_id=?").all(id) as any[]).map(toEdge);
-}
-
-// ─── FTS5 搜索 ───────────────────────────────────────────────
-
-let _fts5Available: boolean | null = null;
-
-function fts5Available(db: DatabaseSyncInstance): boolean {
-  if (_fts5Available !== null) return _fts5Available;
+): Promise<void> {
+  const session = getSession(driver);
   try {
-    db.prepare("SELECT * FROM gm_nodes_fts LIMIT 0").all();
-    _fts5Available = true;
-  } catch {
-    _fts5Available = false;
+    // 检查是否已存在同 from+to+type 的边
+    const existing = await session.run(`
+      MATCH (a:Task|Skill|Event {id: $fromId})-[r]->(b:Task|Skill|Event {id: $toId})
+      WHERE type(r) = $type
+      RETURN r
+    `, { fromId: e.fromId, toId: e.toId, type: e.type });
+
+    if (existing.records.length > 0) {
+      await session.run(`
+        MATCH (a:Task|Skill|Event {id: $fromId})-[r]->(b:Task|Skill|Event {id: $toId})
+        WHERE type(r) = $type
+        SET r.instruction = $instruction
+      `, { fromId: e.fromId, toId: e.toId, type: e.type, instruction: e.instruction });
+    } else {
+      // 用 APOC 动态创建关系（type 是变量）
+      await session.run(`
+        MATCH (a:Task|Skill|Event {id: $fromId}), (b:Task|Skill|Event {id: $toId})
+        CALL apoc.create.relationship(a, $type, {
+          id: $id,
+          instruction: $instruction,
+          condition: $condition,
+          sessionId: $sessionId,
+          createdAt: $now
+        }, b) YIELD rel
+        RETURN rel
+      `, {
+        fromId: e.fromId,
+        toId: e.toId,
+        type: e.type,
+        id: uid("e"),
+        instruction: e.instruction,
+        condition: e.condition ?? null,
+        sessionId: e.sessionId,
+        now: Date.now(),
+      });
+    }
+  } finally {
+    await session.close();
   }
-  return _fts5Available;
 }
 
-export function searchNodes(db: DatabaseSyncInstance, query: string, limit = 6): GmNode[] {
+export async function edgesFrom(driver: Driver, id: string): Promise<GmEdge[]> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(`
+      MATCH (a:Task|Skill|Event {id: $id})-[r]->(b:Task|Skill|Event)
+      WHERE type(r) IN ['USED_SKILL','SOLVED_BY','REQUIRES','PATCHES','CONFLICTS_WITH']
+      RETURN r.id AS id, a.id AS fromId, b.id AS toId, type(r) AS type,
+             r.instruction AS instruction, r.condition AS condition,
+             r.sessionId AS sessionId, r.createdAt AS createdAt
+    `, { id });
+    return result.records.map(r => ({
+      id: r.get("id"),
+      fromId: r.get("fromId"),
+      toId: r.get("toId"),
+      type: r.get("type") as EdgeType,
+      instruction: r.get("instruction"),
+      condition: r.get("condition") ?? undefined,
+      sessionId: r.get("sessionId"),
+      createdAt: toInt(r.get("createdAt")),
+    }));
+  } finally {
+    await session.close();
+  }
+}
+
+export async function edgesTo(driver: Driver, id: string): Promise<GmEdge[]> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(`
+      MATCH (a:Task|Skill|Event)-[r]->(b:Task|Skill|Event {id: $id})
+      WHERE type(r) IN ['USED_SKILL','SOLVED_BY','REQUIRES','PATCHES','CONFLICTS_WITH']
+      RETURN r.id AS id, a.id AS fromId, b.id AS toId, type(r) AS type,
+             r.instruction AS instruction, r.condition AS condition,
+             r.sessionId AS sessionId, r.createdAt AS createdAt
+    `, { id });
+    return result.records.map(r => ({
+      id: r.get("id"),
+      fromId: r.get("fromId"),
+      toId: r.get("toId"),
+      type: r.get("type") as EdgeType,
+      instruction: r.get("instruction"),
+      condition: r.get("condition") ?? undefined,
+      sessionId: r.get("sessionId"),
+      createdAt: toInt(r.get("createdAt")),
+    }));
+  } finally {
+    await session.close();
+  }
+}
+
+// ─── 搜索 ───────────────────────────────────────────────────
+
+/** 全文搜索节点（CONTAINS 模糊匹配） */
+export async function searchNodes(driver: Driver, query: string, limit = 6): Promise<GmNode[]> {
   const terms = query.trim().split(/\s+/).filter(Boolean).slice(0, 8);
-  if (!terms.length) return topNodes(db, limit);
+  if (!terms.length) return topNodes(driver, limit);
 
-  if (fts5Available(db)) {
-    try {
-      const ftsQuery = terms.map(t => `"${t.replace(/"/g, "")}"`).join(" OR ");
-      const rows = db.prepare(`
-        SELECT n.*, rank FROM gm_nodes_fts fts
-        JOIN gm_nodes n ON n.rowid = fts.rowid
-        WHERE gm_nodes_fts MATCH ? AND n.status = 'active'
-        ORDER BY rank LIMIT ?
-      `).all(ftsQuery, limit) as any[];
-      if (rows.length > 0) return rows.map(toNode);
-    } catch { /* FTS 查询失败，降级 */ }
+  const session = getSession(driver);
+  try {
+    // 用 CONTAINS 做模糊匹配（Neo4j 没有原生 FTS5，但够用）
+    const where = terms.map((_, i) => `(
+      toLower(n.name) CONTAINS toLower($t${i}) OR
+      toLower(n.description) CONTAINS toLower($t${i}) OR
+      toLower(n.content) CONTAINS toLower($t${i})
+    )`).join(" OR ");
+
+    const params: Record<string, any> = { limit: nint(limit) };
+    terms.forEach((t, i) => { params[`t${i}`] = t; });
+
+    const result = await session.run(`
+      MATCH (n:Task|Skill|Event {status: 'active'})
+      WHERE ${where}
+      RETURN n
+      ORDER BY n.pagerank DESC, n.validatedCount DESC, n.updatedAt DESC
+      LIMIT toInteger($limit)
+    `, params);
+
+    return result.records.map(r => toNode(r.get("n")));
+  } finally {
+    await session.close();
   }
-
-  const where = terms.map(() => "(name LIKE ? OR description LIKE ? OR content LIKE ?)").join(" OR ");
-  const likes = terms.flatMap(t => [`%${t}%`, `%${t}%`, `%${t}%`]);
-  return (db.prepare(`
-    SELECT * FROM gm_nodes WHERE status='active' AND (${where})
-    ORDER BY pagerank DESC, validated_count DESC, updated_at DESC LIMIT ?
-  `).all(...likes, limit) as any[]).map(toNode);
 }
 
-/** 热门节点：综合 pagerank + validatedCount 排序 */
-export function topNodes(db: DatabaseSyncInstance, limit = 6): GmNode[] {
-  return (db.prepare(`
-    SELECT * FROM gm_nodes WHERE status='active'
-    ORDER BY pagerank DESC, validated_count DESC, updated_at DESC LIMIT ?
-  `).all(limit) as any[]).map(toNode);
+/** 热门节点 */
+export async function topNodes(driver: Driver, limit = 6): Promise<GmNode[]> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(`
+      MATCH (n:Task|Skill|Event {status: 'active'})
+      RETURN n
+      ORDER BY n.pagerank DESC, n.validatedCount DESC, n.updatedAt DESC
+      LIMIT toInteger($limit)
+    `, { limit: nint(limit) });
+    return result.records.map(r => toNode(r.get("n")));
+  } finally {
+    await session.close();
+  }
 }
 
-// ─── 递归 CTE 图遍历 ────────────────────────────────────────
+// ─── 向量搜索 ───────────────────────────────────────────────
 
-export function graphWalk(
-  db: DatabaseSyncInstance,
+export type ScoredNode = { node: GmNode; score: number };
+
+export async function vectorSearchWithScore(
+  driver: Driver, queryVec: number[], limit: number, minScore = 0.35,
+): Promise<ScoredNode[]> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(`
+      CALL db.index.vector.queryNodes('gm_node_embedding', $limit, $vec)
+      YIELD node, score
+      WHERE node.status = 'active' AND score > $minScore
+      RETURN node, score
+      ORDER BY score DESC
+    `, { vec: queryVec, limit: nint(limit), minScore });
+
+    return result.records.map(r => ({
+      node: toNode(r.get("node")),
+      score: toFloat(r.get("score")),
+    }));
+  } finally {
+    await session.close();
+  }
+}
+
+export async function vectorSearch(
+  driver: Driver, queryVec: number[], limit: number, minScore = 0.35,
+): Promise<GmNode[]> {
+  const scored = await vectorSearchWithScore(driver, queryVec, limit, minScore);
+  return scored.map(s => s.node);
+}
+
+/** 社区向量搜索 */
+export type ScoredCommunity = { id: string; summary: string; score: number; nodeCount: number };
+
+export async function communityVectorSearch(
+  driver: Driver, queryVec: number[], minScore = 0.15,
+): Promise<ScoredCommunity[]> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(`
+      CALL db.index.vector.queryNodes('gm_community_embedding', 10, $vec)
+      YIELD node, score
+      WHERE score > $minScore
+      RETURN node.id AS id, node.summary AS summary, score, node.nodeCount AS nodeCount
+      ORDER BY score DESC
+    `, { vec: queryVec, minScore });
+
+    return result.records.map(r => ({
+      id: r.get("id"),
+      summary: r.get("summary"),
+      score: toFloat(r.get("score")),
+      nodeCount: toInt(r.get("nodeCount")),
+    }));
+  } finally {
+    await session.close();
+  }
+}
+
+// ─── 向量存储 ───────────────────────────────────────────────
+
+export async function saveVector(driver: Driver, nodeId: string, content: string, vec: number[]): Promise<void> {
+  const hash = createHash("md5").update(content).digest("hex");
+  const session = getSession(driver);
+  try {
+    await session.run(`
+      MATCH (n:Task|Skill|Event {id: $nodeId})
+      SET n.embedding = $vec, n.contentHash = $hash
+    `, { nodeId, vec, hash });
+  } finally {
+    await session.close();
+  }
+}
+
+export async function getVectorHash(driver: Driver, nodeId: string): Promise<string | null> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(
+      "MATCH (n:Task|Skill|Event {id: $nodeId}) RETURN n.contentHash AS hash",
+      { nodeId },
+    );
+    return result.records[0]?.get("hash") ?? null;
+  } finally {
+    await session.close();
+  }
+}
+
+/** 获取所有有向量的活跃节点（供去重用） */
+export async function getAllVectors(driver: Driver): Promise<Array<{ nodeId: string; embedding: number[] }>> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(`
+      MATCH (n:Task|Skill|Event {status: 'active'})
+      WHERE n.embedding IS NOT NULL
+      RETURN n.id AS nodeId, n.embedding AS embedding
+    `);
+    return result.records.map(r => ({
+      nodeId: r.get("nodeId"),
+      embedding: r.get("embedding"),
+    }));
+  } finally {
+    await session.close();
+  }
+}
+
+// ─── 图遍历 ────────────────────────────────────────────────
+
+export async function graphWalk(
+  driver: Driver,
   seedIds: string[],
   maxDepth: number,
-): { nodes: GmNode[]; edges: GmEdge[] } {
+): Promise<{ nodes: GmNode[]; edges: GmEdge[] }> {
   if (!seedIds.length) return { nodes: [], edges: [] };
 
-  const placeholders = seedIds.map(() => "?").join(",");
+  const session = getSession(driver);
+  try {
+    // 用 Neo4j 的变长路径匹配做图遍历
+    const nodeResult = await session.run(`
+      MATCH (seed:Task|Skill|Event)
+      WHERE seed.id IN $seedIds AND seed.status = 'active'
+      CALL {
+        WITH seed
+        MATCH path = (seed)-[*0..${maxDepth}]-(neighbor:Task|Skill|Event {status: 'active'})
+        RETURN DISTINCT neighbor
+      }
+      RETURN DISTINCT neighbor AS n
+    `, { seedIds });
 
-  const walkRows = db.prepare(`
-    WITH RECURSIVE walk(node_id, depth) AS (
-      SELECT id, 0 FROM gm_nodes WHERE id IN (${placeholders}) AND status='active'
-      UNION
-      SELECT
-        CASE WHEN e.from_id = w.node_id THEN e.to_id ELSE e.from_id END,
-        w.depth + 1
-      FROM walk w
-      JOIN gm_edges e ON (e.from_id = w.node_id OR e.to_id = w.node_id)
-      WHERE w.depth < ?
-    )
-    SELECT DISTINCT node_id FROM walk
-  `).all(...seedIds, maxDepth) as any[];
+    const nodes = nodeResult.records.map(r => toNode(r.get("n")));
+    const nodeIds = nodes.map(n => n.id);
 
-  const nodeIds = walkRows.map((r: any) => r.node_id);
-  if (!nodeIds.length) return { nodes: [], edges: [] };
+    if (!nodeIds.length) return { nodes: [], edges: [] };
 
-  const np = nodeIds.map(() => "?").join(",");
-  const nodes = (db.prepare(`
-    SELECT * FROM gm_nodes WHERE id IN (${np}) AND status='active'
-  `).all(...nodeIds) as any[]).map(toNode);
+    const edgeResult = await session.run(`
+      MATCH (a:Task|Skill|Event)-[r]->(b:Task|Skill|Event)
+      WHERE a.id IN $nodeIds AND b.id IN $nodeIds
+        AND type(r) IN ['USED_SKILL','SOLVED_BY','REQUIRES','PATCHES','CONFLICTS_WITH']
+      RETURN r.id AS id, a.id AS fromId, b.id AS toId, type(r) AS type,
+             r.instruction AS instruction, r.condition AS condition,
+             r.sessionId AS sessionId, r.createdAt AS createdAt
+    `, { nodeIds });
 
-  const edges = (db.prepare(`
-    SELECT * FROM gm_edges WHERE from_id IN (${np}) AND to_id IN (${np})
-  `).all(...nodeIds, ...nodeIds) as any[]).map(toEdge);
+    const edges = edgeResult.records.map(r => ({
+      id: r.get("id"),
+      fromId: r.get("fromId"),
+      toId: r.get("toId"),
+      type: r.get("type") as EdgeType,
+      instruction: r.get("instruction"),
+      condition: r.get("condition") ?? undefined,
+      sessionId: r.get("sessionId"),
+      createdAt: toInt(r.get("createdAt")),
+    }));
 
-  return { nodes, edges };
+    return { nodes, edges };
+  } finally {
+    await session.close();
+  }
 }
 
 // ─── 按 session 查询 ────────────────────────────────────────
 
-export function getBySession(db: DatabaseSyncInstance, sessionId: string): GmNode[] {
-  return (db.prepare(`
-    SELECT DISTINCT n.* FROM gm_nodes n, json_each(n.source_sessions) j
-    WHERE j.value = ? AND n.status = 'active'
-  `).all(sessionId) as any[]).map(toNode);
+export async function getBySession(driver: Driver, sessionId: string): Promise<GmNode[]> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(`
+      MATCH (n:Task|Skill|Event {status: 'active'})
+      WHERE $sessionId IN n.sourceSessions
+      RETURN n
+    `, { sessionId });
+    return result.records.map(r => toNode(r.get("n")));
+  } finally {
+    await session.close();
+  }
+}
+
+// ─── 社区代表节点 ──────────────────────────────────────────
+
+export async function communityRepresentatives(driver: Driver, perCommunity = 2): Promise<GmNode[]> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(`
+      MATCH (n:Task|Skill|Event {status: 'active'})
+      WHERE n.communityId IS NOT NULL
+      WITH n.communityId AS cid, n
+      ORDER BY n.updatedAt DESC
+      WITH cid, collect(n) AS members
+      UNWIND members[0..toInteger($perCommunity)] AS m
+      RETURN m AS n
+    `, { perCommunity });
+    return result.records.map(r => toNode(r.get("n")));
+  } finally {
+    await session.close();
+  }
+}
+
+export async function nodesByCommunityIds(driver: Driver, communityIds: string[], perCommunity = 3): Promise<GmNode[]> {
+  if (!communityIds.length) return [];
+  const session = getSession(driver);
+  try {
+    const result = await session.run(`
+      MATCH (n:Task|Skill|Event {status: 'active'})
+      WHERE n.communityId IN $communityIds
+      WITH n.communityId AS cid, n
+      ORDER BY n.updatedAt DESC
+      WITH cid, collect(n) AS members
+      UNWIND members[0..toInteger($perCommunity)] AS m
+      RETURN m AS n
+    `, { communityIds, perCommunity });
+    return result.records.map(r => toNode(r.get("n")));
+  } finally {
+    await session.close();
+  }
 }
 
 // ─── 消息 CRUD ───────────────────────────────────────────────
 
-export function saveMessage(
-  db: DatabaseSyncInstance, sid: string, turn: number, role: string, content: unknown
-): void {
-  db.prepare(`INSERT OR IGNORE INTO gm_messages (id, session_id, turn_index, role, content, created_at)
-    VALUES (?,?,?,?,?,?)`)
-    .run(uid("m"), sid, turn, role, JSON.stringify(content), Date.now());
-}
-
-export function getMessages(db: DatabaseSyncInstance, sid: string, limit?: number): any[] {
-  if (limit) {
-    return db.prepare("SELECT * FROM gm_messages WHERE session_id=? ORDER BY turn_index DESC LIMIT ?")
-      .all(sid, limit) as any[];
+export async function saveMessage(
+  driver: Driver, sid: string, turn: number, role: string, content: unknown,
+): Promise<void> {
+  const session = getSession(driver);
+  try {
+    await session.run(`
+      MERGE (m:GmMessage {sessionId: $sid, turnIndex: $turn})
+      ON CREATE SET
+        m.id = $id,
+        m.role = $role,
+        m.content = $content,
+        m.extracted = false,
+        m.createdAt = $now
+    `, {
+      id: uid("m"),
+      sid,
+      turn,
+      role,
+      content: JSON.stringify(content),
+      now: Date.now(),
+    });
+  } finally {
+    await session.close();
   }
-  return db.prepare("SELECT * FROM gm_messages WHERE session_id=? ORDER BY turn_index")
-    .all(sid) as any[];
 }
 
-export function getUnextracted(db: DatabaseSyncInstance, sid: string, limit: number): any[] {
-  return db.prepare("SELECT * FROM gm_messages WHERE session_id=? AND extracted=0 ORDER BY turn_index LIMIT ?")
-    .all(sid, limit) as any[];
-}
-
-export function markExtracted(db: DatabaseSyncInstance, sid: string, upToTurn: number): void {
-  db.prepare("UPDATE gm_messages SET extracted=1 WHERE session_id=? AND turn_index<=?")
-    .run(sid, upToTurn);
-}
-
-/**
- * 溯源选拉：按 session 拉取 user/assistant 核心对话（跳过 tool/toolResult）
- * 用于 assemble 时补充三元组的原始上下文
- *
- * @param nearTime  优先取时间最接近的消息（节点的 updatedAt）
- * @param maxChars  总字符上限
- */
-export function getEpisodicMessages(
-  db: DatabaseSyncInstance,
-  sessionIds: string[],
-  nearTime: number,
-  maxChars: number = 1500,
-): Array<{ sessionId: string; turnIndex: number; role: string; text: string; createdAt: number }> {
-  if (!sessionIds.length) return [];
-
-  const results: Array<{ sessionId: string; turnIndex: number; role: string; text: string; createdAt: number }> = [];
-  let usedChars = 0;
-
-  // 按 session 逐个拉，优先最近的 session
-  for (const sid of sessionIds) {
-    if (usedChars >= maxChars) break;
-
-    // 只拉 user 和 assistant，按时间距离 nearTime 最近排序
-    const rows = db.prepare(`
-      SELECT turn_index, role, content, created_at FROM gm_messages
-      WHERE session_id = ? AND role IN ('user', 'assistant')
-      ORDER BY ABS(created_at - ?) ASC
-      LIMIT 6
-    `).all(sid, nearTime) as any[];
-
-    for (const r of rows) {
-      if (usedChars >= maxChars) break;
-      let text = "";
-      try {
-        const parsed = JSON.parse(r.content);
-        if (typeof parsed === "string") {
-          text = parsed;
-        } else if (typeof parsed?.content === "string") {
-          text = parsed.content;
-        } else if (Array.isArray(parsed)) {
-          text = parsed
-            .filter((b: any) => b.type === "text")
-            .map((b: any) => b.text ?? "")
-            .join("\n");
-        } else {
-          text = String(parsed).slice(0, 300);
-        }
-      } catch {
-        text = String(r.content).slice(0, 300);
-      }
-
-      if (!text.trim()) continue;
-      const truncated = text.slice(0, Math.min(text.length, maxChars - usedChars));
-      results.push({
-        sessionId: sid,
-        turnIndex: r.turn_index,
-        role: r.role,
-        text: truncated,
-        createdAt: r.created_at,
-      });
-      usedChars += truncated.length;
-    }
+export async function getUnextracted(driver: Driver, sid: string, limit: number): Promise<any[]> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(`
+      MATCH (m:GmMessage {sessionId: $sid, extracted: false})
+      RETURN m
+      ORDER BY m.turnIndex
+      LIMIT toInteger($limit)
+    `, { sid, limit: nint(limit) });
+    return result.records.map(r => {
+      const m = r.get("m").properties;
+      return {
+        role: m.role,
+        content: JSON.parse(m.content),
+        turnIndex: toInt(m.turnIndex),
+        turn_index: toInt(m.turnIndex),
+      };
+    });
+  } finally {
+    await session.close();
   }
+}
 
-  return results;
+export async function markExtracted(driver: Driver, sid: string, upToTurn: number): Promise<void> {
+  const session = getSession(driver);
+  try {
+    await session.run(`
+      MATCH (m:GmMessage {sessionId: $sid})
+      WHERE m.turnIndex <= $upToTurn
+      SET m.extracted = true
+    `, { sid, upToTurn });
+  } finally {
+    await session.close();
+  }
+}
+
+export async function isTurnExtracted(driver: Driver, sid: string, turn: number): Promise<boolean> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(
+      `MATCH (m:GmMessage {sessionId: $sid, turnIndex: $turn, extracted: true})
+       RETURN count(m) AS c`,
+      { sid, turn },
+    );
+    return toInt(result.records[0].get("c")) > 0;
+  } finally {
+    await session.close();
+  }
 }
 
 // ─── 信号 CRUD ───────────────────────────────────────────────
 
-export function saveSignal(db: DatabaseSyncInstance, sid: string, s: Signal): void {
-  db.prepare(`INSERT INTO gm_signals (id, session_id, turn_index, type, data, created_at)
-    VALUES (?,?,?,?,?,?)`)
-    .run(uid("s"), sid, s.turnIndex, s.type, JSON.stringify(s.data), Date.now());
-}
-
-export function pendingSignals(db: DatabaseSyncInstance, sid: string): Signal[] {
-  return (db.prepare("SELECT * FROM gm_signals WHERE session_id=? AND processed=0 ORDER BY turn_index")
-    .all(sid) as any[])
-    .map(r => ({ type: r.type, turnIndex: r.turn_index, data: JSON.parse(r.data) }));
-}
-
-export function markSignalsDone(db: DatabaseSyncInstance, sid: string): void {
-  db.prepare("UPDATE gm_signals SET processed=1 WHERE session_id=?").run(sid);
-}
-
 // ─── 统计 ────────────────────────────────────────────────────
 
-export function getStats(db: DatabaseSyncInstance): {
+export async function getStats(driver: Driver): Promise<{
   totalNodes: number;
   byType: Record<string, number>;
   totalEdges: number;
   byEdgeType: Record<string, number>;
   communities: number;
-} {
-  const totalNodes = (db.prepare("SELECT COUNT(*) as c FROM gm_nodes WHERE status='active'").get() as any).c;
-  const byType: Record<string, number> = {};
-  for (const r of db.prepare("SELECT type, COUNT(*) as c FROM gm_nodes WHERE status='active' GROUP BY type").all() as any[]) {
-    byType[r.type] = r.c;
+}> {
+  const session = getSession(driver);
+  try {
+    const byTypeResult = await session.run(`
+      MATCH (n:Task|Skill|Event {status: 'active'})
+      RETURN n.type AS type, count(n) AS c
+    `);
+    const totalResult = await session.run(
+      "MATCH (n:Task|Skill|Event {status: 'active'}) RETURN count(n) AS c"
+    );
+    const totalNodes = toInt(totalResult.records[0]?.get("c") ?? 0);
+
+    const byType: Record<string, number> = {};
+    for (const r of byTypeResult.records) {
+      byType[r.get("type")] = toInt(r.get("c"));
+    }
+
+    const edgeResult = await session.run(`
+      MATCH ()-[r]->()
+      WHERE type(r) IN ['USED_SKILL','SOLVED_BY','REQUIRES','PATCHES','CONFLICTS_WITH']
+      RETURN type(r) AS type, count(r) AS c
+    `);
+    let totalEdges = 0;
+    const byEdgeType: Record<string, number> = {};
+    for (const r of edgeResult.records) {
+      const c = toInt(r.get("c"));
+      byEdgeType[r.get("type")] = c;
+      totalEdges += c;
+    }
+
+    const commResult = await session.run(`
+      MATCH (n:Task|Skill|Event {status: 'active'})
+      WHERE n.communityId IS NOT NULL
+      RETURN count(DISTINCT n.communityId) AS c
+    `);
+    const communities = toInt(commResult.records[0]?.get("c") ?? 0);
+
+    return { totalNodes, byType, totalEdges, byEdgeType, communities };
+  } finally {
+    await session.close();
   }
-  const totalEdges = (db.prepare("SELECT COUNT(*) as c FROM gm_edges").get() as any).c;
-  const byEdgeType: Record<string, number> = {};
-  for (const r of db.prepare("SELECT type, COUNT(*) as c FROM gm_edges GROUP BY type").all() as any[]) {
-    byEdgeType[r.type] = r.c;
-  }
-  const communities = (db.prepare(
-    "SELECT COUNT(DISTINCT community_id) as c FROM gm_nodes WHERE status='active' AND community_id IS NOT NULL"
-  ).get() as any).c;
-  return { totalNodes, byType, totalEdges, byEdgeType, communities };
-}
-
-// ─── 向量存储 + 搜索 ────────────────────────────────────────
-
-export function saveVector(db: DatabaseSyncInstance, nodeId: string, content: string, vec: number[]): void {
-  const hash = createHash("md5").update(content).digest("hex");
-  const f32 = new Float32Array(vec);
-  const blob = new Uint8Array(f32.buffer, f32.byteOffset, f32.byteLength);
-  db.prepare(`INSERT INTO gm_vectors (node_id, content_hash, embedding) VALUES (?,?,?)
-    ON CONFLICT(node_id) DO UPDATE SET content_hash=excluded.content_hash, embedding=excluded.embedding`)
-    .run(nodeId, hash, blob);
-}
-
-export function getVectorHash(db: DatabaseSyncInstance, nodeId: string): string | null {
-  return (db.prepare("SELECT content_hash FROM gm_vectors WHERE node_id=?").get(nodeId) as any)?.content_hash ?? null;
-}
-
-/** 获取所有向量（供去重/聚类用） */
-export function getAllVectors(db: DatabaseSyncInstance): Array<{ nodeId: string; embedding: Float32Array }> {
-  const rows = db.prepare(`
-    SELECT v.node_id, v.embedding FROM gm_vectors v
-    JOIN gm_nodes n ON n.id = v.node_id WHERE n.status = 'active'
-  `).all() as any[];
-  return rows.map(r => {
-    const raw = r.embedding as Uint8Array;
-    return {
-      nodeId: r.node_id,
-      embedding: new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4),
-    };
-  });
-}
-
-export type ScoredNode = { node: GmNode; score: number };
-
-export function vectorSearchWithScore(db: DatabaseSyncInstance, queryVec: number[], limit: number, minScore = 0.35): ScoredNode[] {
-  const rows = db.prepare(`
-    SELECT v.node_id, v.embedding, n.*
-    FROM gm_vectors v JOIN gm_nodes n ON n.id = v.node_id
-    WHERE n.status = 'active'
-  `).all() as any[];
-
-  if (!rows.length) return [];
-
-  const q = new Float32Array(queryVec);
-  const qNorm = Math.sqrt(q.reduce((s, x) => s + x * x, 0));
-  if (qNorm === 0) return [];
-
-  return rows
-    .map(row => {
-      const raw = row.embedding as Uint8Array;
-      const v = new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
-      let dot = 0, vNorm = 0;
-      const len = Math.min(v.length, q.length);
-      for (let i = 0; i < len; i++) {
-        dot += v[i] * q[i];
-        vNorm += v[i] * v[i];
-      }
-      return { score: dot / (Math.sqrt(vNorm) * qNorm + 1e-9), node: toNode(row) };
-    })
-    .filter(s => s.score > minScore)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
-}
-
-/** 兼容旧接口 */
-export function vectorSearch(db: DatabaseSyncInstance, queryVec: number[], limit: number, minScore = 0.35): GmNode[] {
-  return vectorSearchWithScore(db, queryVec, limit, minScore).map(s => s.node);
-}
-
-/**
- * 社区代表节点：每个社区取最近更新的 topN 个节点
- * 用于泛化召回 —— 用户问"做了哪些工作"时按领域返回概览
- */
-export function communityRepresentatives(db: DatabaseSyncInstance, perCommunity = 2): GmNode[] {
-  const rows = db.prepare(`
-    SELECT * FROM gm_nodes
-    WHERE status = 'active' AND community_id IS NOT NULL
-    ORDER BY community_id, updated_at DESC
-  `).all() as any[];
-
-  const byCommunity = new Map<string, GmNode[]>();
-  for (const r of rows) {
-    const node = toNode(r);
-    const cid = r.community_id as string;
-    if (!byCommunity.has(cid)) byCommunity.set(cid, []);
-    const list = byCommunity.get(cid)!;
-    if (list.length < perCommunity) list.push(node);
-  }
-
-  // 社区按最新更新时间排序
-  const communities = Array.from(byCommunity.entries())
-    .sort((a, b) => {
-      const aTime = Math.max(...a[1].map(n => n.updatedAt));
-      const bTime = Math.max(...b[1].map(n => n.updatedAt));
-      return bTime - aTime;
-    });
-
-  const result: GmNode[] = [];
-  for (const [, nodes] of communities) {
-    result.push(...nodes);
-  }
-  return result;
 }
 
 // ─── 社区描述 CRUD ──────────────────────────────────────────
@@ -535,109 +847,92 @@ export interface CommunitySummary {
   updatedAt: number;
 }
 
-export function upsertCommunitySummary(
-  db: DatabaseSyncInstance, id: string, summary: string, nodeCount: number, embedding?: number[],
-): void {
-  const now = Date.now();
-  const blob = embedding ? new Uint8Array(new Float32Array(embedding).buffer) : null;
-  const ex = db.prepare("SELECT id FROM gm_communities WHERE id=?").get(id) as any;
-  if (ex) {
-    if (blob) {
-      db.prepare("UPDATE gm_communities SET summary=?, node_count=?, embedding=?, updated_at=? WHERE id=?")
-        .run(summary, nodeCount, blob, now, id);
-    } else {
-      db.prepare("UPDATE gm_communities SET summary=?, node_count=?, updated_at=? WHERE id=?")
-        .run(summary, nodeCount, now, id);
-    }
-  } else {
-    db.prepare("INSERT INTO gm_communities (id, summary, node_count, embedding, created_at, updated_at) VALUES (?,?,?,?,?,?)")
-      .run(id, summary, nodeCount, blob, now, now);
+export async function upsertCommunitySummary(
+  driver: Driver, id: string, summary: string, nodeCount: number, embedding?: number[],
+): Promise<void> {
+  const session = getSession(driver);
+  try {
+    await session.run(`
+      MERGE (c:Community {id: $id})
+      ON CREATE SET
+        c.summary = $summary,
+        c.nodeCount = $nodeCount,
+        c.embedding = $embedding,
+        c.createdAt = $now,
+        c.updatedAt = $now
+      ON MATCH SET
+        c.summary = $summary,
+        c.nodeCount = $nodeCount,
+        c.embedding = CASE WHEN $embedding IS NOT NULL THEN $embedding ELSE c.embedding END,
+        c.updatedAt = $now
+    `, {
+      id,
+      summary,
+      nodeCount,
+      embedding: embedding ?? null,
+      now: Date.now(),
+    });
+  } finally {
+    await session.close();
   }
 }
 
-export function getCommunitySummary(db: DatabaseSyncInstance, id: string): CommunitySummary | null {
-  const r = db.prepare("SELECT * FROM gm_communities WHERE id=?").get(id) as any;
-  if (!r) return null;
-  return { id: r.id, summary: r.summary, nodeCount: r.node_count, createdAt: r.created_at, updatedAt: r.updated_at };
+export async function getCommunitySummary(driver: Driver, id: string): Promise<CommunitySummary | null> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(
+      "MATCH (c:Community {id: $id}) RETURN c",
+      { id },
+    );
+    if (result.records.length === 0) return null;
+    const c = result.records[0].get("c").properties;
+    return {
+      id: c.id,
+      summary: c.summary,
+      nodeCount: toInt(c.nodeCount),
+      createdAt: toInt(c.createdAt),
+      updatedAt: toInt(c.updatedAt),
+    };
+  } finally {
+    await session.close();
+  }
 }
 
-export function getAllCommunitySummaries(db: DatabaseSyncInstance): CommunitySummary[] {
-  return (db.prepare("SELECT * FROM gm_communities ORDER BY node_count DESC").all() as any[])
-    .map(r => ({ id: r.id, summary: r.summary, nodeCount: r.node_count, createdAt: r.created_at, updatedAt: r.updated_at }));
-}
-
-export type ScoredCommunity = { id: string; summary: string; score: number; nodeCount: number };
-
-/**
- * 社区向量搜索：用 query 向量匹配社区 embedding，返回按相似度排序的社区
- */
-export function communityVectorSearch(db: DatabaseSyncInstance, queryVec: number[], minScore = 0.15): ScoredCommunity[] {
-  const rows = db.prepare(
-    "SELECT id, summary, node_count, embedding FROM gm_communities WHERE embedding IS NOT NULL"
-  ).all() as any[];
-
-  if (!rows.length) return [];
-
-  const q = new Float32Array(queryVec);
-  const qNorm = Math.sqrt(q.reduce((s, x) => s + x * x, 0));
-  if (qNorm === 0) return [];
-
-  return rows
-    .map(r => {
-      const raw = r.embedding as Uint8Array;
-      const v = new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
-      let dot = 0, vNorm = 0;
-      const len = Math.min(v.length, q.length);
-      for (let i = 0; i < len; i++) {
-        dot += v[i] * q[i];
-        vNorm += v[i] * v[i];
-      }
+export async function getAllCommunitySummaries(driver: Driver): Promise<CommunitySummary[]> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(
+      "MATCH (c:Community) RETURN c ORDER BY c.nodeCount DESC"
+    );
+    return result.records.map(r => {
+      const c = r.get("c").properties;
       return {
-        id: r.id as string,
-        summary: r.summary as string,
-        score: dot / (Math.sqrt(vNorm) * qNorm + 1e-9),
-        nodeCount: r.node_count as number,
+        id: c.id,
+        summary: c.summary,
+        nodeCount: toInt(c.nodeCount),
+        createdAt: toInt(c.createdAt),
+        updatedAt: toInt(c.updatedAt),
       };
-    })
-    .filter(s => s.score > minScore)
-    .sort((a, b) => b.score - a.score);
+    });
+  } finally {
+    await session.close();
+  }
 }
 
-/**
- * 按社区 ID 列表获取成员节点（按时间倒序）
- */
-export function nodesByCommunityIds(db: DatabaseSyncInstance, communityIds: string[], perCommunity = 3): GmNode[] {
-  if (!communityIds.length) return [];
-  const placeholders = communityIds.map(() => "?").join(",");
-  const rows = db.prepare(`
-    SELECT * FROM gm_nodes
-    WHERE community_id IN (${placeholders}) AND status='active'
-    ORDER BY community_id, updated_at DESC
-  `).all(...communityIds) as any[];
-
-  const byCommunity = new Map<string, GmNode[]>();
-  for (const r of rows) {
-    const node = toNode(r);
-    const cid = r.community_id as string;
-    if (!byCommunity.has(cid)) byCommunity.set(cid, []);
-    const list = byCommunity.get(cid)!;
-    if (list.length < perCommunity) list.push(node);
+export async function pruneCommunitySummaries(driver: Driver): Promise<number> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(`
+      MATCH (c:Community)
+      WHERE NOT EXISTS {
+        MATCH (n:Task|Skill|Event {status: 'active'})
+        WHERE n.communityId = c.id
+      }
+      DELETE c
+      RETURN count(*) AS deleted
+    `);
+    return toInt(result.records[0]?.get("deleted") ?? 0);
+  } finally {
+    await session.close();
   }
-
-  const result: GmNode[] = [];
-  for (const cid of communityIds) {
-    const members = byCommunity.get(cid);
-    if (members) result.push(...members);
-  }
-  return result;
-}
-
-/** 清除已不存在的社区描述 */
-export function pruneCommunitySummaries(db: DatabaseSyncInstance): number {
-  const result = db.prepare(`
-    DELETE FROM gm_communities WHERE id NOT IN (
-      SELECT DISTINCT community_id FROM gm_nodes WHERE community_id IS NOT NULL AND status='active'
-    )
-  `).run();
-  return result.changes;
 }

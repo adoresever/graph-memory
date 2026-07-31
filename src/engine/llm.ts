@@ -10,8 +10,6 @@
  *
  * 路径 A：pluginConfig.llm 配置直接调 OpenAI 兼容 API
  * 路径 B：直接调 Anthropic REST API（需 ANTHROPIC_API_KEY）
- *
- * 内置：429/5xx 重试 3 次 + 30s 超时
  */
 
 export interface LlmConfig {
@@ -21,30 +19,6 @@ export interface LlmConfig {
 }
 
 export type CompleteFn = (system: string, user: string) => Promise<string>;
-
-// ─── 带重试+超时的 fetch ─────────────────────────────────────
-
-const RETRYABLE = new Set([429, 500, 502, 503, 529]);
-
-async function fetchRetry(url: string, init: RequestInit, retries = 3, timeoutMs = 30_000): Promise<Response> {
-  for (let i = 0; i <= retries; i++) {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
-    try {
-      const res = await fetch(url, { ...init, signal: ctrl.signal });
-      clearTimeout(t);
-      if (res.ok || i >= retries || !RETRYABLE.has(res.status)) return res;
-      await new Promise(r => setTimeout(r, 1000 * Math.pow(2, i)));
-    } catch (err: any) {
-      clearTimeout(t);
-      if (i >= retries) throw err;
-      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
-    }
-  }
-  throw new Error("[graph-memory] fetch failed after retries");
-}
-
-// ─── CompleteFn 工厂 ────────────────────────────────────────
 
 export function createCompleteFn(
   provider: string,
@@ -57,7 +31,7 @@ export function createCompleteFn(
     if (llmConfig?.apiKey && llmConfig?.baseURL) {
       const baseURL = llmConfig.baseURL.replace(/\/+$/, "");
       const llmModel = llmConfig.model ?? model;
-      const res = await fetchRetry(`${baseURL}/chat/completions`, {
+      const res = await fetch(`${baseURL}/chat/completions`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -69,6 +43,7 @@ export function createCompleteFn(
             ...(system.trim() ? [{ role: "system", content: system.trim() }] : []),
             { role: "user", content: user },
           ],
+          max_tokens: 2000,
           temperature: 0.1,
         }),
       });
@@ -83,20 +58,18 @@ export function createCompleteFn(
     }
 
     // ── 路径 B：Anthropic API ──────────────────────────────
-    if (!anthropicApiKey) {
+    const key = anthropicApiKey;
+    if (!key) {
       throw new Error(
         "[graph-memory] No LLM available. 在 openclaw.json 的 graph-memory config 中配置 llm.apiKey + llm.baseURL",
       );
     }
-    const res = await fetchRetry("https://api.anthropic.com/v1/messages", {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": anthropicApiKey, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model: llmConfig?.model ?? model, max_tokens: 4096, system, messages: [{ role: "user", content: user }] }),
+      headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model, max_tokens: 2000, system, messages: [{ role: "user", content: user }] }),
     });
     if (!res.ok) throw new Error(`[graph-memory] Anthropic API ${res.status}`);
-    const data = await res.json() as any;
-    const text = data.content?.[0]?.text ?? "";
-    if (text) return text;
-    throw new Error("[graph-memory] Anthropic API returned empty content");
+    return ((await res.json() as any).content?.[0]?.text) ?? "";
   };
 }

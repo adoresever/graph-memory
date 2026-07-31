@@ -1,68 +1,48 @@
 {
-  "id": "graph-memory",
-  "name": "Graph Memory",
-  "version": "1.5.7",
-  "description": "知识图谱记忆引擎：从对话提取三元组，FTS5+图遍历+PageRank 跨对话召回，社区聚类+向量去重自动维护",
+  "id": "graph-memory-pro",
+  "name": "Graph Memory Pro",
+  "version": "2.0.0",
+  "description": "Neo4j 知识图谱记忆引擎：三元组 + GDS 图算法 + 向量索引 + Neovis 3D 可视化",
+  "author": "Ananas",
+  "license": "MIT",
+  "main": "index.ts",
+  "slots": ["contextEngine"],
+  "contracts": {
+    "tools": ["gm_search", "gm_record", "gm_update", "gm_stats", "gm_maintain"]
+  },
   "configSchema": {
     "type": "object",
     "properties": {
-      "dbPath": {
-        "type": "string",
-        "default": "~/.openclaw/graph-memory.db",
-        "description": "SQLite 图谱数据库路径"
+      "neo4j": {
+        "type": "object",
+        "properties": {
+          "uri": { "type": "string", "default": "bolt://localhost:7687" },
+          "user": { "type": "string", "default": "neo4j" },
+          "password": { "type": "string", "default": "neo4j" }
+        }
       },
-      "compactTurnCount": {
-        "type": "integer",
-        "default": 7,
-        "description": "每隔多少轮检查信号触发知识提取"
-      },
-      "recallMaxNodes": {
-        "type": "integer",
-        "default": 6,
-        "description": "跨对话召回最多注入几个节点"
-      },
-      "recallMaxDepth": {
-        "type": "integer",
-        "default": 2,
-        "description": "图遍历深度（从种子节点出发走几跳）"
-      },
-      "freshTailCount": {
-        "type": "integer",
-        "default": 10,
-        "description": "(deprecated) 已改为按用户轮次切分，此参数不再使用"
-      },
-      "dedupThreshold": {
-        "type": "number",
-        "default": 0.90,
-        "description": "向量去重阈值：余弦相似度超过此值视为重复节点 (0-1)"
-      },
-      "pagerankDamping": {
-        "type": "number",
-        "default": 0.85,
-        "description": "PageRank 阻尼系数"
-      },
-      "pagerankIterations": {
-        "type": "integer",
-        "default": 20,
-        "description": "PageRank 迭代次数"
+      "compactTurnCount": { "type": "number", "default": 6 },
+      "recallMaxNodes": { "type": "number", "default": 6 },
+      "recallMaxDepth": { "type": "number", "default": 2 },
+      "freshTailCount": { "type": "number", "default": 10 },
+      "dedupThreshold": { "type": "number", "default": 0.90 },
+      "pagerankDamping": { "type": "number", "default": 0.85 },
+      "pagerankIterations": { "type": "number", "default": 20 },
+      "llm": {
+        "type": "object",
+        "properties": {
+          "apiKey": { "type": "string", "description": "API Key（传统认证）" },
+          "baseURL": { "type": "string", "description": "API 地址" },
+          "model": { "type": "string", "description": "模型名称" }
+        }
       },
       "embedding": {
         "type": "object",
-        "description": "可选：向量搜索配置。配了用语义搜索+去重，没配用 FTS5 全文搜索",
-        "properties": {
-          "apiKey": { "type": "string", "description": "Embedding API Key" },
-          "baseURL": { "type": "string", "default": "https://api.openai.com/v1", "description": "API 地址" },
-          "model": { "type": "string", "default": "text-embedding-3-small", "description": "模型名" },
-          "dimensions": { "type": "integer", "default": 512, "description": "向量维度" }
-        }
-      },
-      "llm": {
-        "type": "object",
-        "description": "可选：LLM 配置。不配则用 OpenClaw 全局 provider",
         "properties": {
           "apiKey": { "type": "string" },
           "baseURL": { "type": "string" },
-          "model": { "type": "string" }
+          "model": { "type": "string" },
+          "dimensions": { "type": "number", "default": 1024 }
         }
       }
     }

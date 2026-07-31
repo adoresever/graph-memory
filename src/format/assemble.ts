@@ -1,19 +1,16 @@
 /**
- * graph-memory
+ * graph-memory-pro — assemble.ts
  *
- * By: adoresever
- * Email: Wywelljob@gmail.com
+ * 基于原版，微调：getCommunitySummary 改为同步接收预加载数据
+ * 因为 Neo4j 是异步的，assemble 在调用前预加载所有社区摘要
  */
 
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
+import type { Driver } from "neo4j-driver";
 import type { GmNode, GmEdge } from "../types.ts";
-import { getCommunitySummary, getEpisodicMessages } from "../store/store.ts";
+import { getCommunitySummary, getAllCommunitySummaries, type CommunitySummary } from "../store/store.ts";
 
 const CHARS_PER_TOKEN = 3;
 
-/**
- * 构建知识图谱的 system prompt 引导文字
- */
 export function buildSystemPromptAddition(params: {
   selectedNodes: Array<{ type: string; src: "active" | "recalled" }>;
   edgeCount: number;
@@ -28,57 +25,52 @@ export function buildSystemPromptAddition(params: {
   const taskCount = selectedNodes.filter(n => n.type === "TASK").length;
   const isRich = selectedNodes.length >= 4 || edgeCount >= 3;
 
-  const sections: string[] = [];
+  const parts: string[] = [];
 
-  sections.push(
-    "## Graph Memory — 知识图谱记忆",
+  parts.push(
+    "Graph Memory Pro — Knowledge Graph (Neo4j)",
     "",
-    "Below `<knowledge_graph>` is your accumulated experience from past conversations.",
-    "It contains structured knowledge — NOT raw conversation history.",
-    "",
-    `Current graph: ${skillCount} skills, ${eventCount} events, ${taskCount} tasks, ${edgeCount} relationships.`,
+    "Below <knowledge_graph> contains structured knowledge from past conversations.",
+    `Graph: ${skillCount} skills, ${eventCount} events, ${taskCount} tasks, ${edgeCount} relationships.`,
   );
 
   if (hasRecalled) {
-    sections.push(
+    parts.push(
       "",
-      `**${recalledCount} nodes recalled from OTHER conversations** — these are proven solutions that worked before.`,
-      "Apply them directly when the current situation matches their trigger conditions.",
+      `${recalledCount} nodes recalled from other conversations — proven solutions. Apply directly when matching.`,
     );
   }
 
-  sections.push(
+  parts.push(
     "",
-    "## Recalled context for this query",
-    "",
-    "This is a context engine. The following was retrieved by semantic search for the current message:",
-    "",
-    "- **`<episodic_context>`** — Trimmed conversation traces from sessions that produced the knowledge nodes, ordered by time.",
-    "- **`<knowledge_graph>`** — Relevant triples (TASK/SKILL/EVENT) and edges, grouped by community.",
-    "- **Recent 5 turns** — Last turn in full, previous 4 turns as user+assistant text only.",
-    "",
-    "Read this context first. Use `gm_search` only if insufficient. Use `gm_record` to save new knowledge.",
+    "Recall priority:",
+    "1. Check <knowledge_graph> below first for matching Skill/Event nodes",
+    "2. Use gm_search tool to find related nodes not shown below",
+    "3. Use gm_record tool to save new discoveries",
+    "4. The graph is your primary memory, not MEMORY.md",
   );
 
   if (isRich) {
-    sections.push(
+    parts.push(
       "",
-      "**Graph navigation:** Edges show how knowledge connects:",
-      "- `SOLVED_BY`: an EVENT was fixed by a SKILL — apply the skill when you see similar errors",
-      "- `USED_SKILL`: a TASK used a SKILL — reuse the same approach for similar tasks",
-      "- `PATCHES`: a newer SKILL corrects an older one — prefer the newer version",
-      "- `CONFLICTS_WITH`: two SKILLs are mutually exclusive — check conditions before choosing",
+      "Edge meanings:",
+      "SOLVED_BY: an Event was fixed by a Skill — apply it for similar errors",
+      "USED_SKILL: a Task used a Skill — reuse for similar tasks",
+      "PATCHES: newer Skill corrects older one — prefer newer",
+      "CONFLICTS_WITH: two Skills are mutually exclusive — check conditions",
     );
   }
 
-  return sections.join("\n");
+  return parts.join("\n");
 }
 
 /**
  * 组装知识图谱为 XML context
+ *
+ * 注意：driver 参数用于异步获取社区摘要
  */
-export function assembleContext(
-  db: DatabaseSyncInstance,
+export async function assembleContext(
+  driver: Driver,
   params: {
     tokenBudget: number;
     activeNodes: GmNode[];
@@ -86,13 +78,14 @@ export function assembleContext(
     recalledNodes: GmNode[];
     recalledEdges: GmEdge[];
   },
-): { xml: string | null; systemPrompt: string; tokens: number; episodicXml: string; episodicTokens: number } {
-  // recall 返回多少节点就放多少，不截断
+): Promise<{ xml: string | null; systemPrompt: string; tokens: number }> {
+  const maxChars = params.tokenBudget * 0.15 * CHARS_PER_TOKEN;
+
+  // 合并去重
   const map = new Map<string, GmNode & { src: "active" | "recalled" }>();
   for (const n of params.recalledNodes) map.set(n.id, { ...n, src: "recalled" });
   for (const n of params.activeNodes) map.set(n.id, { ...n, src: "active" });
 
-  // 排序：本 session > SKILL优先 > validatedCount > 全局pagerank基线
   const TYPE_PRI: Record<string, number> = { SKILL: 3, TASK: 2, EVENT: 1 };
   const sorted = Array.from(map.values())
     .filter(n => n.status === "active")
@@ -103,10 +96,16 @@ export function assembleContext(
       b.pagerank - a.pagerank
     );
 
-  // recall 返回的已经是 PPR 排序过的，全量放入
-  const selected = sorted;
+  const selected: typeof sorted = [];
+  let used = 0;
+  for (const n of sorted) {
+    const sz = n.content.length + n.name.length + n.description.length + 50;
+    if (used + sz > maxChars) break;
+    selected.push(n);
+    used += sz;
+  }
 
-  if (!selected.length) return { xml: null, systemPrompt: "", tokens: 0, episodicXml: "", episodicTokens: 0 };
+  if (!selected.length) return { xml: null, systemPrompt: "", tokens: 0 };
 
   const idToName = new Map<string, string>();
   for (const n of selected) idToName.set(n.id, n.name);
@@ -118,7 +117,15 @@ export function assembleContext(
     selectedIds.has(e.fromId) && selectedIds.has(e.toId) && !seen.has(e.id) && seen.add(e.id)
   );
 
-  // 按社区分组节点
+  // 预加载所有需要的社区摘要
+  const communityIds = new Set(selected.map(n => n.communityId).filter(Boolean) as string[]);
+  const communitySummaries = new Map<string, CommunitySummary>();
+  for (const cid of communityIds) {
+    const summary = await getCommunitySummary(driver, cid);
+    if (summary) communitySummaries.set(cid, summary);
+  }
+
+  // 按社区分组
   const byCommunity = new Map<string, typeof selected>();
   const noCommunity: typeof selected = [];
   for (const n of selected) {
@@ -130,11 +137,10 @@ export function assembleContext(
     }
   }
 
-  // 生成节点 XML（按社区分组）
   const xmlParts: string[] = [];
 
   for (const [cid, members] of byCommunity) {
-    const summary = getCommunitySummary(db, cid);
+    const summary = communitySummaries.get(cid);
     const label = summary ? escapeXml(summary.summary) : cid;
     xmlParts.push(`  <community id="${cid}" desc="${label}">`);
     for (const n of members) {
@@ -146,7 +152,6 @@ export function assembleContext(
     xmlParts.push(`  </community>`);
   }
 
-  // 无社区的节点直接放顶层
   for (const n of noCommunity) {
     const tag = n.type.toLowerCase();
     const srcAttr = n.src === "recalled" ? ` source="recalled"` : "";
@@ -172,35 +177,8 @@ export function assembleContext(
     edgeCount: edges.length,
   });
 
-  // ── 溯源选拉：PPR top 3 节点 → 拉原始 user/assistant 对话 ──
-  const topNodes = selected.slice(0, 3);
-  const episodicParts: string[] = [];
-
-  for (const node of topNodes) {
-    if (!node.sourceSessions?.length) continue;
-    // 取最近的 2 个 session
-    const recentSessions = node.sourceSessions.slice(-2);
-    const msgs = getEpisodicMessages(db, recentSessions, node.updatedAt, 500);
-    if (!msgs.length) continue;
-
-    const lines = msgs.map(m =>
-      `    [${m.role.toUpperCase()}] ${escapeXml(m.text.slice(0, 200))}`
-    ).join("\n");
-    episodicParts.push(`  <trace node="${node.name}">\n${lines}\n  </trace>`);
-  }
-
-  const episodicXml = episodicParts.length
-    ? `<episodic_context>\n${episodicParts.join("\n")}\n</episodic_context>`
-    : "";
-
-  const fullContent = systemPrompt + "\n\n" + xml + (episodicXml ? "\n\n" + episodicXml : "");
-  return {
-    xml,
-    systemPrompt,
-    tokens: Math.ceil(fullContent.length / CHARS_PER_TOKEN),
-    episodicXml,
-    episodicTokens: Math.ceil(episodicXml.length / CHARS_PER_TOKEN),
-  };
+  const fullContent = systemPrompt + "\n\n" + xml;
+  return { xml, systemPrompt, tokens: Math.ceil(fullContent.length / CHARS_PER_TOKEN) };
 }
 
 function escapeXml(s: string): string {

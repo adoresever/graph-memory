@@ -1,21 +1,23 @@
 /**
- * graph-memory
+ * graph-memory-pro v2.1 — 类型定义
  *
- * By: adoresever
- * Email: Wywelljob@gmail.com
- */
-
-/**
- * graph-memory 类型定义
- *
- * 节点：TASK / SKILL / EVENT
- * 边：USED_SKILL / SOLVED_BY / REQUIRES / PATCHES / CONFLICTS_WITH
+ * Label 体系：Task / Skill / Event / Community
+ * 去掉 Signal 类型，去掉 GmNode 统一 label
  */
 
 // ─── 节点 ─────────────────────────────────────────────────────
 
 export type NodeType = "TASK" | "SKILL" | "EVENT";
 export type NodeStatus = "active" | "deprecated";
+
+/** Neo4j label 映射：TASK->Task, SKILL->Skill, EVENT->Event */
+export const NODE_TYPE_TO_LABEL: Record<NodeType, string> = {
+  TASK: "Task",
+  SKILL: "Skill",
+  EVENT: "Event",
+};
+
+export const ALL_NODE_LABELS = ["Task", "Skill", "Event"];
 
 export interface GmNode {
   id: string;
@@ -50,22 +52,6 @@ export interface GmEdge {
   condition?: string;
   sessionId: string;
   createdAt: number;
-}
-
-// ─── 信号 ─────────────────────────────────────────────────────
-
-export type SignalType =
-  | "tool_error"
-  | "tool_success"
-  | "skill_invoked"
-  | "user_correction"
-  | "explicit_record"
-  | "task_completed";
-
-export interface Signal {
-  type: SignalType;
-  turnIndex: number;
-  data: Record<string, any>;
 }
 
 // ─── 提取结果 ─────────────────────────────────────────────────
@@ -119,10 +105,18 @@ export interface EmbeddingConfig {
   dimensions?: number;
 }
 
+// ─── Neo4j 连接配置 ──────────────────────────────────────────
+
+export interface Neo4jConfig {
+  uri: string;
+  user: string;
+  password: string;
+}
+
 // ─── 插件配置 ─────────────────────────────────────────────────
 
 export interface GmConfig {
-  dbPath: string;
+  neo4j: Neo4jConfig;
   compactTurnCount: number;
   recallMaxNodes: number;
   recallMaxDepth: number;
@@ -133,16 +127,17 @@ export interface GmConfig {
     baseURL?: string;
     model?: string;
   };
-  /** 向量去重阈值，余弦相似度超过此值视为重复 (0-1) */
   dedupThreshold: number;
-  /** PageRank 阻尼系数 */
   pagerankDamping: number;
-  /** PageRank 迭代次数 */
   pagerankIterations: number;
 }
 
 export const DEFAULT_CONFIG: GmConfig = {
-  dbPath: "~/.openclaw/graph-memory.db",
+  neo4j: {
+    uri: "bolt://localhost:7687",
+    user: "neo4j",
+    password: "neo4j",
+  },
   compactTurnCount: 6,
   recallMaxNodes: 6,
   recallMaxDepth: 2,
