@@ -108,7 +108,7 @@ describe("assembleContext", () => {
     expect(xml).toContain('source="recalled"');
   });
 
-  it("token 预算不截断节点（全量放入）", () => {
+  it("token 预算裁剪节点（至少保留 1 个）", () => {
     // 插入很多大节点
     const nodes: GmNode[] = [];
     for (let i = 0; i < 20; i++) {
@@ -119,20 +119,130 @@ describe("assembleContext", () => {
       nodes.push(findById(db, id)!);
     }
 
-    // 很小的 token 预算
+    // 很小的 token 预算：单节点就超预算，仍应至少保留 1 个最高优先级节点
     const { xml } = assembleContext(db, {
-      tokenBudget: 1000, // 1000 * 0.15 * 3 = 450 字符
+      tokenBudget: 1000,
       activeNodes: nodes,
       activeEdges: [],
       recalledNodes: [],
       recalledEdges: [],
     });
 
-    // 不应该包含所有 20 个节点
-    if (xml) {
-      const matches = xml.match(/name="skill-/g);
-      expect(matches!.length).toBe(20);
+    const matches = xml!.match(/name="skill-/g);
+    expect(matches!.length).toBeGreaterThanOrEqual(1);
+    expect(matches!.length).toBeLessThan(20);
+  });
+
+  it("tokenBudget=0 时不裁剪（向后兼容）", () => {
+    const nodes: GmNode[] = [];
+    for (let i = 0; i < 10; i++) {
+      const id = insertNode(db, { name: `skill-${i}`, content: "y".repeat(100) });
+      nodes.push(findById(db, id)!);
     }
+
+    const { xml } = assembleContext(db, {
+      tokenBudget: 0,
+      activeNodes: nodes,
+      activeEdges: [],
+      recalledNodes: [],
+      recalledEdges: [],
+    });
+
+    const matches = xml!.match(/name="skill-/g);
+    expect(matches!.length).toBe(10);
+  });
+
+  it("预算裁剪优先保留 active + SKILL 节点", () => {
+    const activeSkill = findById(db, insertNode(db, { name: "active-skill", type: "SKILL" }))!;
+    const recalledEvent = findById(db, insertNode(db, { name: "recalled-event", type: "EVENT" }))!;
+
+    // 预算只够一个节点
+    const { xml } = assembleContext(db, {
+      tokenBudget: 20, // ~60 字符，只够一个节点
+      activeNodes: [activeSkill],
+      activeEdges: [],
+      recalledNodes: [recalledEvent],
+      recalledEdges: [],
+    });
+
+    expect(xml).toContain('name="active-skill"');
+    expect(xml).not.toContain('name="recalled-event"');
+  });
+
+  it("content 超限时被截断并追加省略号", () => {
+    const id = insertNode(db, { name: "long-skill", content: "A".repeat(1000) });
+    const node = findById(db, id)!;
+
+    const { xml } = assembleContext(db, {
+      tokenBudget: 128_000,
+      contentMaxChars: 100,
+      activeNodes: [node],
+      activeEdges: [],
+      recalledNodes: [],
+      recalledEdges: [],
+    });
+
+    expect(xml).toContain("A".repeat(100) + "…");
+    expect(xml).not.toContain("A".repeat(101));
+  });
+
+  it("content 未超限时完整保留", () => {
+    const id = insertNode(db, { name: "short-skill", content: "short content" });
+    const node = findById(db, id)!;
+
+    const { xml } = assembleContext(db, {
+      tokenBudget: 128_000,
+      contentMaxChars: 100,
+      activeNodes: [node],
+      activeEdges: [],
+      recalledNodes: [],
+      recalledEdges: [],
+    });
+
+    expect(xml).toContain("short content");
+  });
+
+  it("content 首行重复 name 时被去掉", () => {
+    // 提取模板让 content 首行以 name 开头，XML 标签已有 name 属性，首行冗余
+    const id = insertNode(db, {
+      name: "dedupe-skill",
+      content: "dedupe-skill\n触发条件: ...\n执行步骤:\n1. 步骤一",
+    });
+    const node = findById(db, id)!;
+
+    const { xml } = assembleContext(db, {
+      tokenBudget: 128_000,
+      contentMaxChars: 1000,
+      activeNodes: [node],
+      activeEdges: [],
+      recalledNodes: [],
+      recalledEdges: [],
+    });
+
+    // name 属性仍在，但正文首行不再重复 name
+    expect(xml).toContain('name="dedupe-skill"');
+    expect(xml).toContain("触发条件");
+    expect(xml).not.toContain(">dedupe-skill\n触发条件"); // 首行 name 已被剥离
+  });
+
+  it("content 首行带方括号的 name 也被去掉", () => {
+    const id = insertNode(db, {
+      name: "bracket-skill",
+      content: "[bracket-skill]\n目标: 完成某事",
+    });
+    const node = findById(db, id)!;
+
+    const { xml } = assembleContext(db, {
+      tokenBudget: 128_000,
+      contentMaxChars: 1000,
+      activeNodes: [node],
+      activeEdges: [],
+      recalledNodes: [],
+      recalledEdges: [],
+    });
+
+    expect(xml).toContain("目标: 完成某事");
+    expect(xml).not.toContain("[bracket-skill]");
   });
 });
 

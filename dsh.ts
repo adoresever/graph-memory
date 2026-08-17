@@ -45,6 +45,10 @@ export interface Config {
   recallEnabled?: boolean;
   recallMaxNodes?: number;
   recallMaxDepth?: number;
+  /** 每轮召回注入的 token 预算（0 = 不限制） */
+  recallTokenBudget?: number;
+  /** 单节点 content 注入的最大字符数（0 = 不截断） */
+  contentMaxChars?: number;
   maintenanceInterval?: number;
   llmProvider?: string;
   llmModel?: string;
@@ -151,6 +155,8 @@ export function apply(ctx: DshContext, input: Config = {}): void {
     compactTurnCount: input.maintenanceInterval ?? DEFAULT_CONFIG.compactTurnCount,
     recallMaxNodes: input.recallMaxNodes ?? DEFAULT_CONFIG.recallMaxNodes,
     recallMaxDepth: input.recallMaxDepth ?? DEFAULT_CONFIG.recallMaxDepth,
+    recallTokenBudget: input.recallTokenBudget ?? DEFAULT_CONFIG.recallTokenBudget,
+    contentMaxChars: input.contentMaxChars ?? DEFAULT_CONFIG.contentMaxChars,
     embedding,
   };
   const extractionEnabled = input.extractionEnabled ?? true;
@@ -354,7 +360,8 @@ export function apply(ctx: DshContext, input: Config = {}): void {
         const activeIds = new Set(activeNodes.map((node) => node.id));
         const activeEdges = allEdges(db).filter((edge) => activeIds.has(edge.fromId) && activeIds.has(edge.toId));
         const built = assembleContext(db, {
-          tokenBudget: 0,
+          tokenBudget: config.recallTokenBudget,
+          contentMaxChars: config.contentMaxChars,
           activeNodes,
           activeEdges,
           recalledNodes: recalled.nodes,

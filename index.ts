@@ -366,7 +366,8 @@ const graphMemoryPlugin = {
 
         // ── 2. 图谱 + 溯源 ─────────────────────────────
         const { xml, systemPrompt, tokens: gmTokens, episodicXml, episodicTokens } = assembleContext(db, {
-          tokenBudget: 0,
+          tokenBudget: cfg.recallTokenBudget,
+          contentMaxChars: cfg.contentMaxChars,
           activeNodes,
           activeEdges,
           recalledNodes: rec.nodes,

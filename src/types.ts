@@ -130,6 +130,10 @@ export interface GmConfig {
   compactTurnCount: number;
   recallMaxNodes: number;
   recallMaxDepth: number;
+  /** 每轮召回注入的 token 预算（0 = 不限制，向后兼容） */
+  recallTokenBudget: number;
+  /** 单节点 content 注入的最大字符数（0 = 不截断） */
+  contentMaxChars: number;
   freshTailCount: number;
   embedding?: EmbeddingConfig;
   llm?: {
@@ -152,6 +156,8 @@ export const DEFAULT_CONFIG: GmConfig = {
   compactTurnCount: 6,
   recallMaxNodes: 6,
   recallMaxDepth: 2,
+  recallTokenBudget: 2000,
+  contentMaxChars: 400,
   freshTailCount: 10,
   dedupThreshold: 0.90,
   pagerankDamping: 0.85,
