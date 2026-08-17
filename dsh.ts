@@ -369,6 +369,13 @@ export function apply(ctx: DshContext, input: Config = {}): void {
         assembly.contexts.push({ name: "graph-memory:recall", text });
       }
     } catch (error) {
+      // A failed recall must not stay pinned in recallCache: the next
+      // system-prompt/assemble would re-await the same rejected Promise and
+      // log "[graph-memory] DSH recall failed" on every round until the next
+      // agent/inbox/claimed clears it. Evict the entry so the next assembly
+      // performs a fresh recall attempt.
+      const current = recallCache.get(key);
+      if (current && current.query === query) recallCache.delete(key);
       ctx.logger.warn(`[graph-memory] DSH recall failed: ${String(error)}`);
     }
     return next();
