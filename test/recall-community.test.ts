@@ -205,7 +205,7 @@ describe("assemble 社区分组", () => {
     expect(xml).toContain("</community>");
   });
 
-  it("节点输出带 updated 时间属性", () => {
+  it("节点输出不含冗余 updated 时间戳（token 优化）", () => {
     const a = insertNode(db, { name: "test-skill", type: "SKILL" });
     const node = findById(db, a)!;
 
@@ -217,8 +217,8 @@ describe("assemble 社区分组", () => {
       recalledEdges: [],
     });
 
-    // 应该包含 updated="YYYY-MM-DD" 格式
-    expect(xml).toMatch(/updated="\d{4}-\d{2}-\d{2}"/);
+    // updated 时间戳对召回决策无价值，已移除以节省 token
+    expect(xml).not.toContain("updated=");
   });
 
   it("无社区的节点放顶层", () => {

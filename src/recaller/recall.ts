@@ -47,8 +47,8 @@ export class Recaller {
     const precise = await this.recallPrecise(query, limit);
     const generalized = await this.recallGeneralized(query, limit);
 
-    // ── 合并去重（全部保留，只去重复节点） ────────────────
-    const merged = this.mergeResults(precise, generalized);
+    // ── 合并：精确路径优先，泛化路径只补精确未覆盖的社区，总量封顶 limit ──
+    const merged = this.mergeResults(precise, generalized, limit);
 
     return merged;
   }
@@ -179,19 +179,30 @@ export class Recaller {
   }
 
   /**
-   * 合并两条路径的结果：全部保留，只去重复节点
+   * 合并两条路径的结果：精确路径优先，泛化路径只补充精确路径未覆盖的社区，总量封顶 limit。
+   *
+   * 之前两条路径各自跑满 limit 后全量合并，节点数可能翻倍；且泛化路径常补进与精确
+   * 路径同社区的高度重复节点。现在泛化路径只在「目标节点属于精确路径未覆盖社区」时才
+   * 补入，既保留跨领域概览，又避免同社区冗余，同时把总节点数稳定封顶在 limit。
    */
-  private mergeResults(precise: RecallResult, generalized: RecallResult): RecallResult {
+  private mergeResults(precise: RecallResult, generalized: RecallResult, limit: number): RecallResult {
     const nodeMap = new Map<string, GmNode>();
     const edgeMap = new Map<string, GmEdge>();
 
-    // 精确路径全部入场
+    // 精确路径全部入场（已按 PPR 排序并 slice 到 limit）
     for (const n of precise.nodes) nodeMap.set(n.id, n);
     for (const e of precise.edges) edgeMap.set(e.id, e);
 
-    // 泛化路径去重后全部入场
+    // 泛化路径：只补精确路径未覆盖的社区，直到达到总配额
+    const preciseCommunityIds = new Set(
+      precise.nodes.map(n => n.communityId).filter((cid): cid is string => Boolean(cid)),
+    );
     for (const n of generalized.nodes) {
-      if (!nodeMap.has(n.id)) nodeMap.set(n.id, n);
+      if (nodeMap.size >= limit) break;
+      if (nodeMap.has(n.id)) continue;
+      // 泛化节点若属于精确路径已覆盖的社区，视为冗余，跳过
+      if (n.communityId && preciseCommunityIds.has(n.communityId)) continue;
+      nodeMap.set(n.id, n);
     }
 
     // 合并边：两端都在最终节点集中的边才保留
