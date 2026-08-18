@@ -204,5 +204,13 @@ export function assembleContext(
 }
 
 function escapeXml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    // 防止 DSH prompt template 系统把 {{variable}} 当成需要解析的变量
+    // 只转义成对的 {{ }}，保留单个 { } 不动（兼容 CSS/JSON 等内容）
+    .replace(/\{\{/g, "&#123;&#123;")
+    .replace(/\}\}/g, "&#125;&#125;");
 }
