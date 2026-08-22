@@ -103,8 +103,19 @@ export function assembleContext(
       b.pagerank - a.pagerank
     );
 
-  // recall 返回的已经是 PPR 排序过的，全量放入
-  const selected = sorted;
+  // 体量控制：recalled 全保留（≤ recallMaxNodes）+ 本会话最近 MAX_ACTIVE 个 active，
+  // 防止长会话累积节点（400+）全量注入导致上下文爆满触发 compaction 抢占工具
+  // 针对性召回优先：注入主体 = recall(query) 的召回节点（recalled ≤ recallMaxNodes）。
+  // 语义检索已覆盖本会话相关节点，active 不按时间堆叠注入（曾导致 400+ 节点全量
+  // 注入、上下文爆满触发 compaction 抢占工具）。仅当召回为空时兜底最近 3 个。
+  const recalledAll = sorted.filter((n) => n.src === "recalled");
+  const activeFallback = recalledAll.length
+    ? []
+    : sorted
+        .filter((n) => n.src === "active")
+        .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+        .slice(0, 3);
+  const selected = [...recalledAll, ...activeFallback];
 
   if (!selected.length) return { xml: null, systemPrompt: "", tokens: 0, episodicXml: "", episodicTokens: 0 };
 
@@ -180,11 +191,11 @@ export function assembleContext(
     if (!node.sourceSessions?.length) continue;
     // 取最近的 2 个 session
     const recentSessions = node.sourceSessions.slice(-2);
-    const msgs = getEpisodicMessages(db, recentSessions, node.updatedAt, 500);
+    const msgs = getEpisodicMessages(db, recentSessions, node.updatedAt, 30);
     if (!msgs.length) continue;
 
     const lines = msgs.map(m =>
-      `    [${m.role.toUpperCase()}] ${escapeXml(m.text.slice(0, 200))}`
+      `    [${m.role.toUpperCase()}] ${escapeXml(m.text.slice(0, 120))}`
     ).join("\n");
     episodicParts.push(`  <trace node="${node.name}">\n${lines}\n  </trace>`);
   }
