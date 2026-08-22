@@ -74,7 +74,6 @@ export class Recaller {
   /**
    * 精确召回：向量/FTS5 找种子 → 社区扩展 → 图遍历 → PPR 排序
    */
-<<<<<<< HEAD
   private async recallPrecise(
     query: string,
     limit: number,
@@ -87,6 +86,8 @@ export class Recaller {
     const semantic = queryVector
       ? vectorSearchWithScore(this.db, queryVector, 600, 0)
       : [];
+    // 纯语义分数：断崖阈值只作用于语义分，避免 FTS 的 RRF 加成制造假高峰
+    // （实测：弱语义节点 +0.35 RRF 冲到第一，把阈值顶高、切断真正相关的语义节点）
     const relevance = new Map<string, number>();
     const byId = new Map<string, GmNode>();
     semantic.forEach(({ node, score }) => {
@@ -99,52 +100,29 @@ export class Recaller {
       relevance.set(node.id, (relevance.get(node.id) ?? 0) + 0.35 / (index + 1));
     });
 
-    // 相关性优先：不按固定数量切种子，取"分数断崖以上"的节点（硬上限兜底）。
-    // 断崖阈值 = max(最高分 - recallScoreGap, recallMinScore, minSemanticScore)。
-    const ranked = Array.from(byId.values())
-      .sort((a, b) => (relevance.get(b.id) ?? 0) - (relevance.get(a.id) ?? 0));
-    const maxRel = ranked.length ? (relevance.get(ranked[0].id) ?? 0) : 0;
+    // 相关性优先：不按固定数量切种子，取"语义分数断崖以上"的节点（硬上限兜底）。
+    // 阈值 = max(最高语义分 - recallScoreGap, recallMinScore, minSemanticScore)。
+    // FTS 精确词命中作为补充保留（上游 RRF 的意图：不丢精确标识符）。
     const gap = this.cfg.recallScoreGap ?? 0.10;
     const minRel = this.cfg.recallMinScore ?? 0.58;
-    const threshold = Math.max(maxRel - gap, minRel, minSemanticScore);
     const cap = this.cfg.recallSeedCap ?? limit * 2;
-    let seeds = ranked.filter(n => (relevance.get(n.id) ?? 0) >= threshold).slice(0, cap);
-    // 断崖以上不足 3 个时退回最高分 3 个，保证有种子可做社区扩展
-    if (seeds.length < 3) seeds = ranked.slice(0, 3);
-=======
-  private async recallPrecise(query: string, limit: number): Promise<RecallResult> {
-    let seeds: GmNode[] = [];
-
-    if (this.embed) {
-      try {
-        const vec = await this.embed(query, "query");
-        // 相关性优先：不按固定数量取种子，取分数断崖以上的节点（硬上限兜底）。
-        // 断崖阈值 = max(最高分 - recallScoreGap, recallMinScore)。
-        const scored = vectorSearchWithScore(this.db, vec, 600, 0);
-        const top1 = scored[0]?.score ?? 0;
-        const threshold = Math.max(
-          top1 - (this.cfg.recallScoreGap ?? 0.10),
-          this.cfg.recallMinScore ?? 0.58,
-        );
-        const cap = this.cfg.recallSeedCap ?? limit * 2;
-        let picked = scored.filter(s => s.score >= threshold).slice(0, cap);
-        seeds = picked.map(s => s.node);
-        // 断崖以上不足 3 个时退回最高分 3 个，保证有种子可做社区扩展
-        if (seeds.length < 3) seeds = scored.slice(0, 3).map(s => s.node);
-
-        // 向量结果不足时补 FTS5
-        if (seeds.length < 2) {
-          const fts = searchNodes(this.db, query, limit);
-          const seen = new Set(seeds.map(n => n.id));
-          seeds.push(...fts.filter(n => !seen.has(n.id)));
-        }
-      } catch {
-        seeds = searchNodes(this.db, query, limit);
+    const maxSem = semantic.length ? Math.max(...semantic.map(s => s.score)) : 0;
+    const threshold = Math.max(maxSem - gap, minRel, minSemanticScore);
+    const seeds: GmNode[] = [];
+    for (const { node, score } of semantic) {
+      if (score >= threshold) {
+        seeds.push(node);
+        if (seeds.length >= cap) break;
       }
-    } else {
-      seeds = searchNodes(this.db, query, limit);
     }
->>>>>>> 8ae4656 (feat(recall): relevance-first seed selection (gap threshold) instead of fixed count)
+    const seen = new Set(seeds.map(n => n.id));
+    for (const node of lexical) {
+      if (!seen.has(node.id)) {
+        seeds.push(node);
+        seen.add(node.id);
+        if (seeds.length >= cap) break;
+      }
+    }
 
     if (!seeds.length) return { nodes: [], edges: [], tokenEstimate: 0 };
 
