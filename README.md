@@ -191,7 +191,7 @@ graph-memory/
 | Visible plugin state | **Done** | Active in Plugin Inventory |
 | Pro visual workbench | **Experimental** | Separate DSH Client Plugin with a read-only card snapshot |
 
-Current beta: `1.6.0-beta.8`. Local acceptance used DeepSeek Harness `0.1.0-rc.8`. Testing covered tarball installation, Web profile loading, configurable five-turn rolling compaction through the public agent-preset compaction service, exact source provenance, token-budget enforcement, high-precision automatic recall, FTS5 fallback, and the Pro Lite Host, Typed Remote, and Client bundle boundaries. All 127 automated tests passed. Real model-backed acceptance also verified rolling checkpoint replacement, 1024-dimensional `text-embedding-v4` vectors, and automatic cross-project recall without an explicit memory tool call.
+Current beta: `1.6.0-beta.9`. Local acceptance used DeepSeek Harness `0.1.0-rc.8`. Testing covered script-free Git and tarball installation, Web profile loading, configurable five-turn rolling compaction through the public agent-preset compaction service, exact source provenance, token-budget enforcement, high-precision automatic recall, FTS5 fallback, and the Pro Lite Host, Typed Remote, and Client bundle boundaries. All 130 automated tests passed. Real model-backed acceptance also verified rolling checkpoint replacement, 1024-dimensional `text-embedding-v4` vectors, and automatic cross-project recall without an explicit memory tool call.
 
 <p align="center">
   <strong>Plugin enabled: graph-memory/dsh is active in the DSH plugin list</strong><br>
@@ -205,27 +205,23 @@ Current beta: `1.6.0-beta.8`. Local acceptance used DeepSeek Harness `0.1.0-rc.8
 
 ## Install on DeepSeek Harness
 
-Prerequisites: Node.js `22.19+` or `24+`. The current beta is not yet published to npm, so build the tarball from source:
+Prerequisite: Node.js `22.13+`. The current beta is not yet published to npm, but the repository ships its prebuilt runtime and can be installed without authorizing install scripts:
+
+```bash
+npx @deepseek-ai/dsh plugin --profile web add git+https://github.com/adoresever/graph-memory.git
+npx @deepseek-ai/dsh --profile web --dump-config
+npx @deepseek-ai/dsh web
+```
+
+Alternatively, build and install a tarball from a checkout:
 
 ```bash
 git clone https://github.com/adoresever/graph-memory.git
 cd graph-memory
 npm install
 npm test
-npm run build
 npm pack
-```
-
-Install the generated tarball into the DSH Web profile:
-
-```bash
-npx @deepseek-ai/dsh plugin --profile web add /absolute/path/to/graph-memory-1.6.0-beta.8.tgz
-npx @deepseek-ai/dsh --profile web --dump-config
-npx @deepseek-ai/dsh web
-
-# From a deepseek-harness source checkout:
-pnpm dsh plugin --profile web add /absolute/path/to/graph-memory-1.6.0-beta.8.tgz
-pnpm dsh web
+npx @deepseek-ai/dsh plugin --profile web add /absolute/path/to/graph-memory-1.6.0-beta.9.tgz
 ```
 
 After installation, verify that `graph-memory/dsh` is enabled under **Settings → Plugins → Plugin list**.
@@ -312,12 +308,11 @@ The first milestone should be **Pro Lite**: reuse the existing SQLite graph and 
 
 ### Current local installation
 
-The npm package `graph-memory@1.5.8` is still the OpenClaw release. The new Community beta and `graph-memory-pro-dsh` have not been published to npm, so install them from this checkout:
+The npm package `graph-memory@1.5.8` is still the OpenClaw release. The new Community beta can be installed from GitHub; `graph-memory-pro-dsh` still installs from a checkout:
 
 ```bash
 dsh plugin --profile web add \
-  --allow-build=@photostructure/sqlite \
-  /absolute/path/to/graph-memory
+  git+https://github.com/adoresever/graph-memory.git
 
 dsh plugin --profile web add \
   /absolute/path/to/graph-memory/dsh-pro

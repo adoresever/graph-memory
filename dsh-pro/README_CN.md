@@ -17,7 +17,7 @@ Graph Memory Pro 的 DeepSeek Harness Web 插件包。它不是独立桌面产�
 先安装并激活 Community 插件：
 
 ```bash
-dsh plugin --profile web add --allow-build=@photostructure/sqlite /absolute/path/to/graph-memory
+dsh plugin --profile web add git+https://github.com/adoresever/graph-memory.git
 ```
 
 再安装 Pro bundle：

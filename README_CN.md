@@ -173,7 +173,7 @@ graph-memory/
 | 插件状态可见 | **已完成** | 设置页 Plugin Inventory 显示 active |
 | Pro 可视化工作台 | **实验版可用** | 独立 DSH Client Plugin，当前为只读卡片式快照 |
 
-当前 beta：`1.6.0-beta.8`。本机验收宿主为 DeepSeek Harness `0.1.0-rc.8`。验收已覆盖 tarball 安装、Web profile 原生加载、通过 Agent 公共 compaction 服务执行的可配置最近 5 轮滚动压缩、精确原文溯源、token 预算、高精度自动召回、FTS5 降级，以及 Pro Lite Host、Typed Remote 和 Client bundle 边界；127 项自动化测试通过。真实模型验收还完成了滚动 checkpoint 替换、`text-embedding-v4` 1024 维向量写入，以及不调用记忆工具的跨项目自动召回。
+当前 beta：`1.6.0-beta.9`。本机验收宿主为 DeepSeek Harness `0.1.0-rc.8`。验收已覆盖无安装脚本的 Git 与 tarball 安装、Web profile 原生加载、通过 Agent 公共 compaction 服务执行的可配置最近 5 轮滚动压缩、精确原文溯源、token 预算、高精度自动召回、FTS5 降级，以及 Pro Lite Host、Typed Remote 和 Client bundle 边界；130 项自动化测试通过。真实模型验收还完成了滚动 checkpoint 替换、`text-embedding-v4` 1024 维向量写入，以及不调用记忆工具的跨项目自动召回。
 
 <p align="center">
   <strong>插件已启用：graph-memory/dsh 在 DSH 插件列表中处于 active</strong><br>
@@ -187,30 +187,23 @@ graph-memory/
 
 ## 安装到 DeepSeek Harness
 
-前置条件：Node.js `22.19+` 或 `24+`。当前 beta 尚未发布到 npm，必须先从源码构建 tarball：
+前置条件：Node.js `22.13+`。当前 beta 尚未发布到 npm，但仓库已经包含预构建运行产物，可以直接安装且不需要授权安装脚本：
+
+```bash
+npx @deepseek-ai/dsh plugin --profile web add git+https://github.com/adoresever/graph-memory.git
+npx @deepseek-ai/dsh --profile web --dump-config
+npx @deepseek-ai/dsh web
+```
+
+也可以从 checkout 构建并安装 tarball：
 
 ```bash
 git clone https://github.com/adoresever/graph-memory.git
 cd graph-memory
 npm install
 npm test
-npm run build
 npm pack
-```
-
-安装到 DSH Web profile：
-
-```bash
-npx @deepseek-ai/dsh plugin --profile web add /absolute/path/to/graph-memory-1.6.0-beta.8.tgz
-npx @deepseek-ai/dsh --profile web --dump-config
-npx @deepseek-ai/dsh web
-```
-
-在 DeepSeek Harness 源码仓库内，也可以使用：
-
-```bash
-pnpm dsh plugin --profile web add /absolute/path/to/graph-memory-1.6.0-beta.8.tgz
-pnpm dsh web
+npx @deepseek-ai/dsh plugin --profile web add /absolute/path/to/graph-memory-1.6.0-beta.9.tgz
 ```
 
 安装后，在 **设置 → 插件 → 插件列表 → graph-memory/dsh** 中确认状态为“已启用”。默认数据库路径：
@@ -282,12 +275,11 @@ graph-memory-pro-dsh                # Pro Lite：Host + Client Plugin（本地 b
 
 ### 当前本地安装方式
 
-当前 npm 上的 `graph-memory@1.5.8` 仍是 OpenClaw 包，新的 Community beta 与 `graph-memory-pro-dsh` 尚未发布到 npm，需从当前源码本地安装：
+当前 npm 上的 `graph-memory@1.5.8` 仍是 OpenClaw 包，新的 Community beta 与 `graph-memory-pro-dsh` 尚未发布到 npm。Community 可以直接从 GitHub 安装，Pro Lite 仍从 checkout 安装：
 
 ```bash
 dsh plugin --profile web add \
-  --allow-build=@photostructure/sqlite \
-  /absolute/path/to/graph-memory
+  git+https://github.com/adoresever/graph-memory.git
 
 dsh plugin --profile web add \
   /absolute/path/to/graph-memory/dsh-pro

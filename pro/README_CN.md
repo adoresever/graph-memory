@@ -17,7 +17,7 @@
 先安装当前 Graph Memory bundle，使 DSH profile 可以解析 `graph-memory` 包：
 
 ```bash
-dsh plugin --profile web add --allow-build=@photostructure/sqlite /absolute/path/to/graph-memory
+dsh plugin --profile web add git+https://github.com/adoresever/graph-memory.git
 ```
 
 然后用 Pro Lite overlay 启动：
@@ -27,7 +27,7 @@ dsh --profile web \
   --patch ~/.dsh/profiles/web/node_modules/graph-memory/cordis.pro-lite.patch.yml
 ```
 
-`--allow-build` 仅授权 Graph Memory 当前使用的 SQLite 原生依赖执行安装脚本；实际需要以当前 pnpm 的 supply-chain policy 为准。开发源码也可以直接把 `--patch` 指向仓库中的 `cordis.pro-lite.patch.yml`。
+Community 插件使用 Node 内置 SQLite，不需要授权第三方原生构建脚本。开发源码也可以直接把 `--patch` 指向仓库中的 `cordis.pro-lite.patch.yml`。
 
 Community 插件和 Pro Lite 默认读取同一个文件：
 

@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
+import { DatabaseSync, type DatabaseSyncInstance } from "../src/store/sqlite.ts";
 import { createTestDb, insertNode, insertEdge } from "./helpers.ts";
 import { personalizedPageRank, computeGlobalPageRank, invalidateGraphCache } from "../src/graph/pagerank.ts";
 import { detectCommunities, getCommunityPeers, summarizeCommunities } from "../src/graph/community.ts";

@@ -5,7 +5,7 @@
  * Email: Wywelljob@gmail.com
  */
 
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
+import { DatabaseSync, type DatabaseSyncInstance } from "./sqlite.ts";
 import { createHash } from "crypto";
 import type { GmNode, GmEdge, EdgeType, NodeType, Signal } from "../types.ts";
 
@@ -796,5 +796,5 @@ export function pruneCommunitySummaries(db: DatabaseSyncInstance): number {
       SELECT DISTINCT community_id FROM gm_nodes WHERE community_id IS NOT NULL AND status='active'
     )
   `).run();
-  return result.changes;
+  return Number(result.changes);
 }

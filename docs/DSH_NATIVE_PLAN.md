@@ -1,7 +1,7 @@
 # Graph Memory × DeepSeek Harness 原生架构与 Pro 路线图
 
 > 更新：2026-08-21
-> Community 状态：`1.6.0-beta.8` 已完成 DSH rc.8 原生加载、滚动上下文接管与真实跨项目召回验证
+> Community 状态：`1.6.0-beta.9` 已完成 DSH rc.8 原生加载、滚动上下文接管、无安装脚本分发与真实跨项目召回验证
 > Pro 状态：SQLite GraphSnapshot、DSH Host、Typed Remote 与只读 Client 已实现；2D/3D、分屏和拖拽尚未实现
 
 ## 1. 结论
@@ -208,7 +208,7 @@ interface GraphStore {
 - 增加 DSH adapter mock 测试：credential missing/rotation、回填、dispose、并发 Session。
 - 验证 `plugin add`、update、remove、重装和 tarball 内容。
 - 增加 secret scan 与数据库/日志排除检查。
-- 发布 `1.6.0-beta.8`，收集不同 DSH profile 的兼容反馈。
+- 发布 `1.6.0-beta.9`，收集不同 DSH profile 的兼容反馈。
 
 ### P1：Community 稳定版
 
@@ -227,4 +227,4 @@ interface GraphStore {
 
 ## 11. 发布决策
 
-当前不建议继续沿用含义混乱的 `v2.0` 标签。`1.6.0-beta.8` 是一次 DSH 上下文接管修复：滚动上下文、长期图记忆、高精度跨项目召回与 Pro Lite 已组合，并已完成真实模型闭环；多 profile 安装矩阵仍需继续验证。README、截图和视频必须始终区分自动化组合测试、真实宿主加载和真实模型结果。
+当前不建议继续沿用含义混乱的 `v2.0` 标签。`1.6.0-beta.9` 在 DSH 上下文接管基础上补齐了无安装脚本分发：滚动上下文、长期图记忆、高精度跨项目召回与 Pro Lite 已组合，并已完成真实模型闭环；多 profile 安装矩阵仍需继续验证。README、截图和视频必须始终区分自动化组合测试、真实宿主加载和真实模型结果。

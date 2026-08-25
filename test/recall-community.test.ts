@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
+import { DatabaseSync, type DatabaseSyncInstance } from "../src/store/sqlite.ts";
 import { createTestDb, insertNode, insertEdge } from "./helpers.ts";
 import {
   findById, vectorSearchWithScore, communityRepresentatives,

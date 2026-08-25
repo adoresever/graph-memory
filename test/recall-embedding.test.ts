@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { DatabaseSyncInstance } from "@photostructure/sqlite";
+import type { DatabaseSyncInstance } from "../src/store/sqlite.ts";
 
 import { Recaller } from "../src/recaller/recall.ts";
 import { DEFAULT_CONFIG } from "../src/types.ts";

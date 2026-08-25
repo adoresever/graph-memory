@@ -25,7 +25,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
+import { DatabaseSync, type DatabaseSyncInstance } from "../store/sqlite.ts";
 import {
   getCommunitySummary,
   getCommunitySummaryBySignature,

@@ -27,7 +27,7 @@
  * ═══════════════════════════════════════════════════════════════
  */
 
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
+import { DatabaseSync, type DatabaseSyncInstance } from "../store/sqlite.ts";
 import type { GmConfig } from "../types.ts";
 import { updatePageranks } from "../store/store.ts";
 

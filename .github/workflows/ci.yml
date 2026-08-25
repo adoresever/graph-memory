@@ -26,14 +26,4 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: npm run build
       - run: npm test
-      - name: Verify publishable package
-        shell: bash
-        run: |
-          npm pack --dry-run --json > pack.json
-          node - <<'NODE'
-          const report = require('./pack.json')[0]
-          const files = new Set(report.files.map((entry) => entry.path))
-          for (const required of ['dist/index.js', 'dist/dsh.js', 'index.ts', 'dsh.ts', 'tsconfig.json', 'tsconfig.dsh.json']) {
-            if (!files.has(required)) throw new Error(`packed artifact is missing ${required}`)
-          }
-          NODE
+      - run: npm run verify:package

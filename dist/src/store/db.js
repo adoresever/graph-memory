@@ -4,18 +4,14 @@
  * By: adoresever
  * Email: Wywelljob@gmail.com
  */
-
 import { createHash } from "node:crypto";
-import { DatabaseSync, type DatabaseSyncInstance } from "./sqlite.ts";
+import { DatabaseSync } from "./sqlite.js";
 import { mkdirSync } from "fs";
 import { homedir } from "os";
-
-let _db: DatabaseSyncInstance | null = null;
-
-export function resolvePath(p: string): string {
-  return p.replace(/^~/, homedir());
+let _db = null;
+export function resolvePath(p) {
+    return p.replace(/^~/, homedir());
 }
-
 /**
  * Open an independently owned database instance.
  *
@@ -23,73 +19,68 @@ export function resolvePath(p: string): string {
  * should use this API and close the returned instance from their disposer.
  * The legacy OpenClaw adapter continues to use getDb() below.
  */
-export function openDb(dbPath: string): DatabaseSyncInstance {
-  const resolved = resolvePath(dbPath);
-  
-  // 修复：同时处理 Windows 和 Unix 路径分隔符
-  const lastSeparator = Math.max(
-    resolved.lastIndexOf("/"),
-    resolved.lastIndexOf("\\")
-  );
-  
-  if (lastSeparator > 0) {
-    const dirPath = resolved.substring(0, lastSeparator);
-    mkdirSync(dirPath, { recursive: true });
-  } else if (lastSeparator === 0) {
-    // 路径像是 "/file.db" 或 "C:file.db"
-    // 在根目录或驱动器根目录，不需要创建目录
-  } else {
-    // lastSeparator === -1，路径没有分隔符
-    // 像是 "file.db"，使用当前目录，不需要创建目录
-  }
-
-  const db = new DatabaseSync(resolved);
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
-  migrate(db);
-  return db;
+export function openDb(dbPath) {
+    const resolved = resolvePath(dbPath);
+    // 修复：同时处理 Windows 和 Unix 路径分隔符
+    const lastSeparator = Math.max(resolved.lastIndexOf("/"), resolved.lastIndexOf("\\"));
+    if (lastSeparator > 0) {
+        const dirPath = resolved.substring(0, lastSeparator);
+        mkdirSync(dirPath, { recursive: true });
+    }
+    else if (lastSeparator === 0) {
+        // 路径像是 "/file.db" 或 "C:file.db"
+        // 在根目录或驱动器根目录，不需要创建目录
+    }
+    else {
+        // lastSeparator === -1，路径没有分隔符
+        // 像是 "file.db"，使用当前目录，不需要创建目录
+    }
+    const db = new DatabaseSync(resolved);
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec("PRAGMA foreign_keys = ON");
+    migrate(db);
+    return db;
 }
-
 /**
  * Legacy process-wide database accessor retained for OpenClaw compatibility.
  * New host adapters must prefer openDb() so each plugin instance owns its
  * connection and can dispose it without affecting another profile/fiber.
  */
-export function getDb(dbPath: string): DatabaseSyncInstance {
-  if (_db) return _db;
-  _db = openDb(dbPath);
-  return _db;
+export function getDb(dbPath) {
+    if (_db)
+        return _db;
+    _db = openDb(dbPath);
+    return _db;
 }
-
 /** 仅用于测试：关闭并重置单例 */
-export function closeDb(): void {
-  if (_db) { _db.close(); _db = null; }
+export function closeDb() {
+    if (_db) {
+        _db.close();
+        _db = null;
+    }
 }
-
-function migrate(db: DatabaseSyncInstance): void {
-  db.exec(`CREATE TABLE IF NOT EXISTS _migrations (v INTEGER PRIMARY KEY, at INTEGER NOT NULL)`);
-  const cur = (db.prepare("SELECT MAX(v) as v FROM _migrations").get() as any)?.v ?? 0;
-  const steps = [
-    m1_core,
-    m2_messages,
-    m3_signals,
-    m4_fts5,
-    m5_vectors,
-    m6_communities,
-    m7_community_signature,
-    m8_backfill_community_signatures,
-    m9_node_sources,
-  ];
-  for (let i = cur; i < steps.length; i++) {
-    steps[i](db);
-    db.prepare("INSERT INTO _migrations (v,at) VALUES (?,?)").run(i + 1, Date.now());
-  }
+function migrate(db) {
+    db.exec(`CREATE TABLE IF NOT EXISTS _migrations (v INTEGER PRIMARY KEY, at INTEGER NOT NULL)`);
+    const cur = db.prepare("SELECT MAX(v) as v FROM _migrations").get()?.v ?? 0;
+    const steps = [
+        m1_core,
+        m2_messages,
+        m3_signals,
+        m4_fts5,
+        m5_vectors,
+        m6_communities,
+        m7_community_signature,
+        m8_backfill_community_signatures,
+        m9_node_sources,
+    ];
+    for (let i = cur; i < steps.length; i++) {
+        steps[i](db);
+        db.prepare("INSERT INTO _migrations (v,at) VALUES (?,?)").run(i + 1, Date.now());
+    }
 }
-
 // ─── 精确溯源：图节点 → 原始消息 ──────────────────────────────
-
-function m9_node_sources(db: DatabaseSyncInstance): void {
-  db.exec(`
+function m9_node_sources(db) {
+    db.exec(`
     CREATE TABLE IF NOT EXISTS gm_node_sources (
       node_id     TEXT NOT NULL REFERENCES gm_nodes(id) ON DELETE CASCADE,
       session_id  TEXT NOT NULL,
@@ -101,11 +92,9 @@ function m9_node_sources(db: DatabaseSyncInstance): void {
     CREATE INDEX IF NOT EXISTS ix_gm_node_sources_session ON gm_node_sources(session_id, turn_index);
   `);
 }
-
 // ─── 核心表：节点 + 边 ──────────────────────────────────────
-
-function m1_core(db: DatabaseSyncInstance): void {
-  db.exec(`
+function m1_core(db) {
+    db.exec(`
     CREATE TABLE IF NOT EXISTS gm_nodes (
       id              TEXT PRIMARY KEY,
       type            TEXT NOT NULL CHECK(type IN ('TASK','SKILL','EVENT')),
@@ -138,11 +127,9 @@ function m1_core(db: DatabaseSyncInstance): void {
     CREATE INDEX IF NOT EXISTS ix_gm_edges_to   ON gm_edges(to_id);
   `);
 }
-
 // ─── 消息存储 ────────────────────────────────────────────────
-
-function m2_messages(db: DatabaseSyncInstance): void {
-  db.exec(`
+function m2_messages(db) {
+    db.exec(`
     CREATE TABLE IF NOT EXISTS gm_messages (
       id          TEXT PRIMARY KEY,
       session_id  TEXT NOT NULL,
@@ -155,11 +142,9 @@ function m2_messages(db: DatabaseSyncInstance): void {
     CREATE INDEX IF NOT EXISTS ix_gm_msg_session ON gm_messages(session_id, turn_index);
   `);
 }
-
 // ─── 信号存储 ────────────────────────────────────────────────
-
-function m3_signals(db: DatabaseSyncInstance): void {
-  db.exec(`
+function m3_signals(db) {
+    db.exec(`
     CREATE TABLE IF NOT EXISTS gm_signals (
       id          TEXT PRIMARY KEY,
       session_id  TEXT NOT NULL,
@@ -172,12 +157,10 @@ function m3_signals(db: DatabaseSyncInstance): void {
     CREATE INDEX IF NOT EXISTS ix_gm_sig_session ON gm_signals(session_id, processed);
   `);
 }
-
 // ─── FTS5 全文索引 ───────────────────────────────────────────
-
-function m4_fts5(db: DatabaseSyncInstance): void {
-  try {
-    db.exec(`
+function m4_fts5(db) {
+    try {
+        db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS gm_nodes_fts USING fts5(
         name,
         description,
@@ -186,7 +169,7 @@ function m4_fts5(db: DatabaseSyncInstance): void {
         content_rowid=rowid
       );
     `);
-    db.exec(`
+        db.exec(`
       CREATE TRIGGER IF NOT EXISTS gm_nodes_ai AFTER INSERT ON gm_nodes BEGIN
         INSERT INTO gm_nodes_fts(rowid, name, description, content)
         VALUES (NEW.rowid, NEW.name, NEW.description, NEW.content);
@@ -202,15 +185,14 @@ function m4_fts5(db: DatabaseSyncInstance): void {
         VALUES (NEW.rowid, NEW.name, NEW.description, NEW.content);
       END;
     `);
-  } catch {
-    // FTS5 不可用时静默降级到 LIKE 搜索
-  }
+    }
+    catch {
+        // FTS5 不可用时静默降级到 LIKE 搜索
+    }
 }
-
 // ─── 向量存储 ────────────────────────────────────────────────
-
-function m5_vectors(db: DatabaseSyncInstance): void {
-  db.exec(`
+function m5_vectors(db) {
+    db.exec(`
     CREATE TABLE IF NOT EXISTS gm_vectors (
       node_id      TEXT PRIMARY KEY REFERENCES gm_nodes(id),
       content_hash TEXT NOT NULL,
@@ -218,11 +200,9 @@ function m5_vectors(db: DatabaseSyncInstance): void {
     );
   `);
 }
-
 // ─── 社区描述存储 ────────────────────────────────────────────
-
-function m6_communities(db: DatabaseSyncInstance): void {
-  db.exec(`
+function m6_communities(db) {
+    db.exec(`
     CREATE TABLE IF NOT EXISTS gm_communities (
       id               TEXT PRIMARY KEY,
       summary          TEXT NOT NULL,
@@ -234,39 +214,34 @@ function m6_communities(db: DatabaseSyncInstance): void {
     );
   `);
 }
-
-function m7_community_signature(db: DatabaseSyncInstance): void {
-  const cols = db.prepare("PRAGMA table_info(gm_communities)").all() as Array<{ name?: string }>;
-  const hasMemberSignature = cols.some((col) => col.name === "member_signature");
-  if (!hasMemberSignature) {
-    db.exec("ALTER TABLE gm_communities ADD COLUMN member_signature TEXT");
-  }
-  db.exec("CREATE INDEX IF NOT EXISTS ix_gm_communities_member_signature ON gm_communities(member_signature)");
+function m7_community_signature(db) {
+    const cols = db.prepare("PRAGMA table_info(gm_communities)").all();
+    const hasMemberSignature = cols.some((col) => col.name === "member_signature");
+    if (!hasMemberSignature) {
+        db.exec("ALTER TABLE gm_communities ADD COLUMN member_signature TEXT");
+    }
+    db.exec("CREATE INDEX IF NOT EXISTS ix_gm_communities_member_signature ON gm_communities(member_signature)");
 }
-
-function m8_backfill_community_signatures(db: DatabaseSyncInstance): void {
-  const missing = db.prepare(`
+function m8_backfill_community_signatures(db) {
+    const missing = db.prepare(`
     SELECT id FROM gm_communities
     WHERE member_signature IS NULL OR member_signature=''
-  `).all() as Array<{ id: string }>;
-
-  for (const row of missing) {
-    const members = db.prepare(`
+  `).all();
+    for (const row of missing) {
+        const members = db.prepare(`
       SELECT id FROM gm_nodes
       WHERE community_id=? AND status='active'
       ORDER BY id
-    `).all(row.id) as Array<{ id: string }>;
-
-    if (!members.length) continue;
-
-    const memberSignature = createHash("sha1")
-      .update(members.map((member) => member.id).join(","))
-      .digest("hex");
-
-    db.prepare(`
+    `).all(row.id);
+        if (!members.length)
+            continue;
+        const memberSignature = createHash("sha1")
+            .update(members.map((member) => member.id).join(","))
+            .digest("hex");
+        db.prepare(`
       UPDATE gm_communities
       SET member_signature=?, updated_at=updated_at
       WHERE id=?
     `).run(memberSignature, row.id);
-  }
+    }
 }

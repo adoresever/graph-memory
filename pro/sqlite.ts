@@ -1,4 +1,4 @@
-import type { DatabaseSyncInstance } from "@photostructure/sqlite";
+import type { DatabaseSyncInstance } from "../src/store/sqlite.ts";
 import { openDb } from "../src/store/db.ts";
 import {
   allActiveNodes,

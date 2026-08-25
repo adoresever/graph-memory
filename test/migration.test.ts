@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { DatabaseSync } from "@photostructure/sqlite";
+import { DatabaseSync } from "../src/store/sqlite.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

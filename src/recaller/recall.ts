@@ -16,7 +16,7 @@
  *           泛化路径补充精确路径未覆盖的社区。
  */
 
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
+import { DatabaseSync, type DatabaseSyncInstance } from "../store/sqlite.ts";
 import { createHash } from "crypto";
 import type { GmConfig, RecallResult, GmNode, GmEdge } from "../types.ts";
 import type { EmbedFn } from "../engine/embed.ts";

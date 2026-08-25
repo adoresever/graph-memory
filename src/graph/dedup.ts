@@ -23,7 +23,7 @@
  * 复杂度：O(n²) 比较，n = 有向量的节点数。几千节点 < 50ms。
  */
 
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
+import { DatabaseSync, type DatabaseSyncInstance } from "../store/sqlite.ts";
 import type { GmConfig, GmNode } from "../types.ts";
 import { findById, mergeNodes, getAllVectors } from "../store/store.ts";
 

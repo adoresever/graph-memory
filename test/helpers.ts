@@ -7,7 +7,7 @@
  * 提供内存 SQLite 数据库，每个测试用例独立，互不干扰
  */
 
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
+import { DatabaseSync, type DatabaseSyncInstance } from "../src/store/sqlite.ts";
 
 /**
  * 创建内存数据库 + 完整 migration

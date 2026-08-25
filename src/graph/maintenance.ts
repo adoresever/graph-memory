@@ -15,7 +15,7 @@
  * 注意：个性化 PPR 不在这里跑，它在 recall 时实时计算。
  */
 
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
+import { DatabaseSync, type DatabaseSyncInstance } from "../store/sqlite.ts";
 import type { GmConfig } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn } from "../engine/embed.ts";

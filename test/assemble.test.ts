@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
+import { DatabaseSync, type DatabaseSyncInstance } from "../src/store/sqlite.ts";
 import { createTestDb, insertNode, insertEdge } from "./helpers.ts";
 import { assembleContext, buildSystemPromptAddition } from "../src/format/assemble.ts";
 import { sanitizeToolUseResultPairing } from "../src/format/transcript-repair.ts";
