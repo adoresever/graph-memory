@@ -25,6 +25,7 @@ import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
 import { assembleContext } from "./src/format/assemble.ts";
 import { selectDshRollingCompactionRange } from "./src/format/dsh-compaction.ts";
+import { contributePromptDataContext } from "./src/format/prompt-data.ts";
 import { createEmbedFn } from "./src/engine/embed.ts";
 import { computeGlobalPageRank, invalidateGraphCache } from "./src/graph/pagerank.ts";
 import { detectCommunities } from "./src/graph/community.ts";
@@ -544,7 +545,13 @@ export function apply(ctx: DshContext, input: Config = {}): void {
           built.xml,
           built.episodicXml,
         ].filter(Boolean).join("\n\n");
-        assembly.contexts.push({ name: "graph-memory:recall", text });
+        // Prompt contexts are template source in DSH. Contribute recalled
+        // memory as a one-pass variable value so Vue/Handlebars/CI expressions
+        // remain exact data and can never be parsed as host prompt variables.
+        contributePromptDataContext(assembly, {
+          name: "graph-memory:recall",
+          text,
+        });
       }
     } catch (error) {
       ctx.logger.warn(`[graph-memory] DSH recall failed: ${String(error)}`);
