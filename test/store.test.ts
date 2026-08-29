@@ -13,7 +13,7 @@ import {
   mergeNodes, edgesFrom, edgesTo, allActiveNodes, allEdges,
   searchNodes, topNodes, graphWalk, getBySession,
   saveMessage, saveMessageOnce, getMessages, getUnextracted, markExtracted, getEpisodicMessages,
-  getNodeSourceMessages,
+  getNodeSourceMessages, replaceNodeSources,
   saveSignal, pendingSignals, markSignalsDone,
   getStats, saveVector, vectorSearch, getAllVectors, upsertCommunitySummary,
   vectorSearchWithScore,
@@ -70,6 +70,40 @@ describe("host event messages", () => {
     expect(getNodeSourceMessages(db, node.id, 1000).map(message => message.text)).toEqual([
       "the exact retained evidence",
     ]);
+  });
+});
+
+describe("compaction capsule sources", () => {
+  it("replaceNodeSources 替换而非追加：新 span 覆盖旧 span", () => {
+    saveMessageOnce(db, "dsh:s1:100", "dsh:s1", 100, "user", {
+      role: "user", content: [{ type: "text", text: "old span" }],
+    });
+    saveMessageOnce(db, "dsh:s1:200", "dsh:s1", 200, "user", {
+      role: "user", content: [{ type: "text", text: "new span" }],
+    });
+    const { node } = upsertNode(db, {
+      type: "EVENT", name: "session-memory-capsule", description: "", content: "summary v1",
+    }, "dsh:s1", [{ messageId: "dsh:s1:100", turnIndex: 100 }]);
+
+    // 第二次压缩：替换而非追加
+    replaceNodeSources(db, node.id, "dsh:s1", [{ messageId: "dsh:s1:200", turnIndex: 200 }]);
+
+    const texts = getNodeSourceMessages(db, node.id, 1000).map(message => message.text);
+    expect(texts).toEqual(["new span"]);
+    expect(texts).not.toContain("old span");
+  });
+
+  it("replaceNodeSources 空 sources 清空节点溯源", () => {
+    saveMessageOnce(db, "dsh:s1:100", "dsh:s1", 100, "user", {
+      role: "user", content: [{ type: "text", text: "old span" }],
+    });
+    const { node } = upsertNode(db, {
+      type: "EVENT", name: "session-memory-capsule-empty", description: "", content: "summary",
+    }, "dsh:s1", [{ messageId: "dsh:s1:100", turnIndex: 100 }]);
+
+    replaceNodeSources(db, node.id, "dsh:s1", []);
+
+    expect(getNodeSourceMessages(db, node.id, 1000)).toEqual([]);
   });
 });
 
