@@ -111,6 +111,22 @@ export function saveNodeSources(
   }
 }
 
+/**
+ * Replace (not append) the durable message sources of one graph node.
+ * Used for compaction capsule nodes: a fresh summary supersedes the
+ * previously shadowed span, so the node must reference only the most
+ * recent checkpoint instead of accumulating every old span forever.
+ */
+export function replaceNodeSources(
+  db: DatabaseSyncInstance,
+  nodeId: string,
+  sessionId: string,
+  sources: Array<{ messageId: string; turnIndex: number }>,
+): void {
+  db.prepare("DELETE FROM gm_node_sources WHERE node_id=?").run(nodeId);
+  saveNodeSources(db, nodeId, sessionId, sources);
+}
+
 /** 按 name 精确更新 description / content；找不到返回 null（调用方决定报错语义） */
 export function updateNode(
   db: DatabaseSyncInstance,

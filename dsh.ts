@@ -20,6 +20,7 @@ import {
   updateNode,
   upsertEdge,
   upsertNode,
+  replaceNodeSources,
 } from "./src/store/store.ts";
 import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
@@ -312,11 +313,15 @@ export function apply(ctx: DshContext, input: Config = {}): void {
       name: stableName,
       description: "Consolidated checkpoint for an older span of one DSH conversation",
       content: summary,
-    }, sid, sources);
+    }, sid);
     const node = updateNode(db, result.node.name, {
       description: "Consolidated checkpoint for an older span of one DSH conversation",
       content: summary,
     }) ?? result.node;
+    // Replace, never append: a fresh summary supersedes the previously
+    // shadowed span. Keeping the node permanently pinned to every old
+    // message grows gm_node_sources without bound for long sessions.
+    replaceNodeSources(db, node.id, sid, sources);
     void recaller.syncEmbed(node);
     invalidateGraphCache();
   }

@@ -7,7 +7,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { openDb } from "./src/store/db.js";
-import { allActiveNodes, findByName, getBySession, getStats, getVectorStats, getUnextracted, markExtracted, saveMessageOnce, updateNode, upsertEdge, upsertNode, } from "./src/store/store.js";
+import { allActiveNodes, findByName, getBySession, getStats, getVectorStats, getUnextracted, markExtracted, saveMessageOnce, updateNode, upsertEdge, upsertNode, replaceNodeSources, } from "./src/store/store.js";
 import { Extractor } from "./src/extractor/extract.js";
 import { Recaller } from "./src/recaller/recall.js";
 import { assembleContext } from "./src/format/assemble.js";
@@ -230,11 +230,15 @@ export function apply(ctx, input = {}) {
             name: stableName,
             description: "Consolidated checkpoint for an older span of one DSH conversation",
             content: summary,
-        }, sid, sources);
+        }, sid);
         const node = updateNode(db, result.node.name, {
             description: "Consolidated checkpoint for an older span of one DSH conversation",
             content: summary,
         }) ?? result.node;
+        // Replace, never append: a fresh summary supersedes the previously
+        // shadowed span. Keeping the node permanently pinned to every old
+        // message grows gm_node_sources without bound for long sessions.
+        replaceNodeSources(db, node.id, sid, sources);
         void recaller.syncEmbed(node);
         invalidateGraphCache();
     }
