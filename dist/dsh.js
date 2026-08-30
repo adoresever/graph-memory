@@ -214,7 +214,7 @@ export function apply(ctx, input = {}) {
                 return false;
             })(),
             new Promise((resolve) => {
-                streamTimer = setTimeout(() => resolve(true), EXTRACTION_STREAM_TIMEOUT_MS);
+                streamTimer = setTimeout(() => resolve(true), input.extractionStreamTimeoutMs ?? EXTRACTION_STREAM_TIMEOUT_MS);
             }),
         ]);
         if (streamTimer)
@@ -341,7 +341,8 @@ export function apply(ctx, input = {}) {
         catch (error) {
             // Back off and retry a couple of times for transient provider hiccups.
             if (attempt < EXTRACTION_MAX_RETRIES) {
-                const delayMs = EXTRACTION_RETRY_DELAYS_MS[attempt] ?? 15_000;
+                const retryDelays = input.extractionRetryDelaysMs ?? EXTRACTION_RETRY_DELAYS_MS;
+                const delayMs = retryDelays[attempt] ?? 15_000;
                 ctx.logger.warn(`[graph-memory] DSH extraction retry in ${Math.round(delayMs / 1000)}s for ${sid}: ${String(error)}`);
                 await new Promise((resolve) => setTimeout(resolve, delayMs));
                 return drainBatch(sessionId, sid, messages, attempt + 1);

@@ -76,6 +76,10 @@ export interface Config {
   llmModel?: string;
   llmMaxTokens?: number;
   embedding?: DshEmbeddingConfig;
+  /** Override the extraction stream hard timeout (ms). Default 180s. */
+  extractionStreamTimeoutMs?: number;
+  /** Override extraction retry backoff delays (ms) per attempt. Default [5s, 15s]. */
+  extractionRetryDelaysMs?: number[];
 }
 
 interface Route {
@@ -292,7 +296,7 @@ export function apply(ctx: DshContext, input: Config = {}): void {
         return false;
       })(),
       new Promise<boolean>((resolve) => {
-        streamTimer = setTimeout(() => resolve(true), EXTRACTION_STREAM_TIMEOUT_MS);
+        streamTimer = setTimeout(() => resolve(true), input.extractionStreamTimeoutMs ?? EXTRACTION_STREAM_TIMEOUT_MS);
       }),
     ]);
     if (streamTimer) clearTimeout(streamTimer);
@@ -419,7 +423,8 @@ export function apply(ctx: DshContext, input: Config = {}): void {
     } catch (error) {
       // Back off and retry a couple of times for transient provider hiccups.
       if (attempt < EXTRACTION_MAX_RETRIES) {
-        const delayMs = EXTRACTION_RETRY_DELAYS_MS[attempt] ?? 15_000;
+        const retryDelays = input.extractionRetryDelaysMs ?? EXTRACTION_RETRY_DELAYS_MS;
+        const delayMs = retryDelays[attempt] ?? 15_000;
         ctx.logger.warn(`[graph-memory] DSH extraction retry in ${Math.round(delayMs / 1000)}s for ${sid}: ${String(error)}`);
         await new Promise((resolve) => setTimeout(resolve, delayMs));
         return drainBatch(sessionId, sid, messages, attempt + 1);
