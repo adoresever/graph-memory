@@ -43,8 +43,8 @@ export function buildSystemPromptAddition(params: {
   if (hasRecalled) {
     sections.push(
       "",
-      `**${recalledCount} nodes recalled from OTHER conversations** — these are proven solutions that worked before.`,
-      "Apply them directly when the current situation matches their trigger conditions.",
+      `**${recalledCount} nodes recalled from OTHER conversations** — evidence from past work.`,
+      "Follow them when their trigger conditions match the task; verify fragile facts (paths/versions/status) before asserting.",
     );
   }
 

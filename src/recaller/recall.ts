@@ -84,8 +84,10 @@ export class Recaller {
     // misses exact identifiers; an FTS-only fallback misses paraphrases.
     const lexical = searchNodes(this.db, query, limit);
     const semantic = queryVector
-      ? vectorSearchWithScore(this.db, queryVector, limit, minSemanticScore)
+      ? vectorSearchWithScore(this.db, queryVector, 600, 0)
       : [];
+    // 纯语义分数：断崖阈值只作用于语义分，避免 FTS 的 RRF 加成制造假高峰
+    // （实测：弱语义节点 +0.35 RRF 冲到第一，把阈值顶高、切断真正相关的语义节点）
     const relevance = new Map<string, number>();
     const byId = new Map<string, GmNode>();
     semantic.forEach(({ node, score }) => {
@@ -97,9 +99,30 @@ export class Recaller {
       // Reciprocal rank is bounded but gives exact terms a meaningful boost.
       relevance.set(node.id, (relevance.get(node.id) ?? 0) + 0.35 / (index + 1));
     });
-    const seeds = Array.from(byId.values())
-      .sort((a, b) => (relevance.get(b.id) ?? 0) - (relevance.get(a.id) ?? 0))
-      .slice(0, limit);
+
+    // 相关性优先：不按固定数量切种子，取"语义分数断崖以上"的节点（硬上限兜底）。
+    // 阈值 = max(最高语义分 - recallScoreGap, recallMinScore, minSemanticScore)。
+    // FTS 精确词命中作为补充保留（上游 RRF 的意图：不丢精确标识符）。
+    const gap = this.cfg.recallScoreGap ?? 0.10;
+    const minRel = this.cfg.recallMinScore ?? 0.58;
+    const cap = this.cfg.recallSeedCap ?? limit * 2;
+    const maxSem = semantic.length ? Math.max(...semantic.map(s => s.score)) : 0;
+    const threshold = Math.max(maxSem - gap, minRel, minSemanticScore);
+    const seeds: GmNode[] = [];
+    for (const { node, score } of semantic) {
+      if (score >= threshold) {
+        seeds.push(node);
+        if (seeds.length >= cap) break;
+      }
+    }
+    const seen = new Set(seeds.map(n => n.id));
+    for (const node of lexical) {
+      if (!seen.has(node.id)) {
+        seeds.push(node);
+        seen.add(node.id);
+        if (seeds.length >= cap) break;
+      }
+    }
 
     if (!seeds.length) return { nodes: [], edges: [], tokenEstimate: 0 };
 
@@ -133,7 +156,7 @@ export class Recaller {
         b.validatedCount - a.validatedCount ||
         b.updatedAt - a.updatedAt
       )
-      .slice(0, limit);
+      .slice(0, this.cfg.recallSeedCap ?? limit * 2);
 
     const ids = new Set(filtered.map(n => n.id));
     return {
@@ -172,7 +195,8 @@ export class Recaller {
       }
     }
 
-    // fallback：按时间取社区代表节点
+    // fallback：按时间取社区代表节点（默认开启；DSH 适配层显式传
+    // allowBroadFallback=false 关闭——实测它是与查询无关的固定噪音源）
     if (!seeds.length && allowBroadFallback) {
       seeds = communityRepresentatives(this.db, 2);
     }

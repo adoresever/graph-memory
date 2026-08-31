@@ -147,6 +147,12 @@ export interface GmConfig {
   pagerankDamping: number;
   /** PageRank 迭代次数 */
   pagerankIterations: number;
+  /** 向量召回种子选择：与最高分允许的差距（低于最高分此值即视为不相关，0-1） */
+  recallScoreGap?: number;
+  /** 向量召回种子选择：最低接受分数（默认 0.58，bge-m3 短文本实测区分带） */
+  recallMinScore?: number;
+  /** 向量召回种子选择：种子数硬上限（默认 recallMaxNodes*2） */
+  recallSeedCap?: number;
 }
 
 export const DEFAULT_CONFIG: GmConfig = {
@@ -158,4 +164,6 @@ export const DEFAULT_CONFIG: GmConfig = {
   dedupThreshold: 0.90,
   pagerankDamping: 0.85,
   pagerankIterations: 20,
+  recallScoreGap: 0.10,
+  recallMinScore: 0.58,
 };
