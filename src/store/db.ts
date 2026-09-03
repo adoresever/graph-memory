@@ -46,6 +46,12 @@ export function openDb(dbPath: string): DatabaseSyncInstance {
   const db = new DatabaseSync(resolved);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
+  // Multiple plugin instances (DSH fibers/profiles, tests) may open the same
+  // database file. Without a busy timeout, a write that collides with another
+  // connection's transaction fails immediately with SQLITE_BUSY ("database is
+  // locked") and the error surfaces as a spurious recall/extraction failure.
+  // Wait up to 5s for the lock instead so transient contention is retried.
+  db.exec("PRAGMA busy_timeout = 5000");
   migrate(db);
   return db;
 }
