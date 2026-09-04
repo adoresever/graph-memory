@@ -209,21 +209,44 @@ export class Recaller {
    * 合并两条路径的结果：全部保留，只去重复节点
    */
   private mergeResults(precise: RecallResult, generalized: RecallResult): RecallResult {
+    return Recaller.mergeResultsImpl(precise, generalized);
+  }
+
+  /**
+   * 合并多个独立召回结果：去重节点，保留两端都在最终节点集中的边。
+   *
+   * 典型的调用方不需要在两条路径之间分配额——各自独立跑满，
+   * 合并后再统一去重。对于超过两个结果集的场景使用 {@link mergeMany}。
+   */
+  static merge(a: RecallResult, b: RecallResult): RecallResult {
+    return Recaller.mergeResultsImpl(a, b);
+  }
+
+  /**
+   * 合并任意数量的独立召回结果。
+   */
+  static mergeMany(results: RecallResult[]): RecallResult {
+    if (!results.length) return { nodes: [], edges: [], tokenEstimate: 0 };
+    let merged = results[0];
+    for (let i = 1; i < results.length; i++) {
+      merged = Recaller.mergeResultsImpl(merged, results[i]);
+    }
+    return merged;
+  }
+
+  private static mergeResultsImpl(a: RecallResult, b: RecallResult): RecallResult {
     const nodeMap = new Map<string, GmNode>();
     const edgeMap = new Map<string, GmEdge>();
 
-    // 精确路径全部入场
-    for (const n of precise.nodes) nodeMap.set(n.id, n);
-    for (const e of precise.edges) edgeMap.set(e.id, e);
+    for (const n of a.nodes) nodeMap.set(n.id, n);
+    for (const e of a.edges) edgeMap.set(e.id, e);
 
-    // 泛化路径去重后全部入场
-    for (const n of generalized.nodes) {
+    for (const n of b.nodes) {
       if (!nodeMap.has(n.id)) nodeMap.set(n.id, n);
     }
 
-    // 合并边：两端都在最终节点集中的边才保留
     const finalIds = new Set(nodeMap.keys());
-    for (const e of generalized.edges) {
+    for (const e of b.edges) {
       if (!edgeMap.has(e.id) && finalIds.has(e.fromId) && finalIds.has(e.toId)) {
         edgeMap.set(e.id, e);
       }
@@ -235,8 +258,23 @@ export class Recaller {
     return {
       nodes,
       edges,
-      tokenEstimate: this.estimateTokens(nodes),
+      tokenEstimate: Math.ceil(nodes.reduce((s, n) => s + n.content.length + n.description.length, 0) / 3),
     };
+  }
+
+  /**
+   * 多查询召回：对每个查询独立跑路径，并行执行，合并去重。
+   *
+   * 适用于需要从多个语义角度检索图谱的场景（例如用户消息 + 任务描述）。
+   * 每条查询独立跑精确路径 + 泛化路径，互不干扰。
+   */
+  async recallMulti(queries: string[], options: {
+    minSemanticScore?: number;
+    allowBroadFallback?: boolean;
+  } = {}): Promise<RecallResult> {
+    if (!queries.length) return { nodes: [], edges: [], tokenEstimate: 0 };
+    const results = await Promise.all(queries.map(q => this.recall(q, options)));
+    return Recaller.mergeMany(results);
   }
 
   private estimateTokens(nodes: GmNode[]): number {

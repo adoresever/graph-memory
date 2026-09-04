@@ -84,6 +84,38 @@ function stringOutput(title) {
         presentationMeta: () => ({ title }),
     };
 }
+/**
+ * Default task-query builder: bigram overlap filter.
+ *
+ * A skill is considered relevant to the current user message when any 2-char
+ * sequence from the user message appears in the skill name or description.
+ * Only matching skill descriptions are included, capped at 500 characters
+ * total. Infrastructure skills with a `lark-` prefix are excluded.
+ */
+function bigramRelevanceFilter(userQuery, skills) {
+    const TASK_QUERY_MAX_CHARS = 500;
+    const relevant = [];
+    let chars = 0;
+    for (const skill of skills) {
+        if (skill.name.startsWith("lark-"))
+            continue;
+        let match = false;
+        for (let i = 0; i < userQuery.length - 1 && !match; i++) {
+            const bigram = userQuery.slice(i, i + 2);
+            if (skill.name.includes(bigram) || skill.description.includes(bigram)) {
+                match = true;
+            }
+        }
+        if (!match)
+            continue;
+        const desc = skill.description;
+        if (chars + desc.length > TASK_QUERY_MAX_CHARS && relevant.length > 0)
+            break;
+        relevant.push(desc);
+        chars += desc.length;
+    }
+    return relevant.length ? relevant : undefined;
+}
 export function apply(ctx, input = {}) {
     const freshTurnCount = input.freshTurnCount ?? 5;
     if (!Number.isInteger(freshTurnCount) || freshTurnCount < 1) {
@@ -133,6 +165,8 @@ export function apply(ctx, input = {}) {
     const latestRoute = new Map();
     const latestPrompt = new Map();
     const recallCache = new Map();
+    const skillEntries = new Map();
+    const taskQueryBuilder = input.taskQueryBuilder ?? bigramRelevanceFilter;
     const extractChain = new Map();
     const turnCounts = new Map();
     const embeddingConfigured = Boolean(input.embedding?.apiKeyEnv || input.embedding?.baseURL || input.embedding?.baseUrl);
@@ -605,6 +639,14 @@ export function apply(ctx, input = {}) {
         if (event?.type === "user/message" && event.data?.source?.kind === "user") {
             attachRollingCompaction(ctx.agents?.get(id));
         }
+        // Capture the skill catalog so recall can build a task-oriented query
+        // from skills relevant to the current conversation.
+        if (event?.type === "user/message" && event.data?.source?.kind === "skill-catalog") {
+            const skills = event.data?.message?.skills;
+            if (Array.isArray(skills)) {
+                skillEntries.set(String(id), skills);
+            }
+        }
         ingest(id, event);
         recordCompactionCapsule(id, event);
         if (event?.type === "turn/end") {
@@ -637,15 +679,28 @@ export function apply(ctx, input = {}) {
         try {
             let cached = recallCache.get(key);
             if (!cached || cached.query !== query) {
+                // Build the query list: primary user-message query
+                // + optional task-oriented queries from the skill catalog.
+                const queries = [query];
+                const entries = skillEntries.get(key);
+                if (entries && entries.length) {
+                    const taskQueries = taskQueryBuilder(query, entries);
+                    if (taskQueries && taskQueries.length) {
+                        queries.push(...taskQueries);
+                    }
+                }
                 // Automatic injection is intentionally high precision: unlike an
                 // explicit gm_search, it must not spend tokens on query-independent
                 // community representatives or weak semantic neighbors.
+                const recallOptions = {
+                    minSemanticScore: autoRecallMinScore,
+                    allowBroadFallback: false,
+                };
                 cached = {
                     query,
-                    value: recaller.recall(query, {
-                        minSemanticScore: autoRecallMinScore,
-                        allowBroadFallback: false,
-                    }),
+                    value: queries.length > 1
+                        ? recaller.recallMulti(queries, recallOptions)
+                        : recaller.recall(query, recallOptions),
                 };
                 recallCache.set(key, cached);
             }
