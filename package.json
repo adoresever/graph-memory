@@ -24,8 +24,9 @@
     "test:watch": "vitest --passWithNoTests"
   },
   "dependencies": {
+    "@sinclair/typebox": "^0.34.48",
     "neo4j-driver": "^5.27.0",
-    "@sinclair/typebox": "^0.34.48"
+    "opencode-ai": "^1.18.16"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

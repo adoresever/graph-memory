@@ -23,6 +23,8 @@
  * 超时：AbortController 强制；默认 60s，cfg.llm.timeoutMs 可调（慢速 API 用户可调大）。
  */
 
+import { stat } from "node:fs/promises";
+import { LlmFailureGuard } from "./llm-guard.ts";
 import {
   loadOAuthSession,
   needsRefresh,
@@ -31,8 +33,10 @@ import {
   normalizeOauthModel,
   buildOauthEndpoint,
   extractOutputTextFromSse,
+  extractOutputTextFromResponsePayload,
 } from "./oauth.ts";
 import type { OAuthSession } from "./oauth.ts";
+import { fetchRetry, throwForStatus } from "./http.ts";
 
 export type LlmProvider = "openai" | "anthropic" | "oauth";
 
@@ -41,7 +45,7 @@ export type ReasoningEffort = "low" | "medium" | "high";
 
 const DEFAULT_REASONING_EFFORT: ReasoningEffort = "medium";
 
-export interface LlmConfig {
+interface LlmConfig {
   /** 显式 provider 切换。未设时按 baseURL 是否存在推断（向后兼容，仅产生 openai/anthropic）。 */
   provider?: LlmProvider;
   apiKey?: string;
@@ -59,6 +63,16 @@ export interface LlmConfig {
 }
 
 export type CompleteFn = (system: string, user: string) => Promise<string>;
+
+/**
+ * 剥离推理模型输出的 <think>...</think> 思维链标签（兼容 MiniMax 等），
+ * 含未闭合 <think> 兜底。LLM 输出清洗的单一来源——extractor 与社区摘要共用。
+ */
+export function stripThinkTags(raw: string): string {
+  return raw
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<think>[\s\S]*/gi, "");
+}
 
 const DEFAULT_LLM_TIMEOUT_MS = 60_000;
 const DEFAULT_LLM_MAX_TOKENS = 4_000;
@@ -80,41 +94,6 @@ export function resolveProvider(cfg: LlmConfig | undefined): {
   // 向后兼容：未显式设 provider 时按 baseURL 推断（仅 openai/anthropic）
   const inferred = cfg?.baseURL ? "openai" : "anthropic";
   return { provider: inferred, inferred: true };
-}
-
-async function fetchWithTimeout(
-  url: string,
-  init: RequestInit,
-  timeoutMs: number,
-): Promise<Response> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...init, signal: ctrl.signal });
-  } catch (err: any) {
-    if (err?.name === "AbortError") {
-      throw new Error(`[graph-memory] LLM request timed out after ${timeoutMs}ms`);
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-const RETRYABLE = new Set([429, 500, 502, 503, 529]);
-
-async function fetchRetry(
-  url: string,
-  init: RequestInit,
-  retries: number,
-  timeoutMs: number,
-): Promise<Response> {
-  for (let i = 0; i <= retries; i++) {
-    const res = await fetchWithTimeout(url, init, timeoutMs);
-    if (res.ok || i >= retries || !RETRYABLE.has(res.status)) return res;
-    await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, i)));
-  }
-  throw new Error("[graph-memory] fetch failed after retries");
 }
 
 /**
@@ -144,13 +123,19 @@ export function createCompleteFn(
   // ── OAuth 会话缓存：单飞刷新，避免并发请求同时触发 refresh ──
   const oauthPath = provider === "oauth" ? llmConfig?.oauthPath : undefined;
   let cachedSessionPromise: Promise<OAuthSession> | null = null;
+  let cachedSessionMtimeMs: number | null = null;
   let refreshPromise: Promise<OAuthSession> | null = null;
 
   async function getOAuthSession(): Promise<OAuthSession> {
     if (!oauthPath) {
       throw new Error("[graph-memory] provider=oauth 需要 llm.oauthPath");
     }
-    if (!cachedSessionPromise) {
+    // oauthPath 可能被运行中的其他进程重写（CLI auth login / CLI extract 刷新 token）。
+    // 进程内缓存按 mtime 失效：文件更新后下一次调用即重载，无需重启网关。
+    let mtimeMs: number | null = null;
+    try { mtimeMs = (await stat(oauthPath)).mtimeMs; } catch { /* 文件暂不可达：沿用缓存 */ }
+    if (!cachedSessionPromise || (mtimeMs !== null && mtimeMs !== cachedSessionMtimeMs)) {
+      cachedSessionMtimeMs = mtimeMs;
       cachedSessionPromise = loadOAuthSession(oauthPath).catch((error) => {
         cachedSessionPromise = null;
         throw error;
@@ -163,6 +148,8 @@ export function createCompleteFn(
           .then(async (s) => {
             await saveOAuthSession(oauthPath, s);
             cachedSessionPromise = Promise.resolve(s);
+            // 同步 mtime 标记，避免下次调用因文件刚写入而多余重载一次
+            try { cachedSessionMtimeMs = (await stat(oauthPath)).mtimeMs; } catch {}
             refreshPromise = null;
             return s;
           })
@@ -176,7 +163,7 @@ export function createCompleteFn(
     return session;
   }
 
-  return async (system, user) => {
+  const complete = async (system: string, user: string): Promise<string> => {
     // ── 路径 C：OAuth Codex Responses API ──
     if (provider === "oauth") {
       if (!oauthPath) {
@@ -210,29 +197,17 @@ export function createCompleteFn(
           stream: false,
           text: { format: { type: "text" } },
         }),
-      }, 3, timeoutMs);
+      }, { retries: 3, timeoutMs, label: "[graph-memory] LLM" });
 
       if (!res.ok) {
-        const errText = await res.text().catch(() => "");
-        throw new Error(`[graph-memory] OAuth LLM API ${res.status}: ${errText.slice(0, 500)}`);
+        await throwForStatus(res, "[graph-memory] OAuth LLM API", 500);
       }
 
       const bodyText = await res.text();
       let text: string | null = null;
       try {
-        const parsed = JSON.parse(bodyText) as Record<string, unknown>;
-        const output = Array.isArray(parsed.output) ? parsed.output : [];
-        for (const item of output) {
-          if (!item || typeof item !== "object") continue;
-          const content = Array.isArray((item as Record<string, unknown>).content)
-            ? (item as Record<string, unknown>).content as Array<Record<string, unknown>>
-            : [];
-          for (const part of content) {
-            if (part?.type === "output_text" && typeof part.text === "string") {
-              text = (text ?? "") + part.text;
-            }
-          }
-        }
+        // Responses JSON → output_text 收集（与 oauth.ts 的 SSE 嵌套解析共用同一遍历）
+        text = extractOutputTextFromResponsePayload(JSON.parse(bodyText));
       } catch {
         // 服务器忽略 stream:false 时回退到 SSE 解析
         text = extractOutputTextFromSse(bodyText);
@@ -251,7 +226,7 @@ export function createCompleteFn(
         );
       }
       const baseURL = (llmConfig?.baseURL ?? ANTHROPIC_DEFAULT_BASE_URL).replace(/\/+$/, "");
-      const res = await fetchWithTimeout(`${baseURL}/v1/messages`, {
+      const res = await fetchRetry(`${baseURL}/v1/messages`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -264,13 +239,18 @@ export function createCompleteFn(
           system,
           messages: [{ role: "user", content: user }],
         }),
-      }, timeoutMs);
+      }, { retries: 3, timeoutMs, label: "[graph-memory] LLM" });
       if (!res.ok) {
-        const errText = await res.text().catch(() => "");
-        throw new Error(`[graph-memory] Anthropic API ${res.status}: ${errText.slice(0, 200)}`);
+        await throwForStatus(res, "[graph-memory] Anthropic API");
       }
       const data = await res.json() as any;
-      const text = data.content?.[0]?.text;
+      // 遍历 content 找 text 块：只看 content[0] 时，thinking 块在前会误报 empty content
+      const text = Array.isArray(data.content)
+        ? data.content
+            .filter((b: any) => b?.type === "text" && typeof b.text === "string")
+            .map((b: any) => b.text)
+            .join("")
+        : "";
       if (text) return text;
       const stop = data.choices?.[0]?.finish_reason ?? data.stop_reason;
       throw new Error(
@@ -288,7 +268,7 @@ export function createCompleteFn(
       );
     }
     const url = `${baseURL.replace(/\/+$/, "")}/chat/completions`;
-    const res = await fetchWithTimeout(url, {
+    const res = await fetchRetry(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -303,10 +283,9 @@ export function createCompleteFn(
         max_tokens: maxTokens,
         temperature: 0.1,
       }),
-    }, timeoutMs);
+    }, { retries: 3, timeoutMs, label: "[graph-memory] LLM" });
     if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      throw new Error(`[graph-memory] LLM API ${res.status}: ${errText.slice(0, 200)}`);
+      await throwForStatus(res, "[graph-memory] LLM API");
     }
     const data = await res.json() as any;
     const choice = data.choices?.[0];
@@ -319,5 +298,46 @@ export function createCompleteFn(
       (reasoningTokens ? ` — reasoning consumed ${reasoningTokens} of ${maxTokens} tokens` : "") +
       `. Raise llm.maxTokens if recurring.`,
     );
+  };
+
+  // ── 失败冷却守卫：持久性配置错误（401/403/404）后冷却 10 分钟，快速失败 ──
+  // 避免凭证失效/模型名错误时每轮照付一次完整请求 + 超时等待。成功调用即清除。
+  // OAuth 例外自愈：oauthPath 可能被外部进程重写（CLI auth login / CLI extract
+  // 刷新 token）。冷却触发时记录会话文件 mtime，后续调用发现文件已变化 =
+  // 凭证已被修复 → 立即解除冷却重试（401 的常见诱因是时钟偏移导致缓存的
+  // access token 提前过期，重登即可恢复，不应被迫等满 10 分钟）。
+  const guard = new LlmFailureGuard();
+  let oauthTripMtimeMs: number | null | undefined; // undefined = 冷却非 oauth 路径触发
+  return async (system: string, user: string): Promise<string> => {
+    if (!guard.canRun()) {
+      if (provider === "oauth" && oauthPath && oauthTripMtimeMs !== undefined) {
+        let currentMtimeMs: number | null = null;
+        try { currentMtimeMs = (await stat(oauthPath)).mtimeMs; } catch { /* 文件暂不可达：维持冷却 */ }
+        // 仅在"确实读到不同的 mtime"或"trip 时读不到、现在读得到"时解除；
+        // 瞬时 stat 失败（null）不解除 —— 避免 AV/EBUSY 类抖动白白放行一次必败请求
+        const fileReplaced = oauthTripMtimeMs === null
+          ? currentMtimeMs !== null
+          : currentMtimeMs !== null && currentMtimeMs !== oauthTripMtimeMs;
+        if (fileReplaced) guard.reset();
+      }
+      if (!guard.canRun()) {
+        const seconds = Math.max(1, Math.ceil(guard.remainingMs() / 1000));
+        throw new Error(
+          `[graph-memory] LLM paused for ${seconds}s after a previous permanent API error` +
+          (provider === "oauth" ? " — 重新 auth login 或等待 token 文件刷新后自动解除" : ""),
+        );
+      }
+    }
+    try {
+      const text = await complete(system, user);
+      guard.reset();
+      return text;
+    } catch (err) {
+      if (guard.tripIfNeeded(err) && provider === "oauth" && oauthPath) {
+        try { oauthTripMtimeMs = (await stat(oauthPath)).mtimeMs; }
+        catch { oauthTripMtimeMs = null; }
+      }
+      throw err;
+    }
   };
 }

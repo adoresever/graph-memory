@@ -5,10 +5,36 @@
  * 所以先查有哪些关系类型，只投影存在的
  */
 
-import type { Driver } from "neo4j-driver";
+import type { Driver, Session } from "neo4j-driver";
 import type { GmConfig } from "../types.ts";
 import { getSession } from "../store/db.ts";
 import { getExistingActiveRelTypes, projectActiveGraph } from "./projection.ts";
+
+/**
+ * 读回 pagerank top-20 并构建 scores Map + topK 数组 —— global PR 的三条路径
+ * （均匀分兜底 / GDS write 后读回 / 无 GDS fallback）共用的收尾读取。
+ * tiebreakCreatedAt=true 时以 createdAt ASC 决胜（fallback 路径的稳定序）。
+ */
+async function readTopKByPagerank(session: Session, tiebreakCreatedAt = false): Promise<{
+  scores: Map<string, number>;
+  topK: Array<{ id: string; name: string; score: number }>;
+}> {
+  const topResult = await session.run(`
+    MATCH (n:Task|Skill|Event {status: 'active'})
+    RETURN n.id AS id, n.name AS name, n.pagerank AS score
+    ORDER BY n.pagerank DESC ${tiebreakCreatedAt ? ", n.createdAt ASC" : ""}
+    LIMIT 20
+  `);
+  const scores = new Map<string, number>();
+  const topK: Array<{ id: string; name: string; score: number }> = [];
+  for (const r of topResult.records) {
+    const rawScore = r.get("score");
+    const score = typeof rawScore === "number" ? rawScore : (rawScore?.toNumber?.() ?? 0);
+    scores.set(r.get("id"), score);
+    topK.push({ id: r.get("id"), name: r.get("name"), score });
+  }
+  return { scores, topK };
+}
 
 // ─── 个性化 PageRank ─────────────────────────────────────────
 
@@ -108,44 +134,32 @@ export async function computeGlobalPageRank(driver: Driver, cfg: GmConfig): Prom
       // 没有关系，均匀分
       const uniformScore = 1 / nodeCount;
       await session.run("MATCH (n:Task|Skill|Event {status: 'active'}) SET n.pagerank = $score", { score: uniformScore });
-      const topResult = await session.run(`
-        MATCH (n:Task|Skill|Event {status: 'active'}) RETURN n.id AS id, n.name AS name, n.pagerank AS score
-        ORDER BY n.pagerank DESC LIMIT 20
-      `);
-      const scores = new Map<string, number>();
-      const topK = topResult.records.map(r => {
-        scores.set(r.get("id"), uniformScore);
-        return { id: r.get("id"), name: r.get("name"), score: uniformScore };
-      });
-      return { scores, topK };
+      return await readTopKByPagerank(session);
     }
 
     await projectActiveGraph(session, graphName, existingTypes);
 
-    await session.run(`
-      CALL gds.pageRank.write('${graphName}', {
-        writeProperty: 'pagerank',
-        dampingFactor: $damping,
-        maxIterations: toInteger($iterations)
-      })
-    `, { damping: cfg.pagerankDamping, iterations: cfg.pagerankIterations });
-
-    await session.run(`CALL gds.graph.drop('${graphName}')`);
-
-    const topResult = await session.run(`
-      MATCH (n:Task|Skill|Event {status: 'active'}) RETURN n.id AS id, n.name AS name, n.pagerank AS score
-      ORDER BY n.pagerank DESC LIMIT 20
-    `);
-
-    const scores = new Map<string, number>();
-    const topK: Array<{ id: string; name: string; score: number }> = [];
-    for (const r of topResult.records) {
-      const rawScore = r.get("score");
-      const score = typeof rawScore === "number" ? rawScore : (rawScore?.toNumber?.() ?? 0);
-      scores.set(r.get("id"), score);
-      topK.push({ id: r.get("id"), name: r.get("name"), score });
+    try {
+      await session.run(`
+        CALL gds.pageRank.write('${graphName}', {
+          writeProperty: 'pagerank',
+          dampingFactor: $damping,
+          maxIterations: toInteger($iterations)
+        })
+      `, { damping: cfg.pagerankDamping, iterations: cfg.pagerankIterations });
+    } finally {
+      // drop 失败只能吞掉（宁泄漏一个临时投影）：此分支若抛错落入外层 catch，
+      // fallback 会用 1/(i+1) 覆盖刚 write 成功的真实 PageRank —— 数据损坏远重于投影泄漏
+      try { await session.run(`CALL gds.graph.drop('${graphName}')`); } catch {}
     }
-    return { scores, topK };
+
+    // write 已成功：pagerank 属性已是真值，后续读取失败只返回空排序，
+    // 绝不回落外层 catch 的 fallback（那会覆盖全图正确分数）
+    try {
+      return await readTopKByPagerank(session);
+    } catch {
+      return { scores: new Map(), topK: [] };
+    }
   } catch {
     try { await session.run(`CALL gds.graph.drop('${graphName}')`); } catch {}
     // GDS 不可用时降级为确定性 fallback（与 PPR 一致：按稳定排序赋 1/(i+1)）
@@ -157,23 +171,7 @@ export async function computeGlobalPageRank(driver: Driver, cfg: GmConfig): Prom
       WITH nodes[idx] AS node, idx
       SET node.pagerank = 1.0 / toFloat(idx + 1)
     `);
-    const fallbackResult = await session.run(`
-      MATCH (n:Task|Skill|Event {status: 'active'})
-      RETURN n.id AS id, n.name AS name, n.pagerank AS score
-      ORDER BY n.pagerank DESC, n.createdAt ASC
-      LIMIT 20
-    `);
-    const scores = new Map<string, number>();
-    const topK: Array<{ id: string; name: string; score: number }> = [];
-    for (const r of fallbackResult.records) {
-      const rawScore = r.get("score");
-      const score = typeof rawScore === "number" ? rawScore : (rawScore?.toNumber?.() ?? 0);
-      const id = r.get("id");
-      const name = r.get("name");
-      scores.set(id, score);
-      topK.push({ id, name, score });
-    }
-    return { scores, topK };
+    return await readTopKByPagerank(session, true);
   } finally {
     await session.close();
   }

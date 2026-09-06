@@ -79,6 +79,7 @@ NEO4J_USER="neo4j"
 NEO4J_URI=""                 # 留空 → 根据是否自建 Neo4j 自动决定
 PLUGIN_REF=""
 INTERACTIVE=true
+PC=""                        # 嵌入式 provider 选择（1-7）；交互模式由 read 赋值，非交互留空
 AUTOSTART_METHODS=()         # configure_autostart 写入；卸载与完成提示读取
 while [[ $# -gt 0 ]]; do
   case "$1" in

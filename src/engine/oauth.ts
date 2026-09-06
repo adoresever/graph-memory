@@ -13,6 +13,7 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { platform } from "node:os";
 import { spawn } from "node:child_process";
+import { fetchWithTimeout } from "./http.ts";
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -176,15 +177,44 @@ function pickTimestamp(container: Record<string, unknown>, keys: string[]): numb
   return undefined;
 }
 
-function createTimeoutSignal(timeoutMs?: number): { signal: AbortSignal; dispose: () => void } {
+const DEFAULT_TOKEN_TIMEOUT_MS = 30_000;
+
+/**
+ * OAuth token 端点共用的 POST（refresh_token 与 authorization_code 交换同一端点、
+ * 同一错误处理，此前是两份重复实现）。统一走 http.ts 的 fetchWithTimeout ——
+ * exchangeAuthorizationCode 曾是裸 fetch 无超时（CLI 登录流程卡死风险），
+ * refresh 用手写 AbortController，现在两者语义一致且与全仓单一来源对齐。
+ * 错误消息保持既有格式：`${errorLabel} (${status}): ${detail.slice(0, 500)}`。
+ */
+async function postTokenRequest(
+  providerId: OAuthProviderId,
+  body: Record<string, string>,
+  errorLabel: string,
+  timeoutMs?: number,
+): Promise<TokenRefreshResponse> {
   const effectiveTimeoutMs =
-    typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 30_000;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), effectiveTimeoutMs);
-  return {
-    signal: controller.signal,
-    dispose: () => clearTimeout(timer),
-  };
+    typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? timeoutMs
+      : DEFAULT_TOKEN_TIMEOUT_MS;
+  const response = await fetchWithTimeout(
+    resolveOauthTokenUrl(undefined, providerId),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams(body),
+    },
+    effectiveTimeoutMs,
+    "[graph-memory] OAuth",
+  );
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`${errorLabel} (${response.status}): ${detail.slice(0, 500)}`);
+  }
+
+  return await response.json() as TokenRefreshResponse;
 }
 
 // ─── Provider resolution ──────────────────────────────────────
@@ -391,54 +421,36 @@ export async function refreshOAuthSession(session: OAuthSession, timeoutMs?: num
     );
   }
 
-  const { signal, dispose } = createTimeoutSignal(timeoutMs);
-  try {
-    const response = await fetch(resolveOauthTokenUrl(undefined, session.providerId), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: session.refreshToken,
-        client_id: resolveOauthClientId(undefined, session.providerId),
-      }),
-      signal,
-    });
+  const payload = await postTokenRequest(session.providerId, {
+    grant_type: "refresh_token",
+    refresh_token: session.refreshToken,
+    client_id: resolveOauthClientId(undefined, session.providerId),
+  }, "OAuth refresh failed", timeoutMs);
 
-    if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      throw new Error(`OAuth refresh failed (${response.status}): ${detail.slice(0, 500)}`);
-    }
-
-    const payload = await response.json() as TokenRefreshResponse;
-    if (!payload.access_token) {
-      throw new Error("OAuth refresh returned no access token");
-    }
-
-    const accessToken = payload.access_token;
-    const refreshToken = payload.refresh_token || session.refreshToken;
-    const expiresAt =
-      typeof payload.expires_in === "number"
-        ? Date.now() + payload.expires_in * 1000
-        : getJwtExpiry(accessToken);
-    const accountId = getJwtAccountId(accessToken, session.providerId) || session.accountId;
-
-    if (!accountId) {
-      throw new Error("OAuth refresh returned a token without a ChatGPT account id");
-    }
-
-    return {
-      accessToken,
-      refreshToken,
-      expiresAt,
-      accountId,
-      providerId: session.providerId,
-      authPath: session.authPath,
-    };
-  } finally {
-    dispose();
+  if (!payload.access_token) {
+    throw new Error("OAuth refresh returned no access token");
   }
+
+  const accessToken = payload.access_token;
+  const refreshToken = payload.refresh_token || session.refreshToken;
+  const expiresAt =
+    typeof payload.expires_in === "number"
+      ? Date.now() + payload.expires_in * 1000
+      : getJwtExpiry(accessToken);
+  const accountId = getJwtAccountId(accessToken, session.providerId) || session.accountId;
+
+  if (!accountId) {
+    throw new Error("OAuth refresh returned a token without a ChatGPT account id");
+  }
+
+  return {
+    accessToken,
+    refreshToken,
+    expiresAt,
+    accountId,
+    providerId: session.providerId,
+    authPath: session.authPath,
+  };
 }
 
 export async function saveOAuthSession(authPath: string, session: OAuthSession): Promise<void> {
@@ -490,9 +502,14 @@ export function buildOauthEndpoint(baseURL?: string, providerId?: string): strin
   return `${root}/codex/responses`;
 }
 
-// ─── SSE response parsing ─────────────────────────────────────
+// ─── Responses payload 解析 ───────────────────────────────────
 
-function extractOutputTextFromResponsePayload(payload: unknown): string | null {
+/**
+ * 从 Codex Responses API 的 JSON payload 收集 output_text（多段以 "\n" 连接）。
+ * oauth.ts 的 SSE 嵌套回退与 llm.ts 的非流式主路径共用此遍历 —— 勿在调用方
+ * 重新内联 output[].content[] 走树。
+ */
+export function extractOutputTextFromResponsePayload(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
 
   const response = payload as Record<string, unknown>;
@@ -565,26 +582,14 @@ export function extractOutputTextFromSse(bodyText: string): string | null {
 
 async function exchangeAuthorizationCode(code: string, verifier: string, providerId?: string): Promise<OAuthSession> {
   const resolvedProviderId = normalizeOAuthProviderId(providerId);
-  const response = await fetch(resolveOauthTokenUrl(undefined, resolvedProviderId), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      client_id: resolveOauthClientId(undefined, resolvedProviderId),
-      code,
-      code_verifier: verifier,
-      redirect_uri: resolveOauthRedirectUri(undefined, resolvedProviderId),
-    }),
-  });
+  const payload = await postTokenRequest(resolvedProviderId, {
+    grant_type: "authorization_code",
+    client_id: resolveOauthClientId(undefined, resolvedProviderId),
+    code,
+    code_verifier: verifier,
+    redirect_uri: resolveOauthRedirectUri(undefined, resolvedProviderId),
+  }, "OAuth token exchange failed");
 
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(`OAuth token exchange failed (${response.status}): ${detail.slice(0, 500)}`);
-  }
-
-  const payload = await response.json() as TokenRefreshResponse;
   if (!payload.access_token) {
     throw new Error("OAuth token exchange returned no access token");
   }

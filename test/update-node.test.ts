@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { applyNodePatch, applyDeprecateMarker } from "../src/store/store.ts";
+import { applyNodePatch, applyDeprecateMarker, stripDeprecateMarker } from "../src/store/store.ts";
 import type { GmNode } from "../src/types.ts";
 
 const baseNode: Pick<GmNode, "description" | "content"> = {
@@ -62,5 +62,30 @@ describe("applyDeprecateMarker (gm_update mode=deprecate)", () => {
     const result = applyDeprecateMarker(long);
     expect(result).toBe(`[DEPRECATED] ${long}`);
     expect(result.endsWith(long)).toBe(true);
+  });
+});
+
+describe("stripDeprecateMarker (decay 自动弃用节点复活时还原描述)", () => {
+  it("剥掉 [DEPRECATED] 前缀，还原原文", () => {
+    expect(stripDeprecateMarker("[DEPRECATED] 处理 PDF 提取")).toBe("处理 PDF 提取");
+  });
+
+  it("空描述的标记 [DEPRECATED]（无尾随空格）还原为空串", () => {
+    expect(stripDeprecateMarker("[DEPRECATED]")).toBe("");
+  });
+
+  it("无前缀的描述原样返回", () => {
+    expect(stripDeprecateMarker("普通描述")).toBe("普通描述");
+    expect(stripDeprecateMarker("")).toBe("");
+  });
+
+  it("描述中间出现 [DEPRECATED] 子串时只剥前缀", () => {
+    expect(stripDeprecateMarker("[DEPRECATED] 讨论了 [DEPRECATED] 标记的用法"))
+      .toBe("讨论了 [DEPRECATED] 标记的用法");
+  });
+
+  it("与 applyDeprecateMarker 互逆（非空描述）", () => {
+    const desc = "与遗忘曲线联动的生命周期";
+    expect(stripDeprecateMarker(applyDeprecateMarker(desc))).toBe(desc);
   });
 });

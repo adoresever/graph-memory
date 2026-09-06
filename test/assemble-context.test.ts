@@ -11,12 +11,14 @@ function makeNode(overrides: Partial<GmNode>): GmNode {
     description: "description",
     content: "content",
     status: "active",
+    tier: "working",
     validatedCount: 1,
     sourceSessions: ["test"],
     communityId: null,
     pagerank: 0,
     createdAt: now,
     updatedAt: now,
+    lastAccessedAt: now,
     ...overrides,
   };
 }

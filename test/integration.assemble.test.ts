@@ -24,12 +24,14 @@ function makeNode(over: Partial<GmNode>): GmNode {
     description: over.description ?? "desc",
     content: over.content ?? "content body",
     status: over.status ?? "active",
+    tier: over.tier ?? "working",
     validatedCount: over.validatedCount ?? 1,
     sourceSessions: over.sourceSessions ?? ["s1"],
     communityId: over.communityId ?? null,
     pagerank: over.pagerank ?? 0,
     createdAt: over.createdAt ?? Date.now(),
     updatedAt: over.updatedAt ?? Date.now(),
+    lastAccessedAt: over.lastAccessedAt ?? Date.now(),
   };
 }
 

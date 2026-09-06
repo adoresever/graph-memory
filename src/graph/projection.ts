@@ -1,12 +1,8 @@
 import type { Session } from "neo4j-driver";
+import { EDGE_TYPES } from "../types.ts";
 
-const KNOWLEDGE_REL_TYPES = [
-  "USED_SKILL",
-  "SOLVED_BY",
-  "REQUIRES",
-  "PATCHES",
-  "CONFLICTS_WITH",
-] as const;
+/** 知识边类型白名单（事实源 types.ts 的 EDGE_TYPES，勿另维护字面量副本） */
+const KNOWLEDGE_REL_TYPES: readonly string[] = [...EDGE_TYPES];
 
 export async function getExistingActiveRelTypes(session: Session): Promise<string[]> {
   const result = await session.run(`

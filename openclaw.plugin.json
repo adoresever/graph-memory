@@ -23,12 +23,62 @@
         }
       },
       "compactTurnCount": { "type": "number", "default": 6 },
-      "recallMaxNodes": { "type": "number", "default": 3 },
+      "recallMaxNodes": { "type": "number", "default": 6 },
       "recallMaxDepth": { "type": "number", "default": 2 },
-      "freshTailCount": { "type": "number", "default": 10 },
+      "freshTailCount": { "type": "number", "default": 5, "description": "assemble 转录保留的最近轮数（裁剪窗口）" },
       "dedupThreshold": { "type": "number", "default": 0.90 },
       "pagerankDamping": { "type": "number", "default": 0.85 },
       "pagerankIterations": { "type": "number", "default": 20 },
+      "decay": {
+        "type": "object",
+        "description": "柔性衰减：三因子加权评分（recency+frequency+intrinsic）+ tier 双向转换（core/working/peripheral），以及两阶段生命周期（长期未用的 peripheral 低分节点自动断联弃用；弃用超期的节点硬删释放存储）。完整公式与调参指南见 docs/decay.md。recencyWeight + frequencyWeight + intrinsicWeight 推荐和为 1（运行时会自动归一化）。",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true, "description": "是否启用自动衰减。关闭后 tier 永久保持初始 working 状态，且自动弃用（autoDeprecate）一并停用。" },
+          "recencyHalfLifeDays": { "type": "number", "default": 30, "description": "Recency 半衰期（天）。effectiveHL = halfLife * exp(importanceModulation * importance)。" },
+          "recencyWeight": { "type": "number", "default": 0.4, "description": "Recency 在 composite 中的权重。三个权重推荐和为 1。" },
+          "importanceModulation": { "type": "number", "default": 1.5, "description": "半衰期调制系数；越大则高 importance 节点衰减越慢。" },
+          "frequencyWeight": { "type": "number", "default": 0.3, "description": "Frequency 在 composite 中的权重。三个权重推荐和为 1。" },
+          "intrinsicWeight": { "type": "number", "default": 0.3, "description": "Intrinsic（importance × confidence）在 composite 中的权重。三个权重推荐和为 1。" },
+          "betaCore": { "type": "number", "default": 0.8, "description": "core tier 的 Weibull 形状参数；<1 = 缓衰。" },
+          "betaWorking": { "type": "number", "default": 1.0, "description": "working tier 的 Weibull 形状参数；=1 = 标准指数衰减。" },
+          "betaPeripheral": { "type": "number", "default": 1.3, "description": "peripheral tier 的 Weibull 形状参数；>1 = 加速衰减。" },
+          "coreAccessThreshold": { "type": "number", "default": 10, "description": "working→core 所需的最低 validatedCount。" },
+          "coreCompositeThreshold": { "type": "number", "default": 0.7, "description": "working→core 所需的最低 composite 分数。" },
+          "coreImportanceThreshold": { "type": "number", "default": 0.8, "description": "working→core 所需的最低归一化 importance。" },
+          "peripheralCompositeThreshold": { "type": "number", "default": 0.15, "description": "composite 低于此值触发 demote（core→working 或 working→peripheral）。" },
+          "peripheralAgeDays": { "type": "number", "default": 60, "description": "working→peripheral 的年龄阈值（同时 validatedCount < workingAccessThreshold 才触发）。" },
+          "workingAccessThreshold": { "type": "number", "default": 3, "description": "demote（count 不足时）/ promote（count 充足时）的 access 次数分界。" },
+          "workingCompositeThreshold": { "type": "number", "default": 0.4, "description": "peripheral→working 所需的最低 composite 分数。" },
+          "autoDeprecate": { "type": "boolean", "default": true, "description": "遗忘曲线自动弃用（两阶段生命周期·阶段一）：tier=peripheral 且 composite 低于 peripheralCompositeThreshold 且超过 autoDeprecateAfterDays 天未访问的节点，维护时自动切断所有边并标记 deprecated。受 enabled 总开关约束。被重新提取/编辑命中时自动复活。" },
+          "autoDeprecateAfterDays": { "type": "number", "default": 30, "description": "自动弃用的未访问天数门槛（距 lastAccessedAt）。" },
+          "purgeAfterDays": { "type": "number", "default": 60, "description": "两阶段生命周期·阶段二：deprecated 节点自弃用起超过该天数后硬删（DETACH DELETE，向量随节点移除）。0 = 永不硬删。适用于所有 deprecated 节点（含手动弃用与合并产物）。" }
+        }
+      },
+      "cron": {
+        "type": "object",
+        "description": "cron 定时会话的图谱行为开关（host 将 cron 标记放在 sessionKey 上，形如 agent:<agentId>:cron:<jobId>）。默认全部启用，与普通会话一致。注意：cron 任务若显式设置自定义 sessionKey，则无法被识别为 cron 会话。",
+        "properties": {
+          "enabled": { "type": "boolean", "default": true, "description": "是否在 cron session 内启用图谱功能（召回注入 + 消息入库）。关闭后 cron 会话不自动召回、不自动入库；gm_* 工具仍可手动调用。" },
+          "extract": { "type": "boolean", "default": true, "description": "是否在 cron session 内触发知识提取（afterTurn / compact 的 LLM 三元组提取）。关闭后消息仍入库缓冲，可用 openclaw graph-memory extract 手动回填。" },
+          "finalizeAndMaintain": { "type": "boolean", "default": true, "description": "cron session 结束时是否执行 finalize（EVENT→SKILL 晋升）和图维护（decay/PageRank/社区检测）。频繁的 cron 任务可关闭以避免每次结束都跑全局维护。" }
+        }
+      },
+      "messageRetention": {
+        "type": "object",
+        "description": "原始消息（GmMessage）有界保留策略。默认 keep=all 永不删除；上下文压缩不构成删除持久证据的授权。挂在图维护链尾部，每个维护周期最多处理 batchSize 行。建议先配 dryRun=true 观察候选集再实际启用。",
+        "properties": {
+          "keep": {
+            "type": "string",
+            "enum": ["all", "referenced", "recent"],
+            "default": "all",
+            "description": "all=全部保留（默认）；referenced=只删已提取完成且实际产出知识的消息（producedKnowledge=true，知识已固化进图谱；LLM 空提取的轮次保留原始证据，重挖需手动重置 extracted 后跑 graph-memory extract）；recent=在 referenced 基础上按时间窗保护最近内容（需配 recentTurns 或 retentionDays）"
+          },
+          "recentTurns": { "type": "number", "default": 0, "description": "keep=recent：每 session 保留最近 N 轮真实用户发言（该轮及其后的全部消息保留）。" },
+          "retentionDays": { "type": "number", "default": 0, "description": "keep=recent：保留最近 N 天内入库的消息。" },
+          "batchSize": { "type": "number", "default": 500, "description": "单个维护周期最多处理的行数（1~10000），保证维护链工作有界。" },
+          "dryRun": { "type": "boolean", "default": false, "description": "true 时只报告候选集不删除 —— 启用前先跑一轮 dryRun 验证。" }
+        }
+      },
       "llm": {
         "type": "object",
         "properties": {

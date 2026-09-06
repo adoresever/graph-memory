@@ -91,6 +91,12 @@ jobs:
         run: npm test
         env:
           NEO4J_INTEGRATION: "1"
+          # 集成测试（尤其删除类的 retention 测试）要求显式指定 URI；
+          # runner 上的 service container 是一次性实例，7687 安全
+          NEO4J_TEST_URI: bolt://localhost:7687
+          # 与 service 的 NEO4J_AUTH 保持同一来源，供可配置凭据的测试使用。
+          NEO4J_TEST_USER: neo4j
+          NEO4J_TEST_PASSWORD: graphmemory
           CI: "true"
 
   shellcheck:
