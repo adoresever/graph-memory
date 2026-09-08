@@ -321,7 +321,8 @@ function userMsg(seq: number, text: string) {
   };
 }
 
-const EMPTY_EXTRACTION = '{"nodes":[],"edges":[],"invalidations":[]}';
+const EMPTY_EXTRACTION = '{"turn":{"summary":"question was answered","outcome":"informational","sourceTurns":[1]},"nodes":[],"edges":[],"invalidations":[]}';
+const TURN_TWO_EMPTY_EXTRACTION = '{"turn":{"summary":"new question was answered","outcome":"informational","sourceTurns":[2]},"nodes":[],"edges":[],"invalidations":[]}';
 
 function structuredExtraction(argumentsJson: string) {
   return {
@@ -404,7 +405,7 @@ describe("DSH completed-turn memory extraction", () => {
     };
     const { context, listeners, cleanups } = adapterContext(async function* (options: any) {
       requests.push(options);
-      yield structuredExtraction(EMPTY_EXTRACTION);
+      yield structuredExtraction(TURN_TWO_EMPTY_EXTRACTION);
       yield { type: "finish", reason: { kind: "tool-calls" } };
     });
     context.agents = {
@@ -502,13 +503,20 @@ describe("DSH completed-turn memory extraction", () => {
     expect(requests[0].reasoningEffort).toBe("off");
     expect(requests[0].tools).toHaveLength(1);
     expect(requests[0].tools[0].name).toBe(GRAPH_EXTRACTION_TOOL_NAME);
-    expect(requests[0].tools[0].parameters.required).toEqual(["nodes", "edges", "invalidations"]);
+    expect(requests[0].tools[0].parameters.required).toEqual(["turn", "nodes", "edges", "invalidations"]);
     const prompt = requests[0].messages[0].content[0].text;
     expect(prompt).toContain("What should we remember?");
     expect(prompt).toContain("Remember the verified final result.");
     expect(prompt).not.toContain("private chain of thought");
     expect(prompt).not.toContain("large tool output");
     expect(prompt).not.toContain("final hidden reasoning");
+    const stored = new DatabaseSync(dbPath);
+    try {
+      expect((stored.prepare("SELECT COUNT(*) AS c FROM gm_turn_memories").get() as any).c).toBe(1);
+      expect((stored.prepare("SELECT COUNT(*) AS c FROM gm_turn_memory_sources").get() as any).c).toBe(2);
+    } finally {
+      stored.close();
+    }
 
     await Promise.all(cleanups.map(cleanup => cleanup()));
     rmSync(dir, { recursive: true, force: true });
@@ -623,6 +631,7 @@ describe("DSH completed-turn memory extraction", () => {
     const requests: any[] = [];
     const outputs = [
       JSON.stringify({
+        turn: { summary: "项目端口确认为 8080。", outcome: "informational", sourceTurns: [1] },
         nodes: [{
           type: "EVENT", name: "project-port", description: "项目当前端口",
           content: "端口是 8080", operation: "create",
@@ -631,6 +640,7 @@ describe("DSH completed-turn memory extraction", () => {
         edges: [], invalidations: [],
       }),
       JSON.stringify({
+        turn: { summary: "项目端口从 8080 修订为 9090。", outcome: "completed", sourceTurns: [2] },
         nodes: [{
           type: "EVENT", name: "project-port", description: "项目当前端口",
           content: "端口是 9090", operation: "revise",

@@ -1,4 +1,4 @@
-import type { GmNode } from "../types.ts";
+import type { GmNode, GmTurnMemory } from "../types.ts";
 import type { GmNodeSource } from "../store/store.ts";
 
 /** Keep recalled history before the live human instruction on the model surface. */
@@ -35,4 +35,16 @@ export function filterDshRecallNodes(
     if (refs.length) return refs.some(ref => !visibleMessageIds.has(ref.messageId));
     return hasArchivedHistory;
   });
+}
+
+/** Avoid replaying a compact summary whose exact Q/A is still visible. */
+export function filterDshRecallMemories(
+  memories: GmTurnMemory[],
+  currentSession: string,
+  visibleMessageIds: ReadonlySet<string>,
+): GmTurnMemory[] {
+  return memories.filter(memory =>
+    memory.sessionId !== currentSession ||
+    memory.sources.some(source => !visibleMessageIds.has(source.messageId))
+  );
 }

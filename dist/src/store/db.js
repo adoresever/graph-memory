@@ -77,11 +77,43 @@ function migrate(db) {
         m12_extraction_turn_watermark,
         m13_generic_navigation_edges,
         m14_temporal_revisions,
+        m15_turn_memories,
     ];
     for (let i = cur; i < steps.length; i++) {
         steps[i](db);
         db.prepare("INSERT INTO _migrations (v,at) VALUES (?,?)").run(i + 1, Date.now());
     }
+}
+// ─── 分层轮次记忆：摘要索引 → 图谱导航 → 原始消息证据 ──────
+function m15_turn_memories(db) {
+    db.exec(`
+    CREATE TABLE IF NOT EXISTS gm_turn_memories (
+      id          TEXT PRIMARY KEY,
+      session_id  TEXT NOT NULL,
+      summary     TEXT NOT NULL,
+      outcome     TEXT NOT NULL CHECK(outcome IN ('completed','partial','failed','informational','unknown')),
+      created_at  INTEGER NOT NULL,
+      updated_at  INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS ix_gm_turn_memories_session
+      ON gm_turn_memories(session_id, updated_at);
+
+    CREATE TABLE IF NOT EXISTS gm_turn_memory_sources (
+      memory_id   TEXT NOT NULL REFERENCES gm_turn_memories(id) ON DELETE CASCADE,
+      message_id  TEXT NOT NULL REFERENCES gm_messages(id) ON DELETE CASCADE,
+      turn_index  INTEGER NOT NULL,
+      source_order INTEGER NOT NULL,
+      PRIMARY KEY (memory_id, message_id)
+    );
+    CREATE INDEX IF NOT EXISTS ix_gm_turn_memory_sources_message
+      ON gm_turn_memory_sources(message_id, memory_id);
+
+    CREATE TABLE IF NOT EXISTS gm_turn_vectors (
+      memory_id    TEXT PRIMARY KEY REFERENCES gm_turn_memories(id) ON DELETE CASCADE,
+      content_hash TEXT NOT NULL,
+      embedding    BLOB NOT NULL
+    );
+  `);
 }
 // ─── 时间语义与通用修订关系 ──────────────────────────────────
 function m14_temporal_revisions(db) {

@@ -24,6 +24,11 @@ describe("OpenClaw completed-turn extraction", () => {
     const dir = mkdtempSync(join(tmpdir(), "gm-openclaw-turn-"));
     const dbPath = join(dir, "memory.db");
     const payload = {
+      turn: {
+        summary: "用户要求记住结果，最终回答给出了已验证结果。",
+        outcome: "completed",
+        sourceTurns: [1, 2],
+      },
       nodes: [{
         type: "EVENT",
         name: "verified-result",
@@ -68,6 +73,8 @@ describe("OpenClaw completed-turn extraction", () => {
     ).get() as any).count) === 2);
     expect((db.prepare("SELECT COUNT(*) AS count FROM gm_nodes").get() as any).count).toBe(1);
     expect((db.prepare("SELECT COUNT(*) AS count FROM gm_node_sources").get() as any).count).toBe(2);
+    expect((db.prepare("SELECT COUNT(*) AS count FROM gm_turn_memories").get() as any).count).toBe(1);
+    expect((db.prepare("SELECT COUNT(*) AS count FROM gm_turn_memory_sources").get() as any).count).toBe(2);
 
     await engine.dispose();
     closeDb();

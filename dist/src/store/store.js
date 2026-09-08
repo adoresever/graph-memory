@@ -9,6 +9,25 @@ import { createHash } from "crypto";
 function uid(p) {
     return `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
+function embeddingBlob(vector) {
+    const values = new Float32Array(vector);
+    return new Uint8Array(values.buffer, values.byteOffset, values.byteLength);
+}
+function vectorNorm(vector) {
+    return Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
+}
+function cosineSimilarity(query, queryNorm, raw) {
+    const vector = new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
+    if (vector.length !== query.length)
+        return Number.NEGATIVE_INFINITY;
+    let dot = 0;
+    let candidateSquaredNorm = 0;
+    for (let index = 0; index < query.length; index += 1) {
+        dot += vector[index] * query[index];
+        candidateSquaredNorm += vector[index] * vector[index];
+    }
+    return dot / (Math.sqrt(candidateSquaredNorm) * queryNorm + 1e-9);
+}
 function toNode(r) {
     return {
         id: r.id, type: r.type, name: r.name,
@@ -216,7 +235,7 @@ function fts5Available(db) {
         return false;
     }
 }
-export function searchNodes(db, query, limit = 6) {
+export function searchNodes(db, query, limit = 6, withoutTurnMemory = false) {
     const terms = Array.from(new Set(query.trim().split(/\s+/).filter(Boolean)));
     if (!terms.length)
         return topNodes(db, limit);
@@ -227,6 +246,12 @@ export function searchNodes(db, query, limit = 6) {
         SELECT n.*, rank FROM gm_nodes_fts fts
         JOIN gm_nodes n ON n.rowid = fts.rowid
         WHERE gm_nodes_fts MATCH ? AND n.status = 'active'
+          ${withoutTurnMemory ? `AND NOT EXISTS (
+            SELECT 1 FROM gm_node_sources node_source
+            JOIN gm_turn_memory_sources memory_source
+              ON memory_source.message_id=node_source.message_id
+            WHERE node_source.node_id=n.id
+          )` : ""}
         ORDER BY rank LIMIT ?
       `).all(ftsQuery, limit);
             if (rows.length > 0)
@@ -237,7 +262,13 @@ export function searchNodes(db, query, limit = 6) {
     const where = terms.map(() => "(name LIKE ? OR description LIKE ? OR content LIKE ?)").join(" OR ");
     const likes = terms.flatMap(t => [`%${t}%`, `%${t}%`, `%${t}%`]);
     return db.prepare(`
-    SELECT * FROM gm_nodes WHERE status='active' AND (${where})
+    SELECT * FROM gm_nodes n WHERE status='active' AND (${where})
+      ${withoutTurnMemory ? `AND NOT EXISTS (
+        SELECT 1 FROM gm_node_sources node_source
+        JOIN gm_turn_memory_sources memory_source
+          ON memory_source.message_id=node_source.message_id
+        WHERE node_source.node_id=n.id
+      )` : ""}
     ORDER BY pagerank DESC, validated_count DESC, updated_at DESC LIMIT ?
   `).all(...likes, limit).map(toNode);
 }
@@ -504,6 +535,169 @@ export function extractStoredText(value) {
         return extractStoredText(record.message);
     return "";
 }
+// ─── 分层轮次记忆 ──────────────────────────────────────────
+function toTurnMemory(db, row) {
+    const sources = db.prepare(`
+    SELECT message_id, turn_index
+    FROM gm_turn_memory_sources
+    WHERE memory_id=?
+    ORDER BY source_order
+  `).all(row.id).map(source => ({
+        messageId: String(source.message_id),
+        turnIndex: Number(source.turn_index),
+    }));
+    return {
+        id: String(row.id),
+        sessionId: String(row.session_id),
+        summary: String(row.summary),
+        outcome: row.outcome,
+        sources,
+        createdAt: Number(row.created_at),
+        updatedAt: Number(row.updated_at),
+    };
+}
+function turnMemoryId(sessionId, sources) {
+    const sourceKey = sources.map(source => source.messageId).sort().join("\0");
+    const digest = createHash("sha256").update(`${sessionId}\0${sourceKey}`).digest("hex");
+    return `tm-${digest.slice(0, 32)}`;
+}
+/** Store one compact index while retaining exact message provenance. */
+export function upsertTurnMemory(db, input) {
+    if (!input.sources.length)
+        throw new Error("turn memory requires at least one durable source message");
+    const id = turnMemoryId(input.sessionId, input.sources);
+    const now = Date.now();
+    db.prepare(`
+    INSERT INTO gm_turn_memories (id, session_id, summary, outcome, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      summary=excluded.summary,
+      outcome=excluded.outcome,
+      updated_at=excluded.updated_at
+  `).run(id, input.sessionId, input.summary, input.outcome, now, now);
+    const link = db.prepare(`
+    INSERT OR IGNORE INTO gm_turn_memory_sources (memory_id, message_id, turn_index, source_order)
+    SELECT ?, id, turn_index, ? FROM gm_messages WHERE id=?
+  `);
+    input.sources.forEach((source, index) => link.run(id, index, source.messageId));
+    const row = db.prepare("SELECT * FROM gm_turn_memories WHERE id=?").get(id);
+    return toTurnMemory(db, row);
+}
+export function getTurnMemoriesByIds(db, ids) {
+    const memories = [];
+    const statement = db.prepare("SELECT * FROM gm_turn_memories WHERE id=?");
+    for (const id of ids) {
+        const row = statement.get(id);
+        if (row)
+            memories.push(toTurnMemory(db, row));
+    }
+    return memories;
+}
+export function hasTurnMemories(db) {
+    return Number(db.prepare("SELECT COUNT(*) AS count FROM gm_turn_memories").get()?.count ?? 0) > 0;
+}
+/** Lexical fallback for hosts without a working embedding provider. */
+export function searchTurnMemories(db, query, limit) {
+    const phrase = query.trim().replace(/\s+/g, " ");
+    if (!phrase)
+        return [];
+    // Semantic search handles paraphrases. The lexical fallback deliberately
+    // requires the complete phrase; OR-ing common words such as "is"/"the"
+    // turns a fallback into another source of unrelated prompt injection.
+    const rows = db.prepare(`
+    SELECT * FROM gm_turn_memories
+    WHERE summary LIKE ?
+    ORDER BY updated_at DESC
+    LIMIT ?
+  `).all(`%${phrase}%`, limit);
+    return rows.map(row => toTurnMemory(db, row));
+}
+export function saveTurnVector(db, memoryId, content, vec) {
+    const hash = createHash("md5").update(content).digest("hex");
+    db.prepare(`
+    INSERT INTO gm_turn_vectors (memory_id, content_hash, embedding)
+    VALUES (?, ?, ?)
+    ON CONFLICT(memory_id) DO UPDATE SET
+      content_hash=excluded.content_hash,
+      embedding=excluded.embedding
+  `).run(memoryId, hash, embeddingBlob(vec));
+}
+export function getTurnVectorHash(db, memoryId) {
+    return db.prepare("SELECT content_hash FROM gm_turn_vectors WHERE memory_id=?").get(memoryId)
+        ?.content_hash ?? null;
+}
+export function turnMemoryVectorSearchWithScore(db, queryVec, limit, minScore) {
+    const rows = db.prepare(`
+    SELECT v.embedding, m.*
+    FROM gm_turn_vectors v
+    JOIN gm_turn_memories m ON m.id=v.memory_id
+  `).all();
+    if (!rows.length)
+        return [];
+    const query = new Float32Array(queryVec);
+    const queryNorm = vectorNorm(query);
+    if (queryNorm === 0)
+        return [];
+    return rows.map(row => ({
+        memory: toTurnMemory(db, row),
+        score: cosineSimilarity(query, queryNorm, row.embedding),
+    })).filter(result => result.score >= minScore)
+        .sort((left, right) => right.score - left.score)
+        .slice(0, limit);
+}
+/** Resolve graph navigation nodes whose evidence belongs to matched turns. */
+export function nodesForTurnMemories(db, memoryIds, limit) {
+    const results = [];
+    const seen = new Set();
+    const statement = db.prepare(`
+    SELECT DISTINCT n.*
+    FROM gm_turn_memory_sources memory_source
+    JOIN gm_node_sources node_source ON node_source.message_id=memory_source.message_id
+    JOIN gm_nodes n ON n.id=node_source.node_id
+    WHERE memory_source.memory_id=? AND n.status='active'
+    ORDER BY n.updated_at DESC
+  `);
+    for (const memoryId of memoryIds) {
+        for (const row of statement.all(memoryId)) {
+            if (seen.has(row.id))
+                continue;
+            seen.add(row.id);
+            results.push(toNode(row));
+            if (results.length >= limit)
+                return results;
+        }
+    }
+    return results;
+}
+/** Read exact Q/A evidence for matched compact memories. */
+export function getTurnMemorySourceMessages(db, memoryId, excludedMessageIds = new Set()) {
+    const rows = db.prepare(`
+    SELECT m.id, tm.session_id, source.turn_index, m.role, m.content, m.created_at
+    FROM gm_turn_memory_sources source
+    JOIN gm_turn_memories tm ON tm.id=source.memory_id
+    JOIN gm_messages m ON m.id=source.message_id
+    WHERE source.memory_id=?
+    ORDER BY source.source_order
+  `).all(memoryId);
+    return rows.flatMap(row => {
+        if (excludedMessageIds.has(String(row.id)))
+            return [];
+        let text = "";
+        try {
+            text = extractStoredText(JSON.parse(row.content));
+        }
+        catch {
+            text = String(row.content);
+        }
+        return text.trim() ? [{
+                sessionId: String(row.session_id),
+                turnIndex: Number(row.turn_index),
+                role: String(row.role),
+                text,
+                createdAt: Number(row.created_at),
+            }] : [];
+    });
+}
 // ─── 统计 ────────────────────────────────────────────────────
 export function getStats(db) {
     const totalNodes = db.prepare("SELECT COUNT(*) as c FROM gm_nodes WHERE status='active'").get().c;
@@ -522,11 +716,9 @@ export function getStats(db) {
 // ─── 向量存储 + 搜索 ────────────────────────────────────────
 export function saveVector(db, nodeId, content, vec) {
     const hash = createHash("md5").update(content).digest("hex");
-    const f32 = new Float32Array(vec);
-    const blob = new Uint8Array(f32.buffer, f32.byteOffset, f32.byteLength);
     db.prepare(`INSERT INTO gm_vectors (node_id, content_hash, embedding) VALUES (?,?,?)
     ON CONFLICT(node_id) DO UPDATE SET content_hash=excluded.content_hash, embedding=excluded.embedding`)
-        .run(nodeId, hash, blob);
+        .run(nodeId, hash, embeddingBlob(vec));
 }
 export function getVectorHash(db, nodeId) {
     return db.prepare("SELECT content_hash FROM gm_vectors WHERE node_id=?").get(nodeId)?.content_hash ?? null;
@@ -537,31 +729,29 @@ export function getVectorStats(db) {
     const dimensions = [...new Set(rows.map((row) => row.embedding.byteLength / 4))].sort((a, b) => a - b);
     return { count, dimensions };
 }
-export function vectorSearchWithScore(db, queryVec, limit, minScore) {
+export function vectorSearchWithScore(db, queryVec, limit, minScore, withoutTurnMemory = false) {
     const rows = db.prepare(`
     SELECT v.node_id, v.embedding, n.*
     FROM gm_vectors v JOIN gm_nodes n ON n.id = v.node_id
     WHERE n.status = 'active'
+      ${withoutTurnMemory ? `AND NOT EXISTS (
+        SELECT 1 FROM gm_node_sources node_source
+        JOIN gm_turn_memory_sources memory_source
+          ON memory_source.message_id=node_source.message_id
+        WHERE node_source.node_id=n.id
+      )` : ""}
   `).all();
     if (!rows.length)
         return [];
     const q = new Float32Array(queryVec);
-    const qNorm = Math.sqrt(q.reduce((s, x) => s + x * x, 0));
+    const qNorm = vectorNorm(q);
     if (qNorm === 0)
         return [];
     return rows
-        .map(row => {
-        const raw = row.embedding;
-        const v = new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
-        let dot = 0, vNorm = 0;
-        if (v.length !== q.length)
-            return { score: Number.NEGATIVE_INFINITY, node: toNode(row) };
-        for (let i = 0; i < q.length; i++) {
-            dot += v[i] * q[i];
-            vNorm += v[i] * v[i];
-        }
-        return { score: dot / (Math.sqrt(vNorm) * qNorm + 1e-9), node: toNode(row) };
-    })
+        .map(row => ({
+        score: cosineSimilarity(q, qNorm, row.embedding),
+        node: toNode(row),
+    }))
         .filter(s => minScore === undefined || s.score >= minScore)
         .sort((a, b) => b.score - a.score)
         .slice(0, limit);

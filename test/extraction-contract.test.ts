@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { assertGraphExtractionContract } from "../src/extractor/contract.ts";
 
 const validPayload = {
+  turn: {
+    summary: "本轮确认当前发布状态。",
+    outcome: "informational",
+    sourceTurns: [1],
+  },
   nodes: [{
     type: "EVENT",
     name: "current-release-state",

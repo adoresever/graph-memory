@@ -141,6 +141,32 @@ export function createTestDb(): DatabaseSyncInstance {
     );
   `);
 
+  // m15: compact per-turn memory index and provenance
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gm_turn_memories (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      outcome TEXT NOT NULL CHECK(outcome IN ('completed','partial','failed','informational','unknown')),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS ix_gm_turn_memories_session
+      ON gm_turn_memories(session_id, updated_at);
+    CREATE TABLE IF NOT EXISTS gm_turn_memory_sources (
+      memory_id TEXT NOT NULL REFERENCES gm_turn_memories(id) ON DELETE CASCADE,
+      message_id TEXT NOT NULL REFERENCES gm_messages(id) ON DELETE CASCADE,
+      turn_index INTEGER NOT NULL,
+      source_order INTEGER NOT NULL,
+      PRIMARY KEY (memory_id, message_id)
+    );
+    CREATE TABLE IF NOT EXISTS gm_turn_vectors (
+      memory_id TEXT PRIMARY KEY REFERENCES gm_turn_memories(id) ON DELETE CASCADE,
+      content_hash TEXT NOT NULL,
+      embedding BLOB NOT NULL
+    );
+  `);
+
   // m6: 社区摘要
   db.exec(`
     CREATE TABLE IF NOT EXISTS gm_communities (

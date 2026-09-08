@@ -18,6 +18,7 @@ import {
   upsertNode, upsertEdge, findByName, updateNode,
   getBySession,
   deprecate, getStats,
+  upsertTurnMemory,
 } from "./src/store/store.ts";
 import { createCompleteFn } from "./src/engine/llm.ts";
 import { createEmbedFn } from "./src/engine/embed.ts";
@@ -144,7 +145,13 @@ const graphMemoryPlugin = {
       api.pluginConfig && typeof api.pluginConfig === "object"
         ? (api.pluginConfig as any)
         : {};
-    const cfg: GmConfig = { ...DEFAULT_CONFIG, ...raw };
+    const cfg: GmConfig = {
+      ...DEFAULT_CONFIG,
+      ...raw,
+      // An omitted/undefined threshold must never turn automatic semantic
+      // recall into unconditional nearest-neighbour injection.
+      semanticScoreThreshold: raw.semanticScoreThreshold ?? DEFAULT_CONFIG.semanticScoreThreshold,
+    };
     const { provider, model } = readProviderModel(api.config);
 
     const effectiveModel = cfg.llm?.model ?? model;
@@ -181,7 +188,7 @@ const graphMemoryPlugin = {
 
     // ── Session 运行时状态 ──────────────────────────────────
     const msgSeq = new Map<string, number>();
-    const recalled = new Map<string, { nodes: any[]; edges: any[] }>();
+    const recalled = new Map<string, { nodes: any[]; edges: any[]; turnMemories: any[] }>();
     const turnCounter = new Map<string, number>(); // 社区维护计数器
     const ingestedRowsSinceTurn = new Map<string, any[]>();
 
@@ -230,6 +237,20 @@ const graphMemoryPlugin = {
             messages: sourcePairs,
             existingNames: existing,
           });
+
+          const turnMemory = upsertTurnMemory(db, {
+            sessionId,
+            summary: result.turn.summary,
+            outcome: result.turn.outcome,
+            // A capsule summarizes the complete Q/A pair. Node-level
+            // sourceTurns remain narrower, while the capsule retains both
+            // original endpoints as one auditable evidence bundle.
+            sources: sourcePairs.map(message => ({
+              messageId: String(message.id),
+              turnIndex: Number(message.turn_index),
+            })),
+          });
+          recaller.syncTurnMemoryEmbed(turnMemory).catch(() => {});
 
           // Resolve every declared endpoint before mutating the store. Missing
           // endpoints are a referential-integrity failure, never a silent drop.
@@ -300,13 +321,14 @@ const graphMemoryPlugin = {
 
         await embeddingReady;
         const res = await recaller.recall(prompt);
-        if (res.nodes.length) {
+        if (res.nodes.length || res.turnMemories.length) {
           if (ctx?.sessionId) recalled.set(ctx.sessionId, res);
           if (ctx?.sessionKey && ctx.sessionKey !== ctx?.sessionId) {
             recalled.set(ctx.sessionKey, res);
           }
           api.logger.info(
-            `[graph-memory] recalled ${res.nodes.length} nodes, ${res.edges.length} edges`,
+            `[graph-memory] recalled ${res.turnMemories.length} turn memories, ` +
+            `${res.nodes.length} nodes, ${res.edges.length} edges`,
           );
         }
       } catch (err) {
@@ -357,14 +379,14 @@ const graphMemoryPlugin = {
         // OpenClaw 2026.03.28: use the prompt for a fresh, accurate recall
         // at assembly time instead of relying solely on the pre-cached result
         // from before_agent_start.
-        let rec = recalled.get(sessionId) ?? { nodes: [], edges: [] };
+        let rec = recalled.get(sessionId) ?? { nodes: [], edges: [], turnMemories: [] };
         if (prompt) {
           const cleaned = cleanPrompt(prompt);
           if (cleaned) {
             try {
               await embeddingReady;
               const freshRec = await recaller.recall(cleaned);
-              if (freshRec.nodes.length) {
+              if (freshRec.nodes.length || freshRec.turnMemories.length) {
                 rec = freshRec;
                 recalled.set(sessionId, freshRec);
               }
@@ -377,14 +399,15 @@ const graphMemoryPlugin = {
         // ── 1. 近期问题 + 最终回答；工具/推理轨迹不回灌上下文 ──
         const lastTurn = projectRecentTurns(messages, cfg.freshTurnCount);
 
-        if (rec.nodes.length === 0) {
+        if (rec.nodes.length === 0 && rec.turnMemories.length === 0) {
           return { messages: normalizeMessageContent(lastTurn.messages), estimatedTokens: 0 };
         }
 
         // ── 2. 图谱 + 溯源 ─────────────────────────────
-        const { xml, systemPrompt, episodicXml } = assembleContext(db, {
+        const { xml, systemPrompt, memoryXml, episodicXml } = assembleContext(db, {
           recalledNodes: rec.nodes,
           recalledEdges: rec.edges,
+          recalledMemories: rec.turnMemories,
           freshTurnCount: cfg.freshTurnCount,
         });
 
@@ -398,7 +421,7 @@ const graphMemoryPlugin = {
 
         // ── 3. 组装 systemPrompt ────────────────────────
         let systemPromptAddition: string | undefined;
-        const parts = [systemPrompt, xml, episodicXml].filter(Boolean);
+        const parts = [systemPrompt, memoryXml, xml, episodicXml].filter(Boolean);
         if (parts.length) {
           systemPromptAddition = parts.join("\n\n");
         }
@@ -560,13 +583,16 @@ const graphMemoryPlugin = {
           const { query } = params;
           await embeddingReady;
           const res = await recaller.recall(query);
-          if (!res.nodes.length) {
+          if (!res.nodes.length && !res.turnMemories.length) {
             return {
               content: [{ type: "text", text: "图谱中未找到相关记录。" }],
               details: { count: 0, query },
             };
           }
 
+          const memoryLines = res.turnMemories.map(
+            memory => `[TURN ${memory.outcome}] ${memory.summary}`,
+          );
           const lines = res.nodes.map(
             (n) => `[${n.type}] ${n.name} (pr:${n.pagerank.toFixed(3)})\n${n.description}\n${n.content}`,
           );
@@ -578,6 +604,7 @@ const graphMemoryPlugin = {
 
           const text = [
             `找到 ${res.nodes.length} 个节点：\n`,
+            ...memoryLines,
             ...lines,
             ...(edgeLines.length ? ["\n关系：", ...edgeLines] : []),
           ].join("\n\n");

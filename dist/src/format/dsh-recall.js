@@ -27,3 +27,8 @@ export function filterDshRecallNodes(nodes, sources, currentSession, visibleMess
         return hasArchivedHistory;
     });
 }
+/** Avoid replaying a compact summary whose exact Q/A is still visible. */
+export function filterDshRecallMemories(memories, currentSession, visibleMessageIds) {
+    return memories.filter(memory => memory.sessionId !== currentSession ||
+        memory.sources.some(source => !visibleMessageIds.has(source.messageId)));
+}

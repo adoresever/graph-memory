@@ -19,7 +19,7 @@ describe("local LLM configuration", () => {
         type: "function",
         function: {
           name: "submit_graph_extraction",
-          arguments: '{"nodes":[],"edges":[],"invalidations":[]}',
+          arguments: '{"turn":{"summary":"answer","outcome":"informational","sourceTurns":[1]},"nodes":[],"edges":[],"invalidations":[]}',
         },
       }] } }] }), {
         status: 200,
@@ -32,7 +32,7 @@ describe("local LLM configuration", () => {
       model: "local-model",
     });
 
-    await expect(complete("system", "user")).resolves.toBe('{"nodes":[],"edges":[],"invalidations":[]}');
+    await expect(complete("system", "user")).resolves.toBe('{"turn":{"summary":"answer","outcome":"informational","sourceTurns":[1]},"nodes":[],"edges":[],"invalidations":[]}');
     expect(requests[0].url).toBe("http://127.0.0.1:8080/v1/chat/completions");
     expect(requests[0].headers.has("Authorization")).toBe(false);
     expect(requests[0].body).toMatchObject({ model: "local-model" });

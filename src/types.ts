@@ -16,6 +16,7 @@
 
 export type NodeType = "TASK" | "SKILL" | "EVENT";
 export type NodeStatus = "active" | "deprecated";
+export type TurnOutcome = "completed" | "partial" | "failed" | "informational" | "unknown";
 
 export interface NodeTemporal {
   /** Time stated by the evidence, preserved as written instead of guessed. */
@@ -39,6 +40,21 @@ export interface GmNode {
   sourceSessions: string[];
   communityId: string | null;
   pagerank: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * Compact episodic index for one completed question/final-answer pair.
+ * The exact source messages remain in gm_messages; this record is the first
+ * retrieval surface and never replaces its evidence.
+ */
+export interface GmTurnMemory {
+  id: string;
+  sessionId: string;
+  summary: string;
+  outcome: TurnOutcome;
+  sources: Array<{ messageId: string; turnIndex: number }>;
   createdAt: number;
   updatedAt: number;
 }
@@ -68,6 +84,14 @@ export interface GmEdge {
 // ─── 提取结果 ─────────────────────────────────────────────────
 
 export interface ExtractionResult {
+  turn: {
+    /** One self-contained sentence describing the request and observed result. */
+    summary: string;
+    /** Outcome reported by the completed dialogue; not external verification. */
+    outcome: TurnOutcome;
+    /** Source message turn/event indices supporting the summary and outcome. */
+    sourceTurns: number[];
+  };
   nodes: Array<{
     type: NodeType;
     name: string;
@@ -95,6 +119,8 @@ export interface ExtractionResult {
 export interface RecallResult {
   nodes: GmNode[];
   edges: GmEdge[];
+  /** Query-matched episodic summaries, ordered by retrieval relevance. */
+  turnMemories: GmTurnMemory[];
 }
 
 // ─── Embedding 配置 ──────────────────────────────────────────
@@ -117,7 +143,11 @@ export interface GmConfig {
   compactTurnCount: number;
   /** Maximum query-matched memory nodes returned by one recall. */
   recallMaxNodes: number;
-  /** Optional provider-calibrated cosine floor. Unset means ranked top-k only. */
+  /**
+   * Provider-calibrated cosine floor for automatic prompt injection.
+   * Deliberately required by DEFAULT_CONFIG: ranked top-k alone always returns
+   * a "nearest" memory even when no memory is actually relevant.
+   */
   semanticScoreThreshold?: number;
   /** Number of recent user turns kept as native question/final-answer endpoints on the host context surface. */
   freshTurnCount: number;
@@ -141,6 +171,11 @@ export const DEFAULT_CONFIG: GmConfig = {
   dbPath: "~/.openclaw/graph-memory.db",
   compactTurnCount: 6,
   recallMaxNodes: 6,
+  // Automatic prompt injection optimizes for precision. On the existing
+  // text-embedding-v4 20-turn corpus, 0.70 sits above the p90 different-turn
+  // similarity (0.669) and near the same-turn median (0.721). Other embedding
+  // providers can override this single documented policy value.
+  semanticScoreThreshold: 0.70,
   freshTurnCount: 5,
   pagerankDamping: 0.85,
   pagerankIterations: 20,

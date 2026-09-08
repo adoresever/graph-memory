@@ -10,7 +10,7 @@
  * to the current user question.
  */
 import { createHash } from "crypto";
-import { searchNodes, vectorSearchWithScore, graphWalk, saveVector, getVectorHash, } from "../store/store.js";
+import { searchNodes, vectorSearchWithScore, graphWalk, saveVector, getVectorHash, searchTurnMemories, turnMemoryVectorSearchWithScore, nodesForTurnMemories, saveTurnVector, getTurnVectorHash, hasTurnMemories, } from "../store/store.js";
 export class Recaller {
     db;
     cfg;
@@ -36,16 +36,45 @@ export class Recaller {
                 // temporarily unavailable.
             }
         }
-        return this.recallPrecise(query, limit, queryVector);
+        const turnMemories = this.recallTurnMemories(query, limit, queryVector);
+        if (turnMemories.length) {
+            const nodes = nodesForTurnMemories(this.db, turnMemories.map(memory => memory.id), limit);
+            const { edges } = graphWalk(this.db, nodes.map(node => node.id), 0);
+            return { nodes, edges, turnMemories };
+        }
+        // Databases created before the turn-memory migration remain searchable.
+        // The same confidence rule applies; a legacy node match cannot bypass it.
+        return this.recallPrecise(query, limit, queryVector, hasTurnMemories(this.db));
+    }
+    recallTurnMemories(query, limit, queryVector) {
+        const lexical = searchTurnMemories(this.db, query, limit);
+        const threshold = this.cfg.semanticScoreThreshold;
+        const semantic = queryVector && threshold !== undefined
+            ? turnMemoryVectorSearchWithScore(this.db, queryVector, limit, threshold)
+            : [];
+        const selected = [];
+        const seen = new Set();
+        const append = (memory) => {
+            if (selected.length >= limit || seen.has(memory.id))
+                return;
+            seen.add(memory.id);
+            selected.push(memory);
+        };
+        for (const { memory } of semantic)
+            append(memory);
+        for (const memory of lexical)
+            append(memory);
+        return selected;
     }
     /**
      * Preserve semantic rank. FTS5 contributes exact terms and is the complete
      * fallback when the embedding provider is absent or temporarily fails.
      */
-    async recallPrecise(query, limit, queryVector) {
-        const lexical = searchNodes(this.db, query, limit);
-        const semantic = queryVector
-            ? vectorSearchWithScore(this.db, queryVector, limit, this.cfg.semanticScoreThreshold)
+    async recallPrecise(query, limit, queryVector, legacyOnly = false) {
+        const lexical = searchNodes(this.db, query, limit, legacyOnly);
+        const threshold = this.cfg.semanticScoreThreshold;
+        const semantic = queryVector && threshold !== undefined
+            ? vectorSearchWithScore(this.db, queryVector, limit, threshold, legacyOnly)
             : [];
         const selected = [];
         const selectedIds = new Set();
@@ -60,11 +89,11 @@ export class Recaller {
         for (const node of lexical)
             append(node);
         if (!selected.length)
-            return { nodes: [], edges: [] };
+            return { nodes: [], edges: [], turnMemories: [] };
         // Depth zero asks the store only for edges whose two endpoints are direct
         // query matches. No unrelated graph hub is allowed to enter the prompt.
         const { edges } = graphWalk(this.db, selected.map(node => node.id), 0);
-        return { nodes: selected, edges };
+        return { nodes: selected, edges, turnMemories: [] };
     }
     /** 异步同步 embedding，不阻塞主流程 */
     async syncEmbed(node) {
@@ -80,6 +109,22 @@ export class Recaller {
             const vec = await this.embed(text, "db");
             if (vec.length)
                 saveVector(this.db, node.id, hashInput, vec);
+        }
+        catch { /* 不影响主流程 */ }
+    }
+    /** Keep the compact episodic layer independently searchable. */
+    async syncTurnMemoryEmbed(memory) {
+        if (!this.embed)
+            return;
+        const text = `${memory.outcome}: ${memory.summary}`;
+        const hashInput = this.embeddingFingerprint ? `${this.embeddingFingerprint}\0${text}` : text;
+        const hash = createHash("md5").update(hashInput).digest("hex");
+        if (getTurnVectorHash(this.db, memory.id) === hash)
+            return;
+        try {
+            const vec = await this.embed(text, "db");
+            if (vec.length)
+                saveTurnVector(this.db, memory.id, hashInput, vec);
         }
         catch { /* 不影响主流程 */ }
     }

@@ -39,8 +39,20 @@ const InvalidationSchema = Type.Object({
     name: Type.String({ minLength: 1 }),
     reason: Type.String({ minLength: 1 }),
 }, { additionalProperties: false });
+const TurnMemorySchema = Type.Object({
+    summary: Type.String({ minLength: 1 }),
+    outcome: Type.Union([
+        Type.Literal("completed"),
+        Type.Literal("partial"),
+        Type.Literal("failed"),
+        Type.Literal("informational"),
+        Type.Literal("unknown"),
+    ]),
+    sourceTurns: Type.Array(Type.Integer({ minimum: 1 }), { minItems: 1, uniqueItems: true }),
+}, { additionalProperties: false });
 /** Provider-facing and runtime-facing graph extraction contract. */
 export const GRAPH_EXTRACTION_SCHEMA = Type.Object({
+    turn: TurnMemorySchema,
     nodes: Type.Array(ExtractionNodeSchema),
     edges: Type.Array(ExtractionEdgeSchema),
     invalidations: Type.Array(InvalidationSchema),
@@ -48,7 +60,7 @@ export const GRAPH_EXTRACTION_SCHEMA = Type.Object({
 export const GRAPH_EXTRACTION_TOOL_NAME = "submit_graph_extraction";
 export const GRAPH_EXTRACTION_TOOL = Object.freeze({
     name: GRAPH_EXTRACTION_TOOL_NAME,
-    description: "Submit one Graph Memory extraction. Each nodes item is the node object itself (never wrap it in a node property); each edges item is the edge object itself. Match the parameter schema exactly and emit no text.",
+    description: "Submit one layered Graph Memory extraction: turn is the compact episodic summary, nodes and edges are its evidence-backed graph navigation. Each array item is the object itself. Match the parameter schema exactly and emit no text.",
     parameters: GRAPH_EXTRACTION_SCHEMA,
 });
 /** Fail closed before normalization or persistence when the contract is incomplete. */

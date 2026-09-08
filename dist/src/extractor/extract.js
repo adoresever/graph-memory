@@ -31,7 +31,7 @@ export function normalizeExtractionContent(value) {
 }
 // ─── 提取 System Prompt ─────────────────────────────────────────
 const EXTRACT_SYS = `【角色】
-你是 Graph Memory 的知识图谱抽取器。你的职责是把一轮已完成的 Agent 对话转换为可检索的概念节点和有证据支持的二元关系。
+你是 Graph Memory 的轮次记忆与知识图谱抽取器。你的职责是把一轮已完成的 Agent 对话压缩为一个可检索的极简摘要，再从摘要中的概念建立有证据支持的二元关系。
 
 【任务边界】
 - 抽取输入中明确表达、对后续对话可能有用的知识；不复述整段对话。
@@ -41,14 +41,15 @@ const EXTRACT_SYS = `【角色】
 - 不以节点数量或关系数量为目标，不补齐、不凑数、不为了连通图而创造关系。
 
 【处理流程】
-1. 识别输入中语义明确的知识单元；同一概念合并表达，不同概念分别保留。
-2. 与 Existing Nodes 表示同一概念时复用其 name；否则使用稳定、可读的小写连字符名称。
-3. 按知识本身分类：
+1. 先生成 turn：summary 用一个自包含的简短句子说明“本轮要做什么、实际做了什么、得到什么结果”；它是导航摘要，不复制过程，也不包含推理或工具轨迹。outcome 只描述对话明确报告的结果：completed=明确完成，partial=只完成一部分，failed=明确未完成，informational=仅讨论/问答而无执行成败，unknown=无法判断。sourceTurns 必须覆盖摘要依据。
+2. 再从 summary 中识别语义明确、对后续对话有用的知识单元；同一概念合并表达，不同概念分别保留。具体事实仍必须能由 Conversation 直接验证。
+3. 与 Existing Nodes 表示同一概念时复用其 name；否则使用稳定、可读的小写连字符名称。
+4. 按知识本身分类：
    - TASK：用户任务或需要持续导航的讨论主题。
    - SKILL：已经验证、以后可复用的方法、工具、命令或操作规则。
    - EVENT：事实、偏好、约定、决策、状态、时间、标识符、错误或结果。
-4. 在节点之间提取输入直接表达的二元关系。一个陈述涉及多个节点时，可拆成多条有独立证据的二元关系。
-5. 没有明确关系的节点可以独立存在；没有可保留知识时返回空数组。
+5. 在节点之间提取 summary 明确表达且 Conversation 支持的二元关系。一个陈述涉及多个节点时，可拆成多条有独立证据的二元关系。
+6. 没有明确关系的节点可以独立存在；没有可保留知识时 nodes、edges 返回空数组，但 turn 仍必须记录本轮摘要。
 
 【关系类型】
 - RELATES：通用关系；instruction 使用本轮证据支持的自然语言谓词描述具体关系。
@@ -69,14 +70,14 @@ const EXTRACT_SYS = `【角色】
 【输出要求】
 - 调用结构化工具一次，参数必须完整符合下面的 JSON Schema；不要输出解释文字。
 - 所有 required 字段必须出现，不增加未定义字段。
-- 没有节点、关系或失效项时，对应数组返回 []。
+- turn、nodes、edges、invalidations 都必须出现；没有节点、关系或失效项时，对应数组返回 []。
 - 不确定的知识不输出；格式错误不能用省略字段代替。
 
 【示例：存在明确关系】
-{"nodes":[{"type":"TASK","name":"deploy-service","description":"部署服务","content":"用户要求完成服务部署","operation":"create","temporal":{},"sourceTurns":[1]},{"type":"SKILL","name":"docker-deployment","description":"使用 Docker 部署服务","content":"最终回答确认使用 Docker 完成部署","operation":"create","temporal":{},"sourceTurns":[1]}],"edges":[{"from":"deploy-service","to":"docker-deployment","type":"USED_SKILL","instruction":"部署任务使用 Docker 方法"}],"invalidations":[]}
+{"turn":{"summary":"用户要求部署服务，最终回答确认已使用 Docker 完成部署。","outcome":"completed","sourceTurns":[1]},"nodes":[{"type":"TASK","name":"deploy-service","description":"部署服务","content":"用户要求完成服务部署","operation":"create","temporal":{},"sourceTurns":[1]},{"type":"SKILL","name":"docker-deployment","description":"使用 Docker 部署服务","content":"最终回答确认使用 Docker 完成部署","operation":"create","temporal":{},"sourceTurns":[1]}],"edges":[{"from":"deploy-service","to":"docker-deployment","type":"USED_SKILL","instruction":"部署任务使用 Docker 方法"}],"invalidations":[]}
 
 【示例：没有明确关系】
-{"nodes":[{"type":"EVENT","name":"user-theme-preference","description":"用户的界面主题偏好","content":"用户偏好深色主题","operation":"create","temporal":{"state":"current"},"sourceTurns":[1]}],"edges":[],"invalidations":[]}
+{"turn":{"summary":"用户说明其当前界面主题偏好为深色。","outcome":"informational","sourceTurns":[1]},"nodes":[{"type":"EVENT","name":"user-theme-preference","description":"用户的界面主题偏好","content":"用户偏好深色主题","operation":"create","temporal":{"state":"current"},"sourceTurns":[1]}],"edges":[],"invalidations":[]}
 
 【输出 Schema】
 ${JSON.stringify(GRAPH_EXTRACTION_SCHEMA)}`;
@@ -113,6 +114,10 @@ export class Extractor {
             // infer, rewrite, or reject the model's graph semantics from node types,
             // wording, lifecycle claims, or relation direction.
             return {
+                turn: {
+                    ...p.turn,
+                    sourceTurns: [...p.turn.sourceTurns],
+                },
                 nodes: p.nodes.map(node => ({ ...node, temporal: { ...node.temporal }, sourceTurns: [...node.sourceTurns] })),
                 edges: p.edges.map(edge => ({ ...edge })),
                 invalidations: p.invalidations.map(item => ({ ...item })),

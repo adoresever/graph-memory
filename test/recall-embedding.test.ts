@@ -57,7 +57,11 @@ describe("Recaller.syncEmbed", () => {
     saveVector(db, weak.id, "weak", [0.5, Math.sqrt(0.75)]);
 
     let queryCalls = 0;
-    const recaller = new Recaller(db, { ...DEFAULT_CONFIG, recallMaxNodes: 2 });
+    const recaller = new Recaller(db, {
+      ...DEFAULT_CONFIG,
+      recallMaxNodes: 2,
+      semanticScoreThreshold: 0.5,
+    });
     recaller.setEmbedFn(async (_text, purpose) => {
       if (purpose === "query") queryCalls += 1;
       return [1, 0];
@@ -91,7 +95,11 @@ describe("Recaller.syncEmbed", () => {
       });
     }
 
-    const recaller = new Recaller(db, { ...DEFAULT_CONFIG, recallMaxNodes: 2 });
+    const recaller = new Recaller(db, {
+      ...DEFAULT_CONFIG,
+      recallMaxNodes: 2,
+      semanticScoreThreshold: 0.5,
+    });
     recaller.setEmbedFn(async () => [1, 0]);
     const result = await recaller.recall("specific current question");
 
