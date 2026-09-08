@@ -165,6 +165,24 @@ export function createTestDb(): DatabaseSyncInstance {
       content_hash TEXT NOT NULL,
       embedding BLOB NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS gm_navigation_terms (
+      id TEXT PRIMARY KEY,
+      normalized TEXT NOT NULL UNIQUE,
+      display_text TEXT NOT NULL,
+      community_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS gm_navigation_triples (
+      id TEXT PRIMARY KEY,
+      memory_id TEXT NOT NULL REFERENCES gm_turn_memories(id) ON DELETE CASCADE,
+      session_id TEXT NOT NULL,
+      subject_id TEXT NOT NULL REFERENCES gm_navigation_terms(id),
+      predicate TEXT NOT NULL,
+      object_id TEXT NOT NULL REFERENCES gm_navigation_terms(id),
+      created_at INTEGER NOT NULL,
+      UNIQUE(memory_id, subject_id, predicate, object_id)
+    );
   `);
 
   // m6: 社区摘要

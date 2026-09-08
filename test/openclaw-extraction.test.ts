@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import graphMemoryPlugin from "../index.ts";
+import { GRAPH_EXTRACTION_TOOL_NAME } from "../src/extractor/contract.ts";
 import { closeDb, getDb } from "../src/store/db.ts";
 
 afterEach(() => {
@@ -27,24 +28,17 @@ describe("OpenClaw completed-turn extraction", () => {
       turn: {
         summary: "用户要求记住结果，最终回答给出了已验证结果。",
         outcome: "completed",
-        sourceTurns: [1, 2],
       },
-      nodes: [{
-        type: "EVENT",
-        name: "verified-result",
-        description: "verified result",
-        content: "the final answer is retained",
-        operation: "create",
-        temporal: {},
-        sourceTurns: [1, 2],
+      triples: [{
+        subject: "最终回答",
+        predicate: "保留",
+        object: "已验证结果",
       }],
-      edges: [],
-      invalidations: [],
     };
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
       choices: [{ message: { tool_calls: [{
         type: "function",
-        function: { name: "submit_graph_extraction", arguments: JSON.stringify(payload) },
+        function: { name: GRAPH_EXTRACTION_TOOL_NAME, arguments: JSON.stringify(payload) },
       }] } }],
     }), { status: 200, headers: { "Content-Type": "application/json" } })));
 
@@ -71,8 +65,9 @@ describe("OpenClaw completed-turn extraction", () => {
     await waitFor(() => Number((db.prepare(
       "SELECT COUNT(*) AS count FROM gm_messages WHERE extraction_state='succeeded'",
     ).get() as any).count) === 2);
-    expect((db.prepare("SELECT COUNT(*) AS count FROM gm_nodes").get() as any).count).toBe(1);
-    expect((db.prepare("SELECT COUNT(*) AS count FROM gm_node_sources").get() as any).count).toBe(2);
+    expect((db.prepare("SELECT COUNT(*) AS count FROM gm_nodes").get() as any).count).toBe(0);
+    expect((db.prepare("SELECT COUNT(*) AS count FROM gm_navigation_terms").get() as any).count).toBe(2);
+    expect((db.prepare("SELECT COUNT(*) AS count FROM gm_navigation_triples").get() as any).count).toBe(1);
     expect((db.prepare("SELECT COUNT(*) AS count FROM gm_turn_memories").get() as any).count).toBe(1);
     expect((db.prepare("SELECT COUNT(*) AS count FROM gm_turn_memory_sources").get() as any).count).toBe(2);
 

@@ -10,7 +10,7 @@
  * to the current user question.
  */
 import { createHash } from "crypto";
-import { searchNodes, vectorSearchWithScore, graphWalk, saveVector, getVectorHash, searchTurnMemories, turnMemoryVectorSearchWithScore, nodesForTurnMemories, saveTurnVector, getTurnVectorHash, hasTurnMemories, } from "../store/store.js";
+import { searchNodes, vectorSearchWithScore, graphWalk, saveVector, getVectorHash, searchTurnMemories, turnMemoryVectorSearchWithScore, nodesForTurnMemories, saveTurnVector, getTurnVectorHash, getNavigationTriplesForMemories, hasTurnMemories, } from "../store/store.js";
 export class Recaller {
     db;
     cfg;
@@ -38,9 +38,15 @@ export class Recaller {
         }
         const turnMemories = this.recallTurnMemories(query, limit, queryVector);
         if (turnMemories.length) {
-            const nodes = nodesForTurnMemories(this.db, turnMemories.map(memory => memory.id), limit);
+            const memoryIds = turnMemories.map(memory => memory.id);
+            const nodes = nodesForTurnMemories(this.db, memoryIds, limit);
             const { edges } = graphWalk(this.db, nodes.map(node => node.id), 0);
-            return { nodes, edges, turnMemories };
+            return {
+                nodes,
+                edges,
+                turnMemories,
+                triples: getNavigationTriplesForMemories(this.db, memoryIds),
+            };
         }
         // Databases created before the turn-memory migration remain searchable.
         // The same confidence rule applies; a legacy node match cannot bypass it.
@@ -89,11 +95,11 @@ export class Recaller {
         for (const node of lexical)
             append(node);
         if (!selected.length)
-            return { nodes: [], edges: [], turnMemories: [] };
+            return { nodes: [], edges: [], turnMemories: [], triples: [] };
         // Depth zero asks the store only for edges whose two endpoints are direct
         // query matches. No unrelated graph hub is allowed to enter the prompt.
         const { edges } = graphWalk(this.db, selected.map(node => node.id), 0);
-        return { nodes: selected, edges, turnMemories: [] };
+        return { nodes: selected, edges, turnMemories: [], triples: [] };
     }
     /** 异步同步 embedding，不阻塞主流程 */
     async syncEmbed(node) {

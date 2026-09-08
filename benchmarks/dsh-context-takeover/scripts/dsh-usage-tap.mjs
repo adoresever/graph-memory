@@ -19,7 +19,7 @@ function requestKind(options) {
   if (options.purpose === 'compaction') return 'compaction';
   const messages = Array.isArray(options.messages) ? options.messages : [];
   const extractionTool = Array.isArray(options.tools)
-    && options.tools.some(tool => tool?.name === 'submit_graph_extraction');
+    && options.tools.some(tool => ['submit_result', 'submit_graph_extraction'].includes(tool?.name));
   const pluginOnly = messages.length === 1
     && messages[0]?.source?.kind === 'plugin'
     && messages[0]?.source?.plugin === 'graph-memory';

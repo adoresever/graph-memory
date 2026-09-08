@@ -10,6 +10,7 @@ import { createHash } from "crypto";
 import type {
   GmNode,
   GmEdge,
+  GmNavigationTriple,
   GmTurnMemory,
   EdgeType,
   NodeTemporal,
@@ -705,6 +706,19 @@ function turnMemoryId(sessionId: string, sources: Array<{ messageId: string }>):
   return `tm-${digest.slice(0, 32)}`;
 }
 
+function normalizedNavigationTerm(text: string): string {
+  return text.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+}
+
+function navigationTermId(normalized: string): string {
+  return `nt-${createHash("sha256").update(normalized).digest("hex").slice(0, 32)}`;
+}
+
+function navigationTripleId(memoryId: string, subjectId: string, predicate: string, objectId: string): string {
+  const key = `${memoryId}\0${subjectId}\0${predicate.trim()}\0${objectId}`;
+  return `tr-${createHash("sha256").update(key).digest("hex").slice(0, 32)}`;
+}
+
 /** Store one compact index while retaining exact message provenance. */
 export function upsertTurnMemory(
   db: DatabaseSyncInstance,
@@ -746,6 +760,139 @@ export function getTurnMemoriesByIds(
     if (row) memories.push(toTurnMemory(db, row));
   }
   return memories;
+}
+
+/**
+ * Recent summaries are reference-resolution context, not extraction evidence.
+ * `beforeTurn` prevents the current Q/A pair from feeding itself on retries.
+ */
+export function getRecentTurnMemoriesBySession(
+  db: DatabaseSyncInstance,
+  sessionId: string,
+  beforeTurn: number,
+  limit: number,
+): GmTurnMemory[] {
+  if (!Number.isFinite(beforeTurn) || limit <= 0) return [];
+  const rows = db.prepare(`
+    SELECT tm.*
+    FROM gm_turn_memories tm
+    WHERE tm.session_id=?
+      AND NOT EXISTS (
+        SELECT 1 FROM gm_turn_memory_sources source
+        WHERE source.memory_id=tm.id AND source.turn_index>=?
+      )
+    ORDER BY (
+      SELECT MAX(source.turn_index)
+      FROM gm_turn_memory_sources source
+      WHERE source.memory_id=tm.id
+    ) DESC, tm.updated_at DESC, tm.id
+    LIMIT ?
+  `).all(sessionId, beforeTurn, limit) as any[];
+  return rows.map(row => toTurnMemory(db, row)).reverse();
+}
+
+function upsertNavigationTerm(db: DatabaseSyncInstance, text: string): string {
+  const display = text.trim().replace(/\s+/g, " ");
+  const normalized = normalizedNavigationTerm(display);
+  if (!normalized) throw new TypeError("navigation term must not be empty");
+  const id = navigationTermId(normalized);
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO gm_navigation_terms
+      (id, normalized, display_text, community_id, created_at, updated_at)
+    VALUES (?, ?, ?, NULL, ?, ?)
+    ON CONFLICT(normalized) DO UPDATE SET
+      display_text=excluded.display_text,
+      updated_at=excluded.updated_at
+  `).run(id, normalized, display, now, now);
+  return id;
+}
+
+/**
+ * Atomically replace the navigation generated for one compact turn. The
+ * model's subject/predicate/object values are stored verbatim after whitespace
+ * normalization; the host applies no semantic gate or inferred relation.
+ */
+export function replaceNavigationTriples(
+  db: DatabaseSyncInstance,
+  memory: GmTurnMemory,
+  triples: Array<{ subject: string; predicate: string; object: string }>,
+): void {
+  db.exec("BEGIN");
+  try {
+    db.prepare("DELETE FROM gm_navigation_triples WHERE memory_id=?").run(memory.id);
+    const insert = db.prepare(`
+      INSERT OR IGNORE INTO gm_navigation_triples
+        (id, memory_id, session_id, subject_id, predicate, object_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const triple of triples) {
+      const subjectId = upsertNavigationTerm(db, triple.subject);
+      const objectId = upsertNavigationTerm(db, triple.object);
+      const predicate = triple.predicate.trim().replace(/\s+/g, " ");
+      if (!predicate) throw new TypeError("navigation predicate must not be empty");
+      insert.run(
+        navigationTripleId(memory.id, subjectId, predicate, objectId),
+        memory.id,
+        memory.sessionId,
+        subjectId,
+        predicate,
+        objectId,
+        Date.now(),
+      );
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+/** Return navigation in the same memory-relevance order supplied by recall. */
+export function getNavigationTriplesForMemories(
+  db: DatabaseSyncInstance,
+  memoryIds: string[],
+): GmNavigationTriple[] {
+  if (!memoryIds.length) return [];
+  const query = db.prepare(`
+    SELECT triple.*, subject.display_text AS subject,
+           subject.community_id AS subject_community_id,
+           object.display_text AS object,
+           object.community_id AS object_community_id
+    FROM gm_navigation_triples triple
+    JOIN gm_navigation_terms subject ON subject.id=triple.subject_id
+    JOIN gm_navigation_terms object ON object.id=triple.object_id
+    WHERE triple.memory_id=?
+    ORDER BY triple.created_at, triple.id
+  `);
+  return memoryIds.flatMap(memoryId => (query.all(memoryId) as any[]).map(row => ({
+    id: String(row.id),
+    memoryId: String(row.memory_id),
+    sessionId: String(row.session_id),
+    subjectId: String(row.subject_id),
+    subject: String(row.subject),
+    predicate: String(row.predicate),
+    objectId: String(row.object_id),
+    object: String(row.object),
+    subjectCommunityId: row.subject_community_id ? String(row.subject_community_id) : null,
+    objectCommunityId: row.object_community_id ? String(row.object_community_id) : null,
+    createdAt: Number(row.created_at),
+  })));
+}
+
+export function updateNavigationCommunities(
+  db: DatabaseSyncInstance,
+  labels: Map<string, string>,
+): void {
+  const statement = db.prepare("UPDATE gm_navigation_terms SET community_id=? WHERE id=?");
+  db.exec("BEGIN");
+  try {
+    for (const [id, communityId] of labels) statement.run(communityId, id);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 export function hasTurnMemories(db: DatabaseSyncInstance): boolean {
@@ -885,6 +1032,10 @@ export function getStats(db: DatabaseSyncInstance): {
   totalEdges: number;
   byEdgeType: Record<string, number>;
   communities: number;
+  turnMemories: number;
+  navigationTerms: number;
+  navigationTriples: number;
+  navigationCommunities: number;
 } {
   const totalNodes = (db.prepare("SELECT COUNT(*) as c FROM gm_nodes WHERE status='active'").get() as any).c;
   const byType: Record<string, number> = {};
@@ -899,7 +1050,23 @@ export function getStats(db: DatabaseSyncInstance): {
   const communities = (db.prepare(
     "SELECT COUNT(DISTINCT community_id) as c FROM gm_nodes WHERE status='active' AND community_id IS NOT NULL"
   ).get() as any).c;
-  return { totalNodes, byType, totalEdges, byEdgeType, communities };
+  const turnMemories = Number((db.prepare("SELECT COUNT(*) AS c FROM gm_turn_memories").get() as any).c);
+  const navigationTerms = Number((db.prepare("SELECT COUNT(*) AS c FROM gm_navigation_terms").get() as any).c);
+  const navigationTriples = Number((db.prepare("SELECT COUNT(*) AS c FROM gm_navigation_triples").get() as any).c);
+  const navigationCommunities = Number((db.prepare(
+    "SELECT COUNT(DISTINCT community_id) AS c FROM gm_navigation_terms WHERE community_id IS NOT NULL",
+  ).get() as any).c);
+  return {
+    totalNodes,
+    byType,
+    totalEdges,
+    byEdgeType,
+    communities,
+    turnMemories,
+    navigationTerms,
+    navigationTriples,
+    navigationCommunities,
+  };
 }
 
 // ─── 向量存储 + 搜索 ────────────────────────────────────────

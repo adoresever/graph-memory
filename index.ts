@@ -19,6 +19,8 @@ import {
   getBySession,
   deprecate, getStats,
   upsertTurnMemory,
+  getRecentTurnMemoriesBySession,
+  replaceNavigationTriples,
 } from "./src/store/store.ts";
 import { createCompleteFn } from "./src/engine/llm.ts";
 import { createEmbedFn } from "./src/engine/embed.ts";
@@ -27,8 +29,8 @@ import { Extractor } from "./src/extractor/extract.ts";
 import { assembleContext } from "./src/format/assemble.ts";
 import { runMaintenance } from "./src/graph/maintenance.ts";
 import { invalidateGraphCache, computeGlobalPageRank } from "./src/graph/pagerank.ts";
-import { detectCommunities } from "./src/graph/community.ts";
-import { DEFAULT_CONFIG, type GmConfig } from "./src/types.ts";
+import { detectCommunities, detectNavigationCommunities } from "./src/graph/community.ts";
+import { DEFAULT_CONFIG, type GmConfig, type RecallResult } from "./src/types.ts";
 
 // ─── 从 OpenClaw config 读 provider/model ────────────────────
 
@@ -188,7 +190,7 @@ const graphMemoryPlugin = {
 
     // ── Session 运行时状态 ──────────────────────────────────
     const msgSeq = new Map<string, number>();
-    const recalled = new Map<string, { nodes: any[]; edges: any[]; turnMemories: any[] }>();
+    const recalled = new Map<string, RecallResult>();
     const turnCounter = new Map<string, number>(); // 社区维护计数器
     const ingestedRowsSinceTurn = new Map<string, any[]>();
 
@@ -211,13 +213,6 @@ const graphMemoryPlugin = {
       return { ...message, id, turn_index: seq, role: message.role ?? "unknown" };
     }
 
-    function extractionSources(candidate: { sourceTurns: number[] }, messages: any[]) {
-      const cited = new Set(candidate.sourceTurns);
-      return messages
-        .filter(message => cited.has(Number(message.turn_index)))
-        .map(message => ({ messageId: String(message.id), turnIndex: Number(message.turn_index) }));
-    }
-
     /** 每轮结束后只提取本轮的完整问答；失败隔离，不在下一轮隐式重试。 */
     async function runTurnExtract(sessionId: string, turnRows: any[]): Promise<void> {
       if (!turnRows.length) return;
@@ -227,73 +222,39 @@ const graphMemoryPlugin = {
       const next = prev.then(async () => {
         const messageIds = turnRows.map(message => String(message.id));
         try {
-          const existing = getBySession(db, sessionId).map((n) => n.name);
           const sourcePairs = projectCompletedTurnPairs(turnRows);
           if (!sourcePairs.length) {
             markMessagesExtracted(db, messageIds);
             return;
           }
+          const currentTurn = Math.min(...sourcePairs.map(message => Number(message.turn_index)));
           const result = await extractor.extract({
             messages: sourcePairs,
-            existingNames: existing,
+            priorTurns: Number.isFinite(currentTurn)
+              ? getRecentTurnMemoriesBySession(db, sessionId, currentTurn, cfg.freshTurnCount)
+              : [],
           });
 
           const turnMemory = upsertTurnMemory(db, {
             sessionId,
             summary: result.turn.summary,
             outcome: result.turn.outcome,
-            // A capsule summarizes the complete Q/A pair. Node-level
-            // sourceTurns remain narrower, while the capsule retains both
-            // original endpoints as one auditable evidence bundle.
+            // The capsule retains both original endpoints as one auditable
+            // evidence bundle; triples navigate back to this memory id.
             sources: sourcePairs.map(message => ({
               messageId: String(message.id),
               turnIndex: Number(message.turn_index),
             })),
           });
-          recaller.syncTurnMemoryEmbed(turnMemory).catch(() => {});
-
-          // Resolve every declared endpoint before mutating the store. Missing
-          // endpoints are a referential-integrity failure, never a silent drop.
-          const emittedNames = new Set(result.nodes.map(node => node.name));
-          for (const edge of result.edges) {
-            const fromExists = emittedNames.has(edge.from) || Boolean(findByName(db, edge.from));
-            const toExists = emittedNames.has(edge.to) || Boolean(findByName(db, edge.to));
-            if (!fromExists || !toExists) {
-              throw new Error(`[graph-memory] unresolved edge endpoint: ${edge.from} -> ${edge.to}`);
-            }
-          }
-
-          const nameToId = new Map<string, string>();
-          for (const nc of result.nodes) {
-            const { node } = upsertNode(db, nc, sessionId, extractionSources(nc, sourcePairs));
-            nameToId.set(node.name, node.id);
-            recaller.syncEmbed(node).catch(() => {});
-          }
-
-          for (const ec of result.edges) {
-            const fromId = nameToId.get(ec.from) ?? findByName(db, ec.from)?.id;
-            const toId = nameToId.get(ec.to) ?? findByName(db, ec.to)?.id;
-            if (!fromId || !toId) throw new Error(`[graph-memory] unresolved edge endpoint after node write: ${ec.from} -> ${ec.to}`);
-            upsertEdge(db, {
-              fromId, toId, type: ec.type,
-              instruction: ec.instruction, condition: ec.condition, sessionId,
-            });
-            if (ec.type === "SUPERSEDES") deprecate(db, toId, "superseded");
-          }
-
-          for (const item of result.invalidations) {
-            const stale = findByName(db, item.name);
-            if (stale) deprecate(db, stale.id, "historical");
-          }
+          replaceNavigationTriples(db, turnMemory, result.triples);
+          embeddingReady
+            .then(() => recaller.syncTurnMemoryEmbed(turnMemory))
+            .catch(() => {});
 
           markMessagesExtracted(db, messageIds);
-
-          if (result.nodes.length || result.edges.length) {
-            invalidateGraphCache();
-            api.logger.info(
-              `[graph-memory] extracted ${result.nodes.length} nodes and ${result.edges.length} edges`,
-            );
-          }
+          api.logger.info(
+            `[graph-memory] stored one turn summary and ${result.triples.length} navigation triples`,
+          );
         } catch (err) {
           const error = err instanceof Error ? err : new Error(String(err));
           recordExtractionFailure(db, messageIds, error.message, null);
@@ -379,7 +340,7 @@ const graphMemoryPlugin = {
         // OpenClaw 2026.03.28: use the prompt for a fresh, accurate recall
         // at assembly time instead of relying solely on the pre-cached result
         // from before_agent_start.
-        let rec = recalled.get(sessionId) ?? { nodes: [], edges: [], turnMemories: [] };
+        let rec = recalled.get(sessionId) ?? { nodes: [], edges: [], turnMemories: [], triples: [] };
         if (prompt) {
           const cleaned = cleanPrompt(prompt);
           if (cleaned) {
@@ -408,6 +369,7 @@ const graphMemoryPlugin = {
           recalledNodes: rec.nodes,
           recalledEdges: rec.edges,
           recalledMemories: rec.turnMemories,
+          recalledTriples: rec.triples,
           freshTurnCount: cfg.freshTurnCount,
         });
 
@@ -501,9 +463,10 @@ const graphMemoryPlugin = {
             invalidateGraphCache();
             const pr = computeGlobalPageRank(db, cfg);
             const comm = detectCommunities(db);
+            const navigationComm = detectNavigationCommunities(db);
             api.logger.info(
               `[graph-memory] periodic maintenance (turn ${turns}): ` +
-              `pagerank_candidates=${pr.topK.length}, communities=${comm.count}`,
+              `pagerank_candidates=${pr.topK.length}, communities=${comm.count + navigationComm.count}`,
             );
 
           } catch (err) {
@@ -556,7 +519,8 @@ const graphMemoryPlugin = {
         const result = await runMaintenance(db, cfg);
         api.logger.info(
           `[graph-memory] maintenance: ${result.durationMs}ms, ` +
-          `communities=${result.community.count}, pagerank_candidates=${result.pagerank.topK.length}`,
+          `communities=${result.community.count + result.navigationCommunity.count}, ` +
+          `pagerank_candidates=${result.pagerank.topK.length}`,
         );
       } catch (err) {
         api.logger.error(`[graph-memory] session_end error: ${err}`);
@@ -593,6 +557,9 @@ const graphMemoryPlugin = {
           const memoryLines = res.turnMemories.map(
             memory => `[TURN ${memory.outcome}] ${memory.summary}`,
           );
+          const tripleLines = res.triples.map(
+            triple => `${triple.subject} --[${triple.predicate}]--> ${triple.object}`,
+          );
           const lines = res.nodes.map(
             (n) => `[${n.type}] ${n.name} (pr:${n.pagerank.toFixed(3)})\n${n.description}\n${n.content}`,
           );
@@ -605,6 +572,7 @@ const graphMemoryPlugin = {
           const text = [
             `找到 ${res.nodes.length} 个节点：\n`,
             ...memoryLines,
+            ...tripleLines,
             ...lines,
             ...(edgeLines.length ? ["\n关系：", ...edgeLines] : []),
           ].join("\n\n");
@@ -730,6 +698,8 @@ const graphMemoryPlugin = {
 
           const text = [
             `知识图谱统计`,
+            `轮次摘要：${stats.turnMemories} 条`,
+            `导航：${stats.navigationTerms} 个词项，${stats.navigationTriples} 条三元组，${stats.navigationCommunities} 个社区`,
             `节点：${stats.totalNodes} 个 (${Object.entries(stats.byType).map(([t, c]) => `${t}: ${c}`).join(", ")})`,
             `边：${stats.totalEdges} 条 (${Object.entries(stats.byEdgeType).map(([t, c]) => `${t}: ${c}`).join(", ")})`,
             `社区：${stats.communities} 个`,
@@ -755,7 +725,7 @@ const graphMemoryPlugin = {
           const result = await runMaintenance(db, cfg);
           const text = [
             `图维护完成（${result.durationMs}ms）`,
-            `社区：${result.community.count} 个`,
+            `社区：${result.community.count + result.navigationCommunity.count} 个`,
             `PageRank Top 5：`,
             ...result.pagerank.topK.slice(0, 5).map((n, i) =>
               `  ${i + 1}. ${n.name} (${n.score.toFixed(4)})`),
@@ -764,7 +734,7 @@ const graphMemoryPlugin = {
             content: [{ type: "text", text }],
             details: {
               durationMs: result.durationMs,
-              communities: result.community.count,
+              communities: result.community.count + result.navigationCommunity.count,
             },
           };
         },

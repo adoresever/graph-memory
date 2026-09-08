@@ -7,7 +7,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { openDb } from "./src/store/db.js";
-import { allActiveNodes, deprecate, findByName, getRecentBySession, getStats, getVectorStats, getNextUnextractedTurn, getUnextractedTurn, getExtractionStats, getPendingSessionIds, getExtractionCompletedTurn, getNodeSources, markMessagesExtracted, markExtractionTurnCompleted, quarantineMessages, recordExtractionFailure, requeueQuarantined, saveMessageOnce, upsertEdge, upsertNode, upsertTurnMemory, } from "./src/store/store.js";
+import { allActiveNodes, getRecentTurnMemoriesBySession, getStats, getVectorStats, getNextUnextractedTurn, getUnextractedTurn, getExtractionStats, getPendingSessionIds, getExtractionCompletedTurn, getNodeSources, markMessagesExtracted, markExtractionTurnCompleted, quarantineMessages, recordExtractionFailure, requeueQuarantined, saveMessageOnce, upsertNode, upsertTurnMemory, replaceNavigationTriples, } from "./src/store/store.js";
 import { Extractor } from "./src/extractor/extract.js";
 import { GRAPH_EXTRACTION_TOOL, GRAPH_EXTRACTION_TOOL_NAME, } from "./src/extractor/contract.js";
 import { Recaller } from "./src/recaller/recall.js";
@@ -17,7 +17,7 @@ import { replaceDshCompletedTurnTrace, projectDshCompletedTurnMemory, selectDshC
 import { filterDshRecallMemories, filterDshRecallNodes, insertDshRecallBeforeCurrentUser, } from "./src/format/dsh-recall.js";
 import { createEmbedFn } from "./src/engine/embed.js";
 import { computeGlobalPageRank, invalidateGraphCache } from "./src/graph/pagerank.js";
-import { detectCommunities } from "./src/graph/community.js";
+import { detectCommunities, detectNavigationCommunities } from "./src/graph/community.js";
 import { DEFAULT_CONFIG } from "./src/types.js";
 import { messageRetentionPolicyRevision, normalizeMessageRetentionPolicy, runMessageRetention, } from "./src/store/retention.js";
 export const name = "graph-memory-dsh";
@@ -247,106 +247,35 @@ export function apply(ctx, input = {}) {
         markExtractionTurnCompleted(db, sid, turn);
         return questionSaved || answerSaved;
     }
-    function extractionSources(candidate, messages) {
-        const cited = new Set(candidate.sourceTurns ?? []);
-        const selected = cited.size
-            ? messages.filter((message) => cited.has(Number(message.turn_index)))
-            : messages;
-        return selected.map((message) => ({
-            messageId: String(message.id),
-            turnIndex: Number(message.turn_index),
-        }));
-    }
     async function extractOnce(sessionId, sid, messages) {
         const route = latestRoute.get(String(sessionId));
         const extractor = new Extractor(config, (system, user) => complete(route, system, user));
-        const semanticQuery = messages
-            .map(message => messageText(message) || String(message.content ?? ""))
-            .join("\n");
-        // The first completed turn can race adapter startup. Wait for the one
-        // initialization promise so existing-node lookup never silently changes
-        // from vector recall to FTS merely because credentials are still loading.
-        await embeddingReady;
-        const relevant = await recaller.recall(semanticQuery);
         const currentTurn = Math.min(...messages.map(message => Number(message.turn_index)));
-        const existingById = new Map(relevant.nodes.map(node => [node.id, node]));
-        if (Number.isFinite(currentTurn)) {
-            for (const node of getRecentBySession(db, sid, currentTurn, freshTurnCount)) {
-                existingById.set(node.id, node);
-            }
-        }
-        const existingNodes = Array.from(existingById.values());
+        const priorTurns = Number.isFinite(currentTurn)
+            ? getRecentTurnMemoriesBySession(db, sid, currentTurn, freshTurnCount)
+            : [];
         const result = await extractor.extract({
             messages,
-            // A bounded semantic working set lets the extractor confirm or revise
-            // prior knowledge without replaying the ever-growing graph catalog.
-            existingNames: existingNodes.map(node => node.name),
-            existingNodes: existingNodes.map(node => ({
-                type: node.type,
-                name: node.name,
-                description: node.description,
-                content: node.content,
-                temporal: node.temporal,
-                updatedAt: node.updatedAt,
-            })),
+            // Previous summaries resolve references such as “continue that”; they
+            // are explicitly not evidence for new facts in the extraction prompt.
+            priorTurns,
         });
         const turnMemory = upsertTurnMemory(db, {
             sessionId: sid,
             summary: result.turn.summary,
             outcome: result.turn.outcome,
-            // A turn capsule always points to the complete durable Q/A pair.
-            // sourceTurns continues to scope individual graph claims below.
+            // A turn capsule always points to the complete durable Q/A pair;
+            // navigation triples link to this capsule rather than duplicating it.
             sources: messages.map(message => ({
                 messageId: String(message.id),
                 turnIndex: Number(message.turn_index),
             })),
         });
-        void recaller.syncTurnMemoryEmbed(turnMemory);
-        const emittedNames = new Set(result.nodes.map(candidate => candidate.name));
-        for (const edge of result.edges) {
-            const fromExists = emittedNames.has(edge.from) || Boolean(findByName(db, edge.from));
-            const toExists = emittedNames.has(edge.to) || Boolean(findByName(db, edge.to));
-            if (!fromExists || !toExists) {
-                throw new Error(`[graph-memory] unresolved edge endpoint: ${edge.from} -> ${edge.to}`);
-            }
-        }
-        const names = new Map();
-        for (const candidate of result.nodes) {
-            const { node } = upsertNode(db, candidate, sid, extractionSources(candidate, messages));
-            names.set(node.name, node.id);
-            void recaller.syncEmbed(node);
-        }
-        let revisionEdges = 0;
-        for (const edge of result.edges) {
-            const fromId = names.get(edge.from) ?? findByName(db, edge.from)?.id;
-            const toId = names.get(edge.to) ?? findByName(db, edge.to)?.id;
-            if (!fromId || !toId)
-                throw new Error(`[graph-memory] unresolved edge endpoint after node write: ${edge.from} -> ${edge.to}`);
-            upsertEdge(db, {
-                fromId,
-                toId,
-                type: edge.type,
-                instruction: edge.instruction,
-                condition: edge.condition,
-                sessionId: sid,
-            });
-            if (edge.type === "SUPERSEDES") {
-                deprecate(db, toId, "superseded");
-                revisionEdges += 1;
-            }
-        }
-        let invalidated = 0;
-        for (const item of result.invalidations) {
-            const stale = findByName(db, item.name);
-            if (!stale)
-                continue;
-            deprecate(db, stale.id, "historical");
-            invalidated += 1;
-        }
-        if (result.nodes.length || result.edges.length || revisionEdges || invalidated)
-            invalidateGraphCache();
-        ctx.logger.info(`[graph-memory] DSH extracted ${result.nodes.length} nodes and ${result.edges.length} edges` +
-            ` (${invalidated} invalidated)`);
+        replaceNavigationTriples(db, turnMemory, result.triples);
+        // Extraction does not wait for provider initialization, but the summary
+        // must still be embedded once that shared initialization completes.
+        void embeddingReady.then(() => recaller.syncTurnMemoryEmbed(turnMemory));
+        ctx.logger.info(`[graph-memory] DSH stored one turn summary and ${result.triples.length} navigation triples`);
     }
     function storedVisibleText(content) {
         try {
@@ -458,7 +387,11 @@ export function apply(ctx, input = {}) {
         invalidateGraphCache();
         const pagerank = computeGlobalPageRank(db, config);
         const communities = detectCommunities(db);
-        return { pagerankNodes: pagerank.scores.size, communities: communities.count };
+        const navigationCommunities = detectNavigationCommunities(db);
+        return {
+            pagerankNodes: pagerank.scores.size,
+            communities: communities.count + navigationCommunities.count,
+        };
     }
     function runMaintenanceTick() {
         const result = { errors: [] };
@@ -606,6 +539,7 @@ export function apply(ctx, input = {}) {
                 recalledNodes,
                 recalledEdges: recalled.edges.filter(edge => recalledIds.has(edge.fromId) && recalledIds.has(edge.toId)),
                 recalledMemories,
+                recalledTriples: recalled.triples,
                 freshTurnCount,
                 excludedSourceMessageIds: visibleMessageIds,
             });
@@ -712,9 +646,10 @@ export function apply(ctx, input = {}) {
                 ? ` (${input.embedding.model})`
                 : "";
             const messageCount = Number(db.prepare("SELECT COUNT(*) AS count FROM gm_messages").get()?.count ?? 0);
+            const turnVectorCount = Number(db.prepare("SELECT COUNT(*) AS count FROM gm_turn_vectors").get()?.count ?? 0);
             const extraction = getExtractionStats(db);
             const retentionRevision = messageRetentionPolicyRevision(messageRetention);
-            return `Graph Memory active (DSH native)\nStore: ${config.dbPath}\nNodes: ${stats.totalNodes}\nEdges: ${stats.totalEdges}\nMessages: ${messageCount}\nExtraction: ${extractionEnabled ? "enabled" : "disabled"} (pending=${extraction.pending}, succeeded=${extraction.succeeded}, quarantined=${extraction.quarantined})\nExtraction source: one completed turn = user question + final answer\nExtraction scheduling: live turn/end only, one serial worker per session, no startup history import, no automatic retries\nRecall: ${recallEnabled ? "enabled" : "disabled"}\nEmbedding: ${embeddingState}${embeddingModel}\nVectors: ${vectors.count}/${stats.totalNodes}${vectors.dimensions.length ? ` (${vectors.dimensions.join(", ")} dimensions)` : ""}\nAssistant tools: ${assistantTools}\nMessage retention: keep=${messageRetention.keep}, recentTurns=${messageRetention.recentTurns}, retentionDays=${messageRetention.retentionDays}, batchSize=${messageRetention.batchSize}, dryRun=${messageRetention.dryRun}, revision=${retentionRevision}\nRetention GC: runs=${retentionMetrics.runs}, dryRuns=${retentionMetrics.dryRuns}, selected=${retentionMetrics.selectedRows}, deleted=${retentionMetrics.deletedRows}, estimatedDeletedBytes=${retentionMetrics.deletedBytes}\nContext takeover: attached=${compactionMetrics.attached}, selected=${compactionMetrics.selected}, succeeded=${compactionMetrics.succeeded}, failed=${compactionMetrics.failed}, shadowedEvents=${compactionMetrics.shadowedEvents}, shadowedTokens=${compactionMetrics.shadowedTokens}, projectedTurns=${compactionMetrics.projectedTurns}, projectedEvents=${compactionMetrics.projectedEvents}, projectedTokens=${compactionMetrics.projectedTokens}`;
+            return `Graph Memory active (DSH native)\nStore: ${config.dbPath}\nTurn memories: ${stats.turnMemories}\nNavigation: ${stats.navigationTerms} terms / ${stats.navigationTriples} triples / ${stats.navigationCommunities} communities\nLegacy graph: ${stats.totalNodes} nodes / ${stats.totalEdges} edges\nMessages: ${messageCount}\nExtraction: ${extractionEnabled ? "enabled" : "disabled"} (pending=${extraction.pending}, succeeded=${extraction.succeeded}, quarantined=${extraction.quarantined})\nExtraction source: one completed turn = user question + final answer\nExtraction scheduling: live turn/end only, one serial worker per session, no startup history import, no automatic retries\nRecall: ${recallEnabled ? "enabled" : "disabled"}\nEmbedding: ${embeddingState}${embeddingModel}\nTurn vectors: ${turnVectorCount}/${stats.turnMemories}\nLegacy vectors: ${vectors.count}/${stats.totalNodes}${vectors.dimensions.length ? ` (${vectors.dimensions.join(", ")} dimensions)` : ""}\nAssistant tools: ${assistantTools}\nMessage retention: keep=${messageRetention.keep}, recentTurns=${messageRetention.recentTurns}, retentionDays=${messageRetention.retentionDays}, batchSize=${messageRetention.batchSize}, dryRun=${messageRetention.dryRun}, revision=${retentionRevision}\nRetention GC: runs=${retentionMetrics.runs}, dryRuns=${retentionMetrics.dryRuns}, selected=${retentionMetrics.selectedRows}, deleted=${retentionMetrics.deletedRows}, estimatedDeletedBytes=${retentionMetrics.deletedBytes}\nContext takeover: attached=${compactionMetrics.attached}, selected=${compactionMetrics.selected}, succeeded=${compactionMetrics.succeeded}, failed=${compactionMetrics.failed}, shadowedEvents=${compactionMetrics.shadowedEvents}, shadowedTokens=${compactionMetrics.shadowedTokens}, projectedTurns=${compactionMetrics.projectedTurns}, projectedEvents=${compactionMetrics.projectedEvents}, projectedTokens=${compactionMetrics.projectedTokens}`;
         },
     });
     registerAssistantTool({
@@ -733,13 +668,14 @@ export function apply(ctx, input = {}) {
             if (!result.nodes.length && !result.turnMemories.length)
                 return "No matching Graph Memory records.";
             const memories = result.turnMemories.map(memory => `[TURN ${memory.outcome}] ${memory.summary}`);
+            const triples = result.triples.map(triple => `${triple.subject} --[${triple.predicate}]--> ${triple.object}`);
             const nodes = result.nodes.map((node) => {
                 const temporal = Object.keys(node.temporal).length
                     ? `\nTemporal: ${JSON.stringify(node.temporal)}`
                     : "";
                 return `[${node.type}] ${node.name}\n${node.description}\n${node.content}${temporal}`;
             });
-            return [...memories, ...nodes].join("\n\n");
+            return [...memories, ...triples, ...nodes].join("\n\n");
         },
     });
     registerAssistantTool({
@@ -778,7 +714,7 @@ export function apply(ctx, input = {}) {
         execute: async () => {
             const stats = getStats(db);
             const messageCount = Number(db.prepare("SELECT COUNT(*) AS count FROM gm_messages").get()?.count ?? 0);
-            return `Nodes: ${stats.totalNodes}\nEdges: ${stats.totalEdges}\nCommunities: ${stats.communities}\nMessages: ${messageCount}\nExtraction queue: ${JSON.stringify(getExtractionStats(db))}\nBy type: ${JSON.stringify(stats.byType)}\nRetention policy: ${JSON.stringify({ ...messageRetention, revision: messageRetentionPolicyRevision(messageRetention) })}\nRetention totals: ${JSON.stringify({ runs: retentionMetrics.runs, dryRuns: retentionMetrics.dryRuns, selectedRows: retentionMetrics.selectedRows, deletedRows: retentionMetrics.deletedRows, deletedBytes: retentionMetrics.deletedBytes })}\nLast retention receipt: ${JSON.stringify(retentionMetrics.last ?? null)}`;
+            return `Turn memories: ${stats.turnMemories}\nNavigation terms: ${stats.navigationTerms}\nNavigation triples: ${stats.navigationTriples}\nNavigation communities: ${stats.navigationCommunities}\nLegacy nodes: ${stats.totalNodes}\nLegacy edges: ${stats.totalEdges}\nMessages: ${messageCount}\nExtraction queue: ${JSON.stringify(getExtractionStats(db))}\nRetention policy: ${JSON.stringify({ ...messageRetention, revision: messageRetentionPolicyRevision(messageRetention) })}\nRetention totals: ${JSON.stringify({ runs: retentionMetrics.runs, dryRuns: retentionMetrics.dryRuns, selectedRows: retentionMetrics.selectedRows, deletedRows: retentionMetrics.deletedRows, deletedBytes: retentionMetrics.deletedBytes })}\nLast retention receipt: ${JSON.stringify(retentionMetrics.last ?? null)}`;
         },
     });
     registerAssistantTool({

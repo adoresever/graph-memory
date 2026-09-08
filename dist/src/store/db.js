@@ -78,11 +78,44 @@ function migrate(db) {
         m13_generic_navigation_edges,
         m14_temporal_revisions,
         m15_turn_memories,
+        m16_navigation_triples,
     ];
     for (let i = cur; i < steps.length; i++) {
         steps[i](db);
         db.prepare("INSERT INTO _migrations (v,at) VALUES (?,?)").run(i + 1, Date.now());
     }
+}
+// ─── 摘要派生的 SPO 导航：与旧概念图分表，避免语义混用 ──────
+function m16_navigation_triples(db) {
+    db.exec(`
+    CREATE TABLE IF NOT EXISTS gm_navigation_terms (
+      id            TEXT PRIMARY KEY,
+      normalized    TEXT NOT NULL UNIQUE,
+      display_text  TEXT NOT NULL,
+      community_id  TEXT,
+      created_at    INTEGER NOT NULL,
+      updated_at    INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS ix_gm_navigation_terms_community
+      ON gm_navigation_terms(community_id);
+
+    CREATE TABLE IF NOT EXISTS gm_navigation_triples (
+      id          TEXT PRIMARY KEY,
+      memory_id   TEXT NOT NULL REFERENCES gm_turn_memories(id) ON DELETE CASCADE,
+      session_id  TEXT NOT NULL,
+      subject_id  TEXT NOT NULL REFERENCES gm_navigation_terms(id),
+      predicate   TEXT NOT NULL,
+      object_id   TEXT NOT NULL REFERENCES gm_navigation_terms(id),
+      created_at  INTEGER NOT NULL,
+      UNIQUE(memory_id, subject_id, predicate, object_id)
+    );
+    CREATE INDEX IF NOT EXISTS ix_gm_navigation_triples_memory
+      ON gm_navigation_triples(memory_id, created_at);
+    CREATE INDEX IF NOT EXISTS ix_gm_navigation_triples_subject
+      ON gm_navigation_triples(subject_id);
+    CREATE INDEX IF NOT EXISTS ix_gm_navigation_triples_object
+      ON gm_navigation_triples(object_id);
+  `);
 }
 // ─── 分层轮次记忆：摘要索引 → 图谱导航 → 原始消息证据 ──────
 function m15_turn_memories(db) {

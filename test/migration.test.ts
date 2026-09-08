@@ -102,7 +102,7 @@ describe("database migrations", () => {
     expect(row.member_signature).toMatch(/^[a-f0-9]{40}$/);
     expect(
       (upgraded.prepare("SELECT MAX(v) AS version FROM _migrations").get() as any).version,
-    ).toBe(15);
+    ).toBe(16);
     const sourceColumns = upgraded.prepare("PRAGMA table_info(gm_node_sources)").all() as Array<{ name: string }>;
     expect(sourceColumns.map((column) => column.name)).toEqual([
       "node_id", "session_id", "message_id", "turn_index",
@@ -129,6 +129,12 @@ describe("database migrations", () => {
     ).all() as Array<{ name: string }>;
     expect(turnMemorySourceColumns.map(column => column.name)).toEqual([
       "memory_id", "message_id", "turn_index", "source_order",
+    ]);
+    const navigationTripleColumns = upgraded.prepare(
+      "PRAGMA table_info(gm_navigation_triples)",
+    ).all() as Array<{ name: string }>;
+    expect(navigationTripleColumns.map(column => column.name)).toEqual([
+      "id", "memory_id", "session_id", "subject_id", "predicate", "object_id", "created_at",
     ]);
     const queueRows = upgraded.prepare(
       "SELECT id, extraction_state FROM gm_messages ORDER BY id",

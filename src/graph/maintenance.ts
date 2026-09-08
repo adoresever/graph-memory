@@ -16,11 +16,12 @@
 import { DatabaseSync, type DatabaseSyncInstance } from "../store/sqlite.ts";
 import type { GmConfig } from "../types.ts";
 import { computeGlobalPageRank, invalidateGraphCache, type GlobalPageRankResult } from "./pagerank.ts";
-import { detectCommunities, type CommunityResult } from "./community.ts";
+import { detectCommunities, detectNavigationCommunities, type CommunityResult } from "./community.ts";
 
 export interface MaintenanceResult {
   pagerank: GlobalPageRankResult;
   community: CommunityResult;
+  navigationCommunity: CommunityResult;
   durationMs: number;
 }
 
@@ -35,10 +36,12 @@ export async function runMaintenance(db: DatabaseSyncInstance, cfg: GmConfig): P
 
   // 2. 社区检测
   const communityResult = detectCommunities(db);
+  const navigationCommunityResult = detectNavigationCommunities(db);
 
   return {
     pagerank: pagerankResult,
     community: communityResult,
+    navigationCommunity: navigationCommunityResult,
     durationMs: Date.now() - start,
   };
 }

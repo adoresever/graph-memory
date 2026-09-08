@@ -13,7 +13,7 @@
  * 注意：个性化 PPR 不在这里跑，它在 recall 时实时计算。
  */
 import { computeGlobalPageRank, invalidateGraphCache } from "./pagerank.js";
-import { detectCommunities } from "./community.js";
+import { detectCommunities, detectNavigationCommunities } from "./community.js";
 export async function runMaintenance(db, cfg) {
     const start = Date.now();
     // New graph writes require a fresh ranking/cache view.
@@ -22,9 +22,11 @@ export async function runMaintenance(db, cfg) {
     const pagerankResult = computeGlobalPageRank(db, cfg);
     // 2. 社区检测
     const communityResult = detectCommunities(db);
+    const navigationCommunityResult = detectNavigationCommunities(db);
     return {
         pagerank: pagerankResult,
         community: communityResult,
+        navigationCommunity: navigationCommunityResult,
         durationMs: Date.now() - start,
     };
 }

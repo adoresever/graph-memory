@@ -59,6 +59,25 @@ export interface GmTurnMemory {
   updatedAt: number;
 }
 
+/**
+ * A lightweight subject-predicate-object index into one turn memory.
+ * It is navigation metadata only; the turn summary and exact source Q/A are
+ * the evidence returned to the model after retrieval.
+ */
+export interface GmNavigationTriple {
+  id: string;
+  memoryId: string;
+  sessionId: string;
+  subjectId: string;
+  subject: string;
+  predicate: string;
+  objectId: string;
+  object: string;
+  subjectCommunityId: string | null;
+  objectCommunityId: string | null;
+  createdAt: number;
+}
+
 // ─── 边 ───────────────────────────────────────────────────────
 
 export type EdgeType =
@@ -89,29 +108,13 @@ export interface ExtractionResult {
     summary: string;
     /** Outcome reported by the completed dialogue; not external verification. */
     outcome: TurnOutcome;
-    /** Source message turn/event indices supporting the summary and outcome. */
-    sourceTurns: number[];
   };
-  nodes: Array<{
-    type: NodeType;
-    name: string;
-    description: string;
-    content: string;
-    /** How this observation changes a same-named concept already in memory. */
-    operation: "create" | "confirm" | "revise";
-    /** Evidence-backed temporal meaning; absent fields must not be invented. */
-    temporal: NodeTemporal;
-    /** Source message turn/event indices cited by the extractor. */
-    sourceTurns: number[];
+  /** Simple navigation derived from turn.summary; never a second fact body. */
+  triples: Array<{
+    subject: string;
+    predicate: string;
+    object: string;
   }>;
-  edges: Array<{
-    from: string;
-    to: string;
-    type: EdgeType;
-    instruction: string;
-    condition?: string;
-  }>;
-  invalidations: Array<{ name: string; reason: string }>;
 }
 
 // ─── 召回结果 ─────────────────────────────────────────────────
@@ -121,6 +124,8 @@ export interface RecallResult {
   edges: GmEdge[];
   /** Query-matched episodic summaries, ordered by retrieval relevance. */
   turnMemories: GmTurnMemory[];
+  /** Navigation triples attached to the matched turn memories. */
+  triples: GmNavigationTriple[];
 }
 
 // ─── Embedding 配置 ──────────────────────────────────────────

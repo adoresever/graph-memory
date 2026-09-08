@@ -1,40 +1,40 @@
 import { describe, expect, it } from "vitest";
-import { assertGraphExtractionContract } from "../src/extractor/contract.ts";
+import { assertGraphExtractionContract, GRAPH_EXTRACTION_TOOL } from "../src/extractor/contract.ts";
 
 const validPayload = {
   turn: {
     summary: "本轮确认当前发布状态。",
     outcome: "informational",
-    sourceTurns: [1],
   },
-  nodes: [{
-    type: "EVENT",
-    name: "current-release-state",
-    description: "当前发布状态",
-    content: "发布状态由本轮回答确认",
-    operation: "create",
-    temporal: {},
-    sourceTurns: [1],
+  triples: [{
+    subject: "当前版本",
+    predicate: "状态为",
+    object: "已发布",
   }],
-  edges: [],
-  invalidations: [],
 };
 
 describe("graph extraction data contract", () => {
+  it("keeps the provider-visible tool neutral to the host implementation", () => {
+    expect(GRAPH_EXTRACTION_TOOL.name).toBe("submit_result");
+    const visible = JSON.stringify(GRAPH_EXTRACTION_TOOL).toLowerCase();
+    expect(visible).not.toContain("graph memory");
+    expect(visible).not.toContain("navigation");
+  });
+
   it("accepts a complete payload without interpreting its content", () => {
     expect(() => assertGraphExtractionContract(validPayload)).not.toThrow();
   });
 
-  it("accepts non-empty model-authored concept names without style policing", () => {
+  it("accepts non-empty model-authored triple values without style policing", () => {
     const payload = {
       ...validPayload,
-      nodes: [{ ...validPayload.nodes[0], name: "ReleaseOrchestrator.updateConfig()" }],
+      triples: [{ ...validPayload.triples[0], subject: "ReleaseOrchestrator.updateConfig()" }],
     };
     expect(() => assertGraphExtractionContract(payload)).not.toThrow();
   });
 
   it("rejects a payload with a missing required field", () => {
-    const { invalidations: _removed, ...incomplete } = validPayload;
+    const { triples: _removed, ...incomplete } = validPayload;
     expect(() => assertGraphExtractionContract(incomplete)).toThrow("contract violation");
   });
 

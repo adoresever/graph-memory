@@ -321,8 +321,8 @@ function userMsg(seq: number, text: string) {
   };
 }
 
-const EMPTY_EXTRACTION = '{"turn":{"summary":"question was answered","outcome":"informational","sourceTurns":[1]},"nodes":[],"edges":[],"invalidations":[]}';
-const TURN_TWO_EMPTY_EXTRACTION = '{"turn":{"summary":"new question was answered","outcome":"informational","sourceTurns":[2]},"nodes":[],"edges":[],"invalidations":[]}';
+const EMPTY_EXTRACTION = '{"turn":{"summary":"question was answered","outcome":"informational"},"triples":[]}';
+const TURN_TWO_EMPTY_EXTRACTION = '{"turn":{"summary":"new question was answered","outcome":"informational"},"triples":[]}';
 
 function structuredExtraction(argumentsJson: string) {
   return {
@@ -503,13 +503,17 @@ describe("DSH completed-turn memory extraction", () => {
     expect(requests[0].reasoningEffort).toBe("off");
     expect(requests[0].tools).toHaveLength(1);
     expect(requests[0].tools[0].name).toBe(GRAPH_EXTRACTION_TOOL_NAME);
-    expect(requests[0].tools[0].parameters.required).toEqual(["turn", "nodes", "edges", "invalidations"]);
+    expect(requests[0].tools[0].parameters.required).toEqual(["turn", "triples"]);
     const prompt = requests[0].messages[0].content[0].text;
     expect(prompt).toContain("What should we remember?");
     expect(prompt).toContain("Remember the verified final result.");
     expect(prompt).not.toContain("private chain of thought");
     expect(prompt).not.toContain("large tool output");
     expect(prompt).not.toContain("final hidden reasoning");
+    expect(prompt).not.toContain("Graph Memory");
+    expect(prompt).not.toContain("TASK");
+    expect(prompt).not.toContain("SKILL");
+    expect(prompt).not.toContain("EVENT");
     const stored = new DatabaseSync(dbPath);
     try {
       expect((stored.prepare("SELECT COUNT(*) AS c FROM gm_turn_memories").get() as any).c).toBe(1);
@@ -625,28 +629,18 @@ describe("DSH completed-turn memory extraction", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("passes prior graph knowledge into the next turn and applies a temporal correction", async () => {
+  it("uses prior summaries to resolve the next turn and keeps corrections chronological", async () => {
     const dir = mkdtempSync(join(tmpdir(), "gm-temporal-revision-"));
     const dbPath = join(dir, "graph-memory.db");
     const requests: any[] = [];
     const outputs = [
       JSON.stringify({
-        turn: { summary: "项目端口确认为 8080。", outcome: "informational", sourceTurns: [1] },
-        nodes: [{
-          type: "EVENT", name: "project-port", description: "项目当前端口",
-          content: "端口是 8080", operation: "create",
-          temporal: { eventTime: "第一轮", state: "current" }, sourceTurns: [1],
-        }],
-        edges: [], invalidations: [],
+        turn: { summary: "项目端口确认为 8080。", outcome: "informational" },
+        triples: [{ subject: "项目端口", predicate: "确认为", object: "8080" }],
       }),
       JSON.stringify({
-        turn: { summary: "项目端口从 8080 修订为 9090。", outcome: "completed", sourceTurns: [2] },
-        nodes: [{
-          type: "EVENT", name: "project-port", description: "项目当前端口",
-          content: "端口是 9090", operation: "revise",
-          temporal: { eventTime: "第二轮", state: "current" }, sourceTurns: [2],
-        }],
-        edges: [], invalidations: [],
+        turn: { summary: "项目端口从 8080 修订为 9090。", outcome: "completed" },
+        triples: [{ subject: "项目端口", predicate: "修订为", object: "9090" }],
       }),
     ];
     const { context, listeners, cleanups } = adapterContext(async function* (options: any) {
@@ -682,29 +676,23 @@ describe("DSH completed-turn memory extraction", () => {
 
     expect(requests).toHaveLength(2);
     const secondPrompt = requests[1].messages[0].content[0].text;
-    expect(secondPrompt).toContain('"name":"project-port"');
-    expect(secondPrompt).toContain("端口是 8080");
+    expect(secondPrompt).toContain("<Previous Turn Summaries>");
+    expect(secondPrompt).toContain("项目端口确认为 8080");
+    expect(secondPrompt).not.toContain("revision-session");
+    expect(secondPrompt).not.toContain("t=");
     const inspect = new DatabaseSync(dbPath);
     try {
-      const node = inspect.prepare(
-        "SELECT content, temporal_json, validated_count FROM gm_nodes WHERE name='project-port'",
-      ).get() as any;
-      expect(node.content).toBe("端口是 9090");
-      expect(JSON.parse(node.temporal_json)).toEqual({ eventTime: "第二轮", state: "current" });
-      expect(node.validated_count).toBe(1);
-      const activeSources = inspect.prepare(`
-        SELECT s.turn_index FROM gm_node_sources s
-        JOIN gm_nodes n ON n.id=s.node_id
-        WHERE n.name='project-port' ORDER BY s.turn_index
-      `).all() as Array<{ turn_index: number }>;
-      expect(activeSources.map(source => source.turn_index)).toEqual([2, 2]);
-      const revision = inspect.prepare(`
-        SELECT previous_content, previous_source_refs
-        FROM gm_node_revisions r JOIN gm_nodes n ON n.id=r.node_id
-        WHERE n.name='project-port'
-      `).get() as any;
-      expect(revision.previous_content).toBe("端口是 8080");
-      expect(JSON.parse(revision.previous_source_refs)).toHaveLength(2);
+      const timeline = inspect.prepare(`
+        SELECT memory.summary, triple.predicate, object.display_text AS object
+        FROM gm_turn_memories memory
+        JOIN gm_navigation_triples triple ON triple.memory_id=memory.id
+        JOIN gm_navigation_terms object ON object.id=triple.object_id
+        ORDER BY memory.created_at, memory.rowid
+      `).all() as Array<{ summary: string; predicate: string; object: string }>;
+      expect(timeline).toEqual([
+        { summary: "项目端口确认为 8080。", predicate: "确认为", object: "8080" },
+        { summary: "项目端口从 8080 修订为 9090。", predicate: "修订为", object: "9090" },
+      ]);
     } finally {
       inspect.close();
     }

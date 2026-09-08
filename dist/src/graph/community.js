@@ -4,13 +4,13 @@
  * By: adoresever
  * Email: Wywelljob@gmail.com
  */
-import { updateCommunities } from "../store/store.js";
+import { updateCommunities, updateNavigationCommunities } from "../store/store.js";
 /**
  * 运行 Label Propagation 并写回 gm_nodes.community_id
  *
  * 把有向边当无向边处理（知识关联不分方向）
  */
-export function detectCommunities(db, maxIter = 50) {
+export function detectCommunities(db, maxIter) {
     // 读取活跃节点
     const nodeRows = db.prepare("SELECT id FROM gm_nodes WHERE status='active'").all();
     if (nodeRows.length === 0) {
@@ -19,30 +19,43 @@ export function detectCommunities(db, maxIter = 50) {
     const nodeIds = nodeRows.map((r) => r.id);
     // 读取边，构建无向邻接表
     const edgeRows = db.prepare("SELECT from_id, to_id FROM gm_edges").all();
+    const result = propagateLabels(nodeIds, edgeRows, maxIter);
+    // 写回数据库
+    updateCommunities(db, result.labels);
+    return result;
+}
+/** Build communities on the generic SPO navigation graph. */
+export function detectNavigationCommunities(db, maxIter) {
+    const nodeIds = db.prepare("SELECT id FROM gm_navigation_terms ORDER BY id").all()
+        .map(row => String(row.id));
+    if (!nodeIds.length)
+        return { labels: new Map(), communities: new Map(), count: 0 };
+    const edges = db.prepare("SELECT subject_id AS from_id, object_id AS to_id FROM gm_navigation_triples").all();
+    const result = propagateLabels(nodeIds, edges, maxIter);
+    updateNavigationCommunities(db, result.labels);
+    return result;
+}
+function propagateLabels(nodeIds, edgeRows, maxIter) {
     const nodeSet = new Set(nodeIds);
     const adj = new Map();
     for (const id of nodeIds)
         adj.set(id, []);
-    for (const e of edgeRows) {
-        if (!nodeSet.has(e.from_id) || !nodeSet.has(e.to_id))
+    for (const edge of edgeRows) {
+        if (!nodeSet.has(edge.from_id) || !nodeSet.has(edge.to_id))
             continue;
-        adj.get(e.from_id).push(e.to_id);
-        adj.get(e.to_id).push(e.from_id);
+        adj.get(edge.from_id).push(edge.to_id);
+        adj.get(edge.to_id).push(edge.from_id);
     }
     // 初始标签：每个节点 = 自己的 ID
     const label = new Map();
     for (const id of nodeIds)
         label.set(id, id);
-    // 迭代
-    for (let iter = 0; iter < maxIter; iter++) {
+    // A graph cannot need more propagation passes than its node count. Sorted
+    // traversal makes identical data produce identical community assignments.
+    const iterationLimit = maxIter ?? nodeIds.length;
+    for (let iter = 0; iter < iterationLimit; iter++) {
         let changed = false;
-        // 随机打乱遍历顺序（减少震荡）
-        const shuffled = [...nodeIds];
-        for (let i = shuffled.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-        }
-        for (const nodeId of shuffled) {
+        for (const nodeId of nodeIds) {
             const neighbors = adj.get(nodeId) || [];
             if (neighbors.length === 0)
                 continue;
@@ -91,8 +104,6 @@ export function detectCommunities(db, maxIter = 50) {
         const newId = renameMap.get(oldId) || oldId;
         finalCommunities.set(newId, members);
     }
-    // 写回数据库
-    updateCommunities(db, finalLabels);
     return {
         labels: finalLabels,
         communities: finalCommunities,
