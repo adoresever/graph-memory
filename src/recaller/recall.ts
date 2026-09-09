@@ -21,8 +21,11 @@ import {
   searchTurnMemories, turnMemoryVectorSearchWithScore,
   nodesForTurnMemories, saveTurnVector, getTurnVectorHash,
   getNavigationTriplesForMemories,
+  findNavigationSeedTermIds, navigationCandidateTermIds,
+  rankTurnMemoryIdsByNavigation, getTurnMemoriesByIds,
   hasTurnMemories,
 } from "../store/store.ts";
+import { personalizedNavigationPageRank } from "../graph/pagerank.ts";
 
 export class Recaller {
   private embed: EmbedFn | null = null;
@@ -47,7 +50,28 @@ export class Recaller {
       }
     }
 
-    const turnMemories = this.recallTurnMemories(query, limit, queryVector);
+    const directMemories = this.recallTurnMemories(query, limit, queryVector);
+    const seedIds = findNavigationSeedTermIds(
+      this.db,
+      query,
+      directMemories.map(memory => memory.id),
+    );
+    let graphMemories: GmTurnMemory[] = [];
+    let navigationScores = new Map<string, number>();
+    if (seedIds.length) {
+      const candidateTermIds = navigationCandidateTermIds(this.db, seedIds);
+      navigationScores = personalizedNavigationPageRank(
+        this.db,
+        seedIds,
+        candidateTermIds,
+        this.cfg,
+      ).scores;
+      graphMemories = getTurnMemoriesByIds(
+        this.db,
+        rankTurnMemoryIdsByNavigation(this.db, navigationScores),
+      );
+    }
+    const turnMemories = this.mergeTurnMemoryRanks(directMemories, graphMemories, limit);
     if (turnMemories.length) {
       const memoryIds = turnMemories.map(memory => memory.id);
       const nodes = nodesForTurnMemories(
@@ -60,13 +84,58 @@ export class Recaller {
         nodes,
         edges,
         turnMemories,
-        triples: getNavigationTriplesForMemories(this.db, memoryIds),
+        triples: getNavigationTriplesForMemories(this.db, memoryIds, navigationScores),
       };
     }
 
     // Databases created before the turn-memory migration remain searchable.
     // The same confidence rule applies; a legacy node match cannot bypass it.
     return this.recallPrecise(query, limit, queryVector, hasTurnMemories(this.db));
+  }
+
+  /**
+   * Fuse independent summary and graph ranks without mixing incomparable
+   * cosine and PageRank score scales. A memory supported by both routes rises;
+   * exact summary matches keep tie priority over graph-only expansion.
+   */
+  private mergeTurnMemoryRanks(
+    direct: GmTurnMemory[],
+    graph: GmTurnMemory[],
+    limit: number,
+  ): GmTurnMemory[] {
+    const candidates = new Map<string, {
+      memory: GmTurnMemory;
+      score: number;
+      directRank: number;
+    }>();
+    direct.forEach((memory, index) => {
+      candidates.set(memory.id, {
+        memory,
+        score: 1 / (index + 1),
+        directRank: index,
+      });
+    });
+    graph.forEach((memory, index) => {
+      const existing = candidates.get(memory.id);
+      if (existing) {
+        existing.score += 1 / (index + 1);
+      } else {
+        candidates.set(memory.id, {
+          memory,
+          score: 1 / (index + 1),
+          directRank: Number.POSITIVE_INFINITY,
+        });
+      }
+    });
+    return Array.from(candidates.values())
+      .sort((left, right) =>
+        right.score - left.score
+        || left.directRank - right.directRank
+        || right.memory.updatedAt - left.memory.updatedAt
+        || left.memory.id.localeCompare(right.memory.id)
+      )
+      .slice(0, limit)
+      .map(candidate => candidate.memory);
   }
 
   private recallTurnMemories(

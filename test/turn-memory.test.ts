@@ -5,7 +5,11 @@ import { assembleContext } from "../src/format/assemble.ts";
 import { filterDshRecallMemories } from "../src/format/dsh-recall.ts";
 import { Recaller } from "../src/recaller/recall.ts";
 import { detectNavigationCommunities } from "../src/graph/community.ts";
+import { personalizedNavigationPageRank } from "../src/graph/pagerank.ts";
 import {
+  findNavigationSeedTermIds,
+  navigationCandidateTermIds,
+  rankTurnMemoryIdsByNavigation,
   saveMessageOnce,
   replaceNavigationTriples,
   getRecentTurnMemoriesBySession,
@@ -138,6 +142,165 @@ describe("layered turn memory", () => {
       "SELECT display_text, community_id FROM gm_navigation_terms ORDER BY display_text",
     ).all() as Array<{ display_text: string; community_id: string }>;
     expect(new Set(terms.map(term => term.community_id)).size).toBe(1);
+  });
+
+  it("uses literal SPO seeds, local communities and PPR to recover source dialogue", async () => {
+    const remember = (
+      turn: number,
+      summary: string,
+      user: string,
+      assistant: string,
+      triple: { subject: string; predicate: string; object: string },
+    ) => {
+      const userId = `user-${turn}`;
+      const assistantId = `assistant-${turn}`;
+      saveMessageOnce(db, userId, "dsh:ppt", turn, "user", user);
+      saveMessageOnce(db, assistantId, "dsh:ppt", turn, "assistant", assistant);
+      const memory = upsertTurnMemory(db, {
+        sessionId: "dsh:ppt",
+        summary,
+        outcome: "completed",
+        sources: [
+          { messageId: userId, turnIndex: turn },
+          { messageId: assistantId, turnIndex: turn },
+        ],
+      });
+      replaceNavigationTriples(db, memory, [triple]);
+      return memory;
+    };
+
+    const deck = remember(
+      1,
+      "季度汇报演示文稿已采用品牌模板。",
+      "把季度汇报 PPT 换成品牌模板",
+      "已经换成品牌模板",
+      { subject: "季度汇报 PPT", predicate: "使用", object: "品牌模板" },
+    );
+    const color = remember(
+      2,
+      "品牌模板主题色已调整为深海蓝。",
+      "品牌模板换成深海蓝",
+      "品牌模板主题色已经改为深海蓝",
+      { subject: "品牌模板", predicate: "主题色", object: "深海蓝" },
+    );
+    remember(
+      3,
+      "晚餐选择了面条。",
+      "晚上吃什么？",
+      "选择了面条",
+      { subject: "晚餐", predicate: "选择", object: "面条" },
+    );
+    detectNavigationCommunities(db);
+
+    const recaller = new Recaller(db, { ...DEFAULT_CONFIG, recallMaxNodes: 2 });
+    const recalled = await recaller.recall("深海蓝是什么模板的主题色？");
+
+    expect(recalled.turnMemories.map(memory => memory.id)).toEqual([color.id, deck.id]);
+    expect(recalled.triples.map(triple => triple.object)).toEqual(expect.arrayContaining([
+      "品牌模板",
+      "深海蓝",
+    ]));
+    expect(recalled.triples).toHaveLength(2);
+    expect(recalled.triples.some(triple => triple.subject === "晚餐")).toBe(false);
+
+    const assembled = assembleContext(db, {
+      recalledMemories: recalled.turnMemories,
+      recalledNodes: [],
+      recalledEdges: [],
+      recalledTriples: recalled.triples,
+    });
+    expect(assembled.episodicXml).toContain("把季度汇报 PPT 换成品牌模板");
+    expect(assembled.episodicXml).toContain("品牌模板主题色已经改为深海蓝");
+    expect(assembled.episodicXml).not.toContain("晚上吃什么");
+  });
+
+  it("does not mix weaker summary communities into an exact SPO route", () => {
+    const remember = (
+      turn: number,
+      summary: string,
+      triple: { subject: string; predicate: string; object: string },
+    ) => {
+      const userId = `priority-user-${turn}`;
+      const assistantId = `priority-assistant-${turn}`;
+      saveMessageOnce(db, userId, "dsh:priority", turn, "user", `问题 ${turn}`);
+      saveMessageOnce(db, assistantId, "dsh:priority", turn, "assistant", `回答 ${turn}`);
+      const memory = upsertTurnMemory(db, {
+        sessionId: "dsh:priority",
+        summary,
+        outcome: "completed",
+        sources: [
+          { messageId: userId, turnIndex: turn },
+          { messageId: assistantId, turnIndex: turn },
+        ],
+      });
+      replaceNavigationTriples(db, memory, [triple]);
+      return memory;
+    };
+    const exact = remember(1, "品牌模板主题色是深海蓝。", {
+      subject: "品牌模板",
+      predicate: "主题色",
+      object: "深海蓝",
+    });
+    const weak = remember(2, "团队晚餐选择了面条。", {
+      subject: "团队晚餐",
+      predicate: "选择",
+      object: "面条",
+    });
+    detectNavigationCommunities(db);
+
+    const seeds = findNavigationSeedTermIds(db, "深海蓝是什么模板的主题色？", [weak.id]);
+    const candidates = navigationCandidateTermIds(db, seeds);
+    const scores = personalizedNavigationPageRank(db, seeds, candidates, DEFAULT_CONFIG).scores;
+    expect(rankTurnMemoryIdsByNavigation(db, scores)).toContain(exact.id);
+    expect(rankTurnMemoryIdsByNavigation(db, scores)).not.toContain(weak.id);
+  });
+
+  it("prefers a specific compound navigation term over its generic hub", () => {
+    const add = (
+      turn: number,
+      summary: string,
+      triple: { subject: string; predicate: string; object: string },
+    ) => {
+      const userId = `specific-user-${turn}`;
+      const assistantId = `specific-assistant-${turn}`;
+      saveMessageOnce(db, userId, "dsh:specific", turn, "user", `问题 ${turn}`);
+      saveMessageOnce(db, assistantId, "dsh:specific", turn, "assistant", `回答 ${turn}`);
+      const memory = upsertTurnMemory(db, {
+        sessionId: "dsh:specific",
+        summary,
+        outcome: "completed",
+        sources: [
+          { messageId: userId, turnIndex: turn },
+          { messageId: assistantId, turnIndex: turn },
+        ],
+      });
+      replaceNavigationTriples(db, memory, [triple]);
+      return memory;
+    };
+    const exact = add(1, "为 ReleaseOrchestrator addService 增加依赖支持。", {
+      subject: "ReleaseOrchestrator addService",
+      predicate: "支持",
+      object: "dependencies",
+    });
+    add(2, "ReleaseOrchestrator 的负责人是唐宁。", {
+      subject: "ReleaseOrchestrator",
+      predicate: "负责人",
+      object: "唐宁",
+    });
+    detectNavigationCommunities(db);
+
+    const seeds = findNavigationSeedTermIds(db, "ReleaseOrchestrator addService", []);
+    const labels = seeds.map(id => db.prepare(
+      "SELECT display_text FROM gm_navigation_terms WHERE id=?",
+    ).get(id) as { display_text: string });
+    expect(labels.map(row => row.display_text)).toEqual(["ReleaseOrchestrator addService"]);
+    const scores = personalizedNavigationPageRank(
+      db,
+      seeds,
+      navigationCandidateTermIds(db, seeds),
+      DEFAULT_CONFIG,
+    ).scores;
+    expect(rankTurnMemoryIdsByNavigation(db, scores)[0]).toBe(exact.id);
   });
 
   it("does not let a covered graph node bypass a rejected summary", async () => {

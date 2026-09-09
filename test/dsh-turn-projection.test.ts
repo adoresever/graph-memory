@@ -105,7 +105,7 @@ describe("DSH completed-turn surface projection", () => {
     });
     expect(result.shadowedTokenCount).toBe(200);
     expect(appended[1].options).toEqual({
-      surfaceOp: { op: "replace", start: 3, end: 4 },
+      surfaceOp: { op: "replace", startSeq: 3, endSeq: 4 },
       sourceEventSeqs: [10, 3, 4],
     });
   });

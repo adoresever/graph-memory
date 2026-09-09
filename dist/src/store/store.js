@@ -674,7 +674,7 @@ export function replaceNavigationTriples(db, memory, triples) {
     }
 }
 /** Return navigation in the same memory-relevance order supplied by recall. */
-export function getNavigationTriplesForMemories(db, memoryIds) {
+export function getNavigationTriplesForMemories(db, memoryIds, termScores) {
     if (!memoryIds.length)
         return [];
     const query = db.prepare(`
@@ -688,19 +688,143 @@ export function getNavigationTriplesForMemories(db, memoryIds) {
     WHERE triple.memory_id=?
     ORDER BY triple.created_at, triple.id
   `);
-    return memoryIds.flatMap(memoryId => query.all(memoryId).map(row => ({
-        id: String(row.id),
-        memoryId: String(row.memory_id),
-        sessionId: String(row.session_id),
-        subjectId: String(row.subject_id),
-        subject: String(row.subject),
-        predicate: String(row.predicate),
-        objectId: String(row.object_id),
-        object: String(row.object),
-        subjectCommunityId: row.subject_community_id ? String(row.subject_community_id) : null,
-        objectCommunityId: row.object_community_id ? String(row.object_community_id) : null,
-        createdAt: Number(row.created_at),
-    })));
+    return memoryIds.flatMap(memoryId => {
+        const triples = query.all(memoryId).map(row => ({
+            id: String(row.id),
+            memoryId: String(row.memory_id),
+            sessionId: String(row.session_id),
+            subjectId: String(row.subject_id),
+            subject: String(row.subject),
+            predicate: String(row.predicate),
+            objectId: String(row.object_id),
+            object: String(row.object),
+            subjectCommunityId: row.subject_community_id ? String(row.subject_community_id) : null,
+            objectCommunityId: row.object_community_id ? String(row.object_community_id) : null,
+            createdAt: Number(row.created_at),
+        }));
+        if (!termScores?.size || triples.length < 2)
+            return triples;
+        // A selected source memory may contain many facts. Send only the edge(s)
+        // that best explain this query-time graph route; the complete original Q/A
+        // remains the factual evidence and is never shortened here.
+        const relevance = triples.map(triple => {
+            const subject = termScores.get(triple.subjectId) ?? 0;
+            const object = termScores.get(triple.objectId) ?? 0;
+            return {
+                triple,
+                connected: subject > 0 && object > 0,
+                score: subject > 0 && object > 0
+                    ? Math.sqrt(subject * object)
+                    : Math.max(subject, object),
+            };
+        });
+        const connected = relevance.some(candidate => candidate.connected);
+        const eligible = connected
+            ? relevance.filter(candidate => candidate.connected)
+            : relevance;
+        const best = Math.max(...eligible.map(candidate => candidate.score));
+        return eligible
+            .filter(candidate => candidate.score === best)
+            .map(candidate => candidate.triple);
+    });
+}
+/**
+ * Resolve query seeds from the compact SPO index without another model call.
+ * Summary vectors handle paraphrases; this path deliberately handles literal
+ * entity/attribute mentions and preserves the graph's exact vocabulary.
+ */
+export function findNavigationSeedTermIds(db, query, memoryIds = []) {
+    const normalizedQuery = normalizedNavigationTerm(query);
+    const seeds = [];
+    const seen = new Set();
+    const append = (id) => {
+        if (seen.has(id))
+            return;
+        seen.add(id);
+        seeds.push(id);
+    };
+    if (normalizedQuery) {
+        const rows = db.prepare("SELECT id, normalized FROM gm_navigation_terms ORDER BY updated_at DESC, id").all();
+        const literalMatches = rows.filter(row => normalizedQuery.includes(row.normalized) || row.normalized.includes(normalizedQuery));
+        // Prefer the most specific stored phrase. If both "ReleaseOrchestrator"
+        // and "ReleaseOrchestrator addService" match, the shorter hub must not
+        // expand unrelated memories. Independent terms remain separate seeds.
+        for (const row of literalMatches) {
+            const isContainedByMoreSpecificMatch = literalMatches.some(other => other.id !== row.id
+                && other.normalized.length > row.normalized.length
+                && other.normalized.includes(row.normalized));
+            if (!isContainedByMoreSpecificMatch)
+                append(String(row.id));
+        }
+    }
+    // Literal entity/attribute evidence is the strongest routing signal. Only
+    // fall back to endpoints from semantically matched summaries when the user
+    // phrased the question differently from every stored navigation term.
+    if (!seeds.length && memoryIds.length) {
+        const statement = db.prepare(`
+      SELECT subject_id, object_id
+      FROM gm_navigation_triples
+      WHERE memory_id=?
+      ORDER BY created_at, id
+    `);
+        for (const memoryId of memoryIds) {
+            for (const row of statement.all(memoryId)) {
+                append(String(row.subject_id));
+                append(String(row.object_id));
+            }
+        }
+    }
+    return seeds;
+}
+/**
+ * A community is a local candidate scope, never prompt content by itself.
+ * When fresh terms have not been assigned yet, the complete compact graph is
+ * still cheap enough for query-time PPR and avoids a false negative.
+ */
+export function navigationCandidateTermIds(db, seedIds) {
+    if (!seedIds.length)
+        return [];
+    const communityStatement = db.prepare("SELECT community_id FROM gm_navigation_terms WHERE id=?");
+    const communities = new Set();
+    for (const seedId of seedIds) {
+        const row = communityStatement.get(seedId);
+        if (row?.community_id)
+            communities.add(String(row.community_id));
+    }
+    if (!communities.size) {
+        return db.prepare("SELECT id FROM gm_navigation_terms ORDER BY id").all()
+            .map(row => String(row.id));
+    }
+    const candidates = new Set(seedIds);
+    const statement = db.prepare("SELECT id FROM gm_navigation_terms WHERE community_id=? ORDER BY id");
+    for (const community of communities) {
+        for (const row of statement.all(community))
+            candidates.add(String(row.id));
+    }
+    return Array.from(candidates);
+}
+/** Map query-local graph relevance back to the exact dialogue evidence. */
+export function rankTurnMemoryIdsByNavigation(db, termScores) {
+    if (!termScores.size)
+        return [];
+    const scores = new Map();
+    const rows = db.prepare(`
+    SELECT memory_id, subject_id, object_id
+    FROM gm_navigation_triples
+    ORDER BY created_at, id
+  `).all();
+    for (const row of rows) {
+        // Max endpoint relevance prevents a verbose turn with many triples from
+        // outranking a concise turn solely because it emitted more graph edges.
+        const score = Math.max(termScores.get(String(row.subject_id)) ?? 0, termScores.get(String(row.object_id)) ?? 0);
+        const memoryId = String(row.memory_id);
+        if (score > (scores.get(memoryId) ?? 0))
+            scores.set(memoryId, score);
+    }
+    return Array.from(scores)
+        .filter(([, score]) => score > 0)
+        .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+        .map(([memoryId]) => memoryId);
 }
 export function updateNavigationCommunities(db, labels) {
     const statement = db.prepare("UPDATE gm_navigation_terms SET community_id=? WHERE id=?");

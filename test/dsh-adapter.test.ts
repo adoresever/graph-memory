@@ -5,7 +5,13 @@ import { join } from "node:path";
 
 import { apply } from "../dsh.ts";
 import { GRAPH_EXTRACTION_TOOL_NAME } from "../src/extractor/contract.ts";
+import { detectNavigationCommunities } from "../src/graph/community.ts";
 import { DatabaseSync } from "../src/store/sqlite.ts";
+import {
+  replaceNavigationTriples,
+  saveMessageOnce,
+  upsertTurnMemory,
+} from "../src/store/store.ts";
 
 function user(seq: number) {
   return {
@@ -141,8 +147,8 @@ describe("native DSH context takeover", () => {
         const event = { type, seq, data, ...options };
         events.push(event);
         if (options?.surfaceOp?.op === "replace") {
-          const start = surface.indexOf(options.surfaceOp.start);
-          const end = surface.indexOf(options.surfaceOp.end);
+          const start = surface.indexOf(options.surfaceOp.startSeq);
+          const end = surface.indexOf(options.surfaceOp.endSeq);
           surface.splice(start, end - start + 1, seq);
         }
         return event;
@@ -176,7 +182,7 @@ describe("native DSH context takeover", () => {
     });
     expect(events.at(-1)).toMatchObject({
       type: "user/message",
-      surfaceOp: { op: "replace", start: 0, end: 1 },
+      surfaceOp: { op: "replace", startSeq: 0, endSeq: 1 },
       data: { source: { kind: "plugin", plugin: "graph-memory" } },
     });
     expect(surface).toEqual([events.length - 1, 2, 3, 4, 5]);
@@ -237,8 +243,8 @@ describe("native DSH context takeover", () => {
         const event = { type, seq, data, ...options };
         events.push(event);
         if (options?.surfaceOp?.op === "replace") {
-          const startPosition = surface.nodes.indexOf(options.surfaceOp.start);
-          const endPosition = surface.nodes.indexOf(options.surfaceOp.end);
+          const startPosition = surface.nodes.indexOf(options.surfaceOp.startSeq);
+          const endPosition = surface.nodes.indexOf(options.surfaceOp.endSeq);
           surface.nodes.splice(startPosition, endPosition - startPosition + 1, seq);
           compactions += 1;
         }
@@ -311,6 +317,126 @@ describe("native DSH context takeover", () => {
     expect(surfaceChars).toBeLessThan(uncompressedChars * 0.22);
     await Promise.all(cleanups.map(cleanup => cleanup()));
   });
+
+  it("injects SPO/PPR-selected cross-session source Q/A before the current user", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gm-dsh-navigation-recall-"));
+    const dbPath = join(dir, "graph-memory.db");
+    const listeners = new Map<string, Array<(...args: any[]) => any>>();
+    const cleanups: Array<() => void | Promise<void>> = [];
+    const context: any = {
+      logger: { info() {}, warn() {}, error() {} },
+      llm: { async *stream() {} },
+      tools: { register() { return () => {}; } },
+      credentials: { async resolve() { return undefined; } },
+      tokenMeter: { measure() { return { nodes: [] }; } },
+      on(name: string, listener: (...args: any[]) => any, options?: Record<string, unknown>) {
+        const current = listeners.get(name) ?? [];
+        if (options?.prepend) current.unshift(listener);
+        else current.push(listener);
+        listeners.set(name, current);
+        return () => {};
+      },
+      effect(register: () => () => void | Promise<void>) {
+        cleanups.push(register());
+        return () => {};
+      },
+    };
+    apply(context, {
+      dbPath,
+      extractionEnabled: false,
+      recallEnabled: true,
+      contextCompactionEnabled: false,
+      recallMaxNodes: 2,
+    });
+
+    const stored = new DatabaseSync(dbPath);
+    const addMemory = (
+      turn: number,
+      summary: string,
+      question: string,
+      answer: string,
+      triple: { subject: string; predicate: string; object: string },
+    ) => {
+      const userId = `dsh:history:user:${turn}`;
+      const assistantId = `dsh:history:assistant:${turn}`;
+      saveMessageOnce(stored, userId, "dsh:history", turn, "user", question);
+      saveMessageOnce(stored, assistantId, "dsh:history", turn, "assistant", answer);
+      const memory = upsertTurnMemory(stored, {
+        sessionId: "dsh:history",
+        summary,
+        outcome: "completed",
+        sources: [
+          { messageId: userId, turnIndex: turn },
+          { messageId: assistantId, turnIndex: turn },
+        ],
+      });
+      replaceNavigationTriples(stored, memory, [triple]);
+    };
+    addMemory(
+      1,
+      "季度汇报演示文稿使用品牌模板。",
+      "季度汇报 PPT 使用哪个模板？",
+      "季度汇报 PPT 使用品牌模板。",
+      { subject: "季度汇报 PPT", predicate: "使用", object: "品牌模板" },
+    );
+    addMemory(
+      2,
+      "品牌模板的主题色是深海蓝。",
+      "品牌模板的主题色是什么？",
+      "主题色是深海蓝。",
+      { subject: "品牌模板", predicate: "主题色", object: "深海蓝" },
+    );
+    addMemory(
+      3,
+      "晚餐选择了面条。",
+      "晚餐吃什么？",
+      "晚餐选择了面条。",
+      { subject: "晚餐", predicate: "选择", object: "面条" },
+    );
+    detectNavigationCommunities(stored);
+    stored.close();
+
+    const agentListeners = new Map<string, Array<(...args: any[]) => any>>();
+    const agent: any = {
+      id: "current-session",
+      session: { id: "current-session", events: [], surface: { nodes: [] } },
+      ctx: {
+        on(name: string, listener: (...args: any[]) => any, options?: Record<string, unknown>) {
+          const current = agentListeners.get(name) ?? [];
+          if (options?.prepend) current.unshift(listener);
+          else current.push(listener);
+          agentListeners.set(name, current);
+          return () => {};
+        },
+      },
+    };
+    listeners.get("agent/created")![0]({ agent });
+    const currentUser = {
+      id: "current-user",
+      role: "user",
+      source: { kind: "user" },
+      content: [{ type: "text", text: "深海蓝是什么模板的主题色？" }],
+    };
+    const decision = await agentListeners.get("agent/pre-step")![0]({
+      agent,
+      messages: [currentUser],
+      signal: new AbortController().signal,
+      step: 1,
+    }, async () => ({ kind: "enter", messages: [currentUser] }));
+
+    expect(decision.kind).toBe("enter");
+    expect(decision.messages).toHaveLength(2);
+    expect(decision.messages[0].source).toMatchObject({ kind: "plugin", plugin: "graph-memory" });
+    const recalled = decision.messages[0].content[0].text;
+    expect(recalled).toContain("季度汇报 PPT 使用品牌模板");
+    expect(recalled).toContain("主题色是深海蓝");
+    expect(recalled).toContain("<navigation_graph>");
+    expect(recalled).not.toContain("晚餐选择了面条");
+    expect(decision.messages[1]).toBe(currentUser);
+
+    await Promise.all(cleanups.map(cleanup => cleanup()));
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 function userMsg(seq: number, text: string) {
@@ -321,8 +447,8 @@ function userMsg(seq: number, text: string) {
   };
 }
 
-const EMPTY_EXTRACTION = '{"turn":{"summary":"question was answered","outcome":"informational"},"triples":[]}';
-const TURN_TWO_EMPTY_EXTRACTION = '{"turn":{"summary":"new question was answered","outcome":"informational"},"triples":[]}';
+const EMPTY_EXTRACTION = '{"summary":"question was answered","outcome":"informational","triples":[]}';
+const TURN_TWO_EMPTY_EXTRACTION = '{"summary":"new question was answered","outcome":"informational","triples":[]}';
 
 function structuredExtraction(argumentsJson: string) {
   return {
@@ -503,7 +629,7 @@ describe("DSH completed-turn memory extraction", () => {
     expect(requests[0].reasoningEffort).toBe("off");
     expect(requests[0].tools).toHaveLength(1);
     expect(requests[0].tools[0].name).toBe(GRAPH_EXTRACTION_TOOL_NAME);
-    expect(requests[0].tools[0].parameters.required).toEqual(["turn", "triples"]);
+    expect(requests[0].tools[0].parameters.required).toEqual(["summary", "outcome", "triples"]);
     const prompt = requests[0].messages[0].content[0].text;
     expect(prompt).toContain("What should we remember?");
     expect(prompt).toContain("Remember the verified final result.");
@@ -635,11 +761,13 @@ describe("DSH completed-turn memory extraction", () => {
     const requests: any[] = [];
     const outputs = [
       JSON.stringify({
-        turn: { summary: "项目端口确认为 8080。", outcome: "informational" },
+        summary: "项目端口确认为 8080。",
+        outcome: "informational",
         triples: [{ subject: "项目端口", predicate: "确认为", object: "8080" }],
       }),
       JSON.stringify({
-        turn: { summary: "项目端口从 8080 修订为 9090。", outcome: "completed" },
+        summary: "项目端口从 8080 修订为 9090。",
+        outcome: "completed",
         triples: [{ subject: "项目端口", predicate: "修订为", object: "9090" }],
       }),
     ];

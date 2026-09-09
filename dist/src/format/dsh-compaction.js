@@ -48,9 +48,16 @@ export function selectDshRollingCompactionRange(session, freshTurnCount, current
     // pre-step runs before DSH appends the newly claimed prompt. Retain N
     // completed previous user turns; the current prompt is appended afterwards.
     const keepFromPosition = userPositions[userPositions.length - retainOnSurface];
-    if (keepFromPosition <= 0)
+    // DSH protects the system prompt at surface node 0: only another
+    // system/message may replace exactly that node. Keep it outside Graph
+    // Memory's historical projection, both to respect that invariant and to
+    // preserve the stable system-prefix cache. A prior Graph Memory archive
+    // marker sits after the head and is deliberately folded into the next
+    // replacement so archive markers stay constant-size instead of accumulating.
+    const protectedHead = events[surface[0]]?.type === "system/message" ? 1 : 0;
+    if (keepFromPosition <= protectedHead)
         return null;
-    const shadowedSeqs = surface.slice(0, keepFromPosition);
+    const shadowedSeqs = surface.slice(protectedHead, keepFromPosition);
     if (!shadowedSeqs.length)
         return null;
     return {
@@ -95,7 +102,8 @@ export function replaceDshArchivedPrefix(session, tokenMeter, range) {
         source: { kind: "plugin", plugin: "graph-memory" },
         content: [{ type: "text", text: DSH_ARCHIVE_MARKER }],
     }, {
-        surfaceOp: { op: "replace", start: range.start, end: range.end },
+        // Match the current DSH Session surface-operation contract exactly.
+        surfaceOp: { op: "replace", startSeq: range.start, endSeq: range.end },
         sourceEventSeqs: [prune.seq, ...range.shadowedSeqs],
     });
     return {

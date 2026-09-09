@@ -272,10 +272,16 @@ export function apply(ctx, input = {}) {
             })),
         });
         replaceNavigationTriples(db, turnMemory, result.triples);
+        // The navigation graph becomes queryable only after its atomic SPO write.
+        // This runs inside the existing background extraction worker, never in the
+        // foreground turn, and makes the newest completed memory available to PPR.
+        invalidateGraphCache(db);
+        const navigationCommunities = detectNavigationCommunities(db);
         // Extraction does not wait for provider initialization, but the summary
         // must still be embedded once that shared initialization completes.
         void embeddingReady.then(() => recaller.syncTurnMemoryEmbed(turnMemory));
-        ctx.logger.info(`[graph-memory] DSH stored one turn summary and ${result.triples.length} navigation triples`);
+        ctx.logger.info(`[graph-memory] DSH stored one turn summary and ${result.triples.length} navigation triples ` +
+            `(${navigationCommunities.count} local communities)`);
     }
     function storedVisibleText(content) {
         try {
@@ -384,7 +390,7 @@ export function apply(ctx, input = {}) {
         return result;
     }
     function runGraphMaintenance() {
-        invalidateGraphCache();
+        invalidateGraphCache(db);
         const pagerank = computeGlobalPageRank(db, config);
         const communities = detectCommunities(db);
         const navigationCommunities = detectNavigationCommunities(db);
@@ -702,7 +708,7 @@ export function apply(ctx, input = {}) {
                 content: String(args.content),
             }, sid);
             await recaller.syncEmbed(node);
-            invalidateGraphCache();
+            invalidateGraphCache(db);
             return `Recorded ${node.type}:${node.name}`;
         },
     });

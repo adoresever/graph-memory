@@ -27,15 +27,18 @@
  * ═══════════════════════════════════════════════════════════════
  */
 import { updatePageranks } from "../store/store.js";
-let _cached = null;
-const CACHE_TTL = 30_000; // 30 秒缓存
+// Cache by concrete SQLite connection. A process can host multiple DSH
+// profiles/tests, and graph data from one database must never leak to another.
+let _graphCache = new WeakMap();
+let _navigationGraphCache = new WeakMap();
 /**
- * 读取图结构（带缓存）
- * compact 会新增节点/边，但 30 秒内的查询共享同一份图结构没问题
+ * 读取图结构（按数据库连接缓存）。写入方在事务成功后显式失效，
+ * 因而查询不会依赖时间窗口或读取另一 profile 的图。
  */
 function loadGraph(db) {
-    if (_cached && Date.now() - _cached.cachedAt < CACHE_TTL)
-        return _cached;
+    const cached = _graphCache.get(db);
+    if (cached)
+        return cached;
     const nodeRows = db.prepare("SELECT id FROM gm_nodes WHERE status='active'").all();
     const nodeIds = new Set(nodeRows.map((r) => r.id));
     const edgeRows = db.prepare("SELECT from_id, to_id FROM gm_edges").all();
@@ -48,12 +51,87 @@ function loadGraph(db) {
         adj.get(e.from_id).push(e.to_id);
         adj.get(e.to_id).push(e.from_id);
     }
-    _cached = { nodeIds, adj, N: nodeIds.size, cachedAt: Date.now() };
-    return _cached;
+    const graph = { nodeIds, adj, N: nodeIds.size };
+    _graphCache.set(db, graph);
+    return graph;
 }
 /** 图结构变化后清除缓存。 */
-export function invalidateGraphCache() {
-    _cached = null;
+export function invalidateGraphCache(db) {
+    if (db) {
+        _graphCache.delete(db);
+        _navigationGraphCache.delete(db);
+        return;
+    }
+    _graphCache = new WeakMap();
+    _navigationGraphCache = new WeakMap();
+}
+/** Load the summary-derived SPO navigation graph through the same cache. */
+function loadNavigationGraph(db) {
+    const cached = _navigationGraphCache.get(db);
+    if (cached)
+        return cached;
+    const nodeRows = db.prepare("SELECT id FROM gm_navigation_terms ORDER BY id").all();
+    const nodeIds = new Set(nodeRows.map(row => String(row.id)));
+    const edgeRows = db.prepare("SELECT subject_id AS from_id, object_id AS to_id FROM gm_navigation_triples").all();
+    const adj = new Map();
+    for (const id of nodeIds)
+        adj.set(id, []);
+    for (const edge of edgeRows) {
+        const from = String(edge.from_id);
+        const to = String(edge.to_id);
+        if (!nodeIds.has(from) || !nodeIds.has(to))
+            continue;
+        // Repeated evidence intentionally contributes another edge occurrence.
+        // This lets recurring dialogue relations carry more navigational weight
+        // without inventing a model-derived confidence score.
+        adj.get(from).push(to);
+        adj.get(to).push(from);
+    }
+    const graph = { nodeIds, adj, N: nodeIds.size };
+    _navigationGraphCache.set(db, graph);
+    return graph;
+}
+function personalizedRank(graph, seedIds, cfg, seedWeights) {
+    const { nodeIds, adj, N } = graph;
+    if (N === 0 || seedIds.length === 0)
+        return new Map();
+    const validSeeds = Array.from(new Set(seedIds.filter(id => nodeIds.has(id))));
+    if (!validSeeds.length)
+        return new Map();
+    const rawWeights = validSeeds.map(id => Math.max(0, seedWeights?.get(id) ?? 1));
+    const providedTotal = rawWeights.reduce((sum, value) => sum + value, 0);
+    const teleport = new Map(validSeeds.map((id, index) => [
+        id,
+        providedTotal > 0 ? rawWeights[index] / providedTotal : 1 / validSeeds.length,
+    ]));
+    let rank = new Map();
+    for (const id of nodeIds)
+        rank.set(id, teleport.get(id) ?? 0);
+    for (let iteration = 0; iteration < cfg.pagerankIterations; iteration += 1) {
+        const next = new Map();
+        for (const id of nodeIds) {
+            next.set(id, (1 - cfg.pagerankDamping) * (teleport.get(id) ?? 0));
+        }
+        let dangling = 0;
+        for (const [nodeId, neighbors] of adj) {
+            const score = rank.get(nodeId) ?? 0;
+            if (!neighbors.length) {
+                dangling += score;
+                continue;
+            }
+            const contribution = cfg.pagerankDamping * score / neighbors.length;
+            for (const neighbor of neighbors) {
+                next.set(neighbor, (next.get(neighbor) ?? 0) + contribution);
+            }
+        }
+        if (dangling > 0) {
+            for (const seed of validSeeds) {
+                next.set(seed, (next.get(seed) ?? 0) + cfg.pagerankDamping * dangling * (teleport.get(seed) ?? 0));
+            }
+        }
+        rank = next;
+    }
+    return rank;
 }
 /**
  * 个性化 PageRank
@@ -68,72 +146,25 @@ export function invalidateGraphCache() {
  */
 export function personalizedPageRank(db, seedIds, candidateIds, cfg, seedWeights) {
     const graph = loadGraph(db);
-    const { nodeIds, adj, N } = graph;
-    const damping = cfg.pagerankDamping;
-    const iterations = cfg.pagerankIterations;
-    if (N === 0 || seedIds.length === 0) {
+    const rank = personalizedRank(graph, seedIds, cfg, seedWeights);
+    if (!rank.size)
         return { scores: new Map() };
-    }
-    // 种子节点集合（过滤掉不存在的）
-    const validSeeds = seedIds.filter(id => nodeIds.has(id));
-    if (validSeeds.length === 0)
-        return { scores: new Map() };
-    // teleport 向量：优先保留查询相关性；旧调用方未提供权重时
-    // 仍保持均匀分配。Without this, vector similarity is discarded as soon
-    // as graph propagation starts and weak seeds can outrank the best match.
-    const rawWeights = validSeeds.map(id => Math.max(0, seedWeights?.get(id) ?? 1));
-    const totalWeight = rawWeights.reduce((sum, value) => sum + value, 0) || validSeeds.length;
-    const teleport = new Map(validSeeds.map((id, index) => [
-        id,
-        totalWeight === validSeeds.length && rawWeights.every(value => value === 0)
-            ? 1 / validSeeds.length
-            : rawWeights[index] / totalWeight,
-    ]));
-    // 初始分数：集中在种子节点上
-    let rank = new Map();
-    for (const id of nodeIds) {
-        rank.set(id, teleport.get(id) ?? 0);
-    }
-    // 迭代
-    for (let i = 0; i < iterations; i++) {
-        const newRank = new Map();
-        // teleport 分量：回到种子节点
-        for (const id of nodeIds) {
-            newRank.set(id, (1 - damping) * (teleport.get(id) ?? 0));
-        }
-        // 传播分量：从邻居获得权重
-        for (const [nodeId, neighbors] of adj) {
-            if (neighbors.length === 0)
-                continue;
-            const contrib = (rank.get(nodeId) || 0) / neighbors.length;
-            if (contrib === 0)
-                continue;
-            for (const nb of neighbors) {
-                newRank.set(nb, (newRank.get(nb) || 0) + damping * contrib);
-            }
-        }
-        // dangling nodes 的分数传播回种子节点（不是均匀分配到所有节点）
-        let danglingSum = 0;
-        for (const id of nodeIds) {
-            const neighbors = adj.get(id);
-            if (!neighbors || neighbors.length === 0) {
-                danglingSum += rank.get(id) || 0;
-            }
-        }
-        if (danglingSum > 0) {
-            for (const sid of validSeeds) {
-                const danglingContrib = damping * danglingSum * (teleport.get(sid) ?? 0);
-                newRank.set(sid, (newRank.get(sid) || 0) + danglingContrib);
-            }
-        }
-        rank = newRank;
-    }
     // 只返回候选节点的分数
     const result = new Map();
     for (const id of candidateIds) {
         result.set(id, rank.get(id) || 0);
     }
     return { scores: result };
+}
+/** Query-time PPR over the compact summary-derived SPO navigation graph. */
+export function personalizedNavigationPageRank(db, seedIds, candidateIds, cfg, seedWeights) {
+    const rank = personalizedRank(loadNavigationGraph(db), seedIds, cfg, seedWeights);
+    if (!rank.size)
+        return { scores: new Map() };
+    const scores = new Map();
+    for (const id of candidateIds)
+        scores.set(id, rank.get(id) ?? 0);
+    return { scores };
 }
 /**
  * 全局 PageRank — 写入 gm_nodes.pagerank 作为基线

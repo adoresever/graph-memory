@@ -247,13 +247,19 @@ const graphMemoryPlugin = {
             })),
           });
           replaceNavigationTriples(db, turnMemory, result.triples);
+          // Recompute the compact navigation partition only after the SPO
+          // transaction lands. This is in the per-session background worker,
+          // so it adds no model call and cannot block the user's response.
+          invalidateGraphCache(db);
+          const navigationCommunities = detectNavigationCommunities(db);
           embeddingReady
             .then(() => recaller.syncTurnMemoryEmbed(turnMemory))
             .catch(() => {});
 
           markMessagesExtracted(db, messageIds);
           api.logger.info(
-            `[graph-memory] stored one turn summary and ${result.triples.length} navigation triples`,
+            `[graph-memory] stored one turn summary and ${result.triples.length} navigation triples ` +
+            `(${navigationCommunities.count} local communities)`,
           );
         } catch (err) {
           const error = err instanceof Error ? err : new Error(String(err));
@@ -460,7 +466,7 @@ const graphMemoryPlugin = {
 
         if (turns % maintainInterval === 0) {
           try {
-            invalidateGraphCache();
+            invalidateGraphCache(db);
             const pr = computeGlobalPageRank(db, cfg);
             const comm = detectCommunities(db);
             const navigationComm = detectNavigationCommunities(db);

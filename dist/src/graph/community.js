@@ -111,8 +111,7 @@ function propagateLabels(nodeIds, edgeRows, maxIter) {
     };
 }
 /**
- * 获取同社区的节点 ID 列表
- * recall 时用：找到种子节点 → 拉同社区的其他节点作为补充
+ * 获取旧概念图中同社区的节点 ID 列表。
  */
 export function getCommunityPeers(db, nodeId, limit = 5) {
     const row = db.prepare("SELECT community_id FROM gm_nodes WHERE id=? AND status='active'").get(nodeId);

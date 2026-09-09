@@ -4,7 +4,7 @@
  * By: adoresever
  * Email: Wywelljob@gmail.com
  */
-import { GRAPH_EXTRACTION_SCHEMA, assertGraphExtractionContract } from "./contract.js";
+import { assertGraphExtractionContract } from "./contract.js";
 /** Read only visible text from a host message already selected as a Q/A pair. */
 export function normalizeExtractionContent(value) {
     if (value === null || value === undefined)
@@ -30,29 +30,34 @@ export function normalizeExtractionContent(value) {
     return "";
 }
 // ─── 提取 System Prompt ─────────────────────────────────────────
-const EXTRACT_SYS = `把一个已完成的对话轮转换为“摘要 + 主语—谓词—宾语”。
+const EXTRACT_SYS = `【任务】
+把一个已完成的对话轮转换为一句摘要和零条或多条主语—谓词—宾语关系。
 
-规则：
-1. Current Turn 是本轮唯一事实来源，只含用户输入和最终可见回答。Previous Turn Summaries 仅用于消解代词、省略和“继续上一个”等指代，不能被当成本轮事实重复输出。
-2. summary 用一句简短、自包含的话写清本轮讨论或处理的对象、结论及明确报告的完成情况；不复述过程，不添加输入未表达的信息。
-3. outcome 只能是 completed、partial、failed、informational、unknown，按最终回答明确表达的状态选择。
-4. triples 只从 summary 拆分。subject 和 object 使用具体可检索短语，predicate 使用简短自然语言。没有明确关系就返回 []，不补充、不猜测。
-5. 严格按 Schema 调用结构化工具一次；字段必须完整，不增加字段，不输出解释。
+【输入】
+- Current Turn 是本轮唯一事实来源，只含用户输入和最终可见回答。
+- Previous Turn Summaries 仅用于消解代词、省略和“继续上一个”等指代，不能作为本轮事实重复输出。
+
+【处理原则】
+1. summary 用一句简短、自包含的话写清本轮对象、结论和最终回答明确报告的完成情况；不复述过程，不添加输入未表达的信息。
+2. outcome 按最终回答选择 completed、partial、failed、informational、unknown 之一。
+3. triples 只从 summary 拆分。subject 和 object 使用具体可检索短语，predicate 使用简短自然语言；没有明确关系时使用空数组，不补充、不猜测。
+
+【输出合同】
+只调用 submit_result 一次。参数对象必须且只能包含 summary、outcome、triples 三个顶层字段，三个字段都不能省略。不要输出解释或正文。
 
 示例一：
 输入：用户要求把周会改到周四；最终回答确认日程已更新。
-输出：{"turn":{"summary":"周会已改到周四，日程已更新。","outcome":"completed"},"triples":[{"subject":"周会","predicate":"改到","object":"周四"}]}
+输出：{"summary":"周会已改到周四，日程已更新。","outcome":"completed","triples":[{"subject":"周会","predicate":"改到","object":"周四"}]}
 
 示例二：
 前一轮摘要为“季度报告已完成初稿”。本轮用户说“继续这个”，最终回答说“已完成数据复核”。
-输出：{"turn":{"summary":"季度报告初稿已完成数据复核。","outcome":"completed"},"triples":[{"subject":"季度报告初稿","predicate":"完成","object":"数据复核"}]}
+输出：{"summary":"季度报告初稿已完成数据复核。","outcome":"completed","triples":[{"subject":"季度报告初稿","predicate":"完成","object":"数据复核"}]}
 
 示例三：
 输入只确认稍后继续讨论，没有新结论。
-输出：{"turn":{"summary":"本轮确认稍后继续讨论，未产生新结论。","outcome":"informational"},"triples":[]}
+输出：{"summary":"本轮确认稍后继续讨论，未产生新结论。","outcome":"informational","triples":[]}
 
-【输出 Schema】
-${JSON.stringify(GRAPH_EXTRACTION_SCHEMA)}`;
+调用前自检：参数是否恰好包含三个顶层字段；outcome 是否属于枚举；没有关系时 triples 是否仍明确写为 []。`;
 // ─── 提取 User Prompt ───────────────────────────────────────────
 const EXTRACT_USER = (msgs, priorTurns) => `<Previous Turn Summaries>
 ${priorTurns.length ? JSON.stringify(priorTurns.map(memory => memory.summary)) : "（无）"}
@@ -87,7 +92,7 @@ export class Extractor {
             // infer, rewrite, or reject the model's graph semantics from node types,
             // wording, lifecycle claims, or relation direction.
             return {
-                turn: { ...p.turn },
+                turn: { summary: p.summary, outcome: p.outcome },
                 triples: p.triples.map(triple => ({ ...triple })),
             };
         }

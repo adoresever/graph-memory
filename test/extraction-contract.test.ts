@@ -2,10 +2,8 @@ import { describe, expect, it } from "vitest";
 import { assertGraphExtractionContract, GRAPH_EXTRACTION_TOOL } from "../src/extractor/contract.ts";
 
 const validPayload = {
-  turn: {
-    summary: "本轮确认当前发布状态。",
-    outcome: "informational",
-  },
+  summary: "本轮确认当前发布状态。",
+  outcome: "informational",
   triples: [{
     subject: "当前版本",
     predicate: "状态为",

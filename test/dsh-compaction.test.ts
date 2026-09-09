@@ -43,6 +43,43 @@ describe("DSH rolling compaction selection", () => {
     )).toBeNull();
   });
 
+  it("preserves DSH's protected system head while archiving old turns", () => {
+    const events = [
+      { type: "system/message" },
+      user(), { type: "assistant/message" },
+      user(), { type: "assistant/message" },
+      user(), { type: "assistant/message" },
+    ];
+    expect(selectDshRollingCompactionRange(
+      { events, surface: { nodes: events.map((_, index) => index) } },
+      2,
+    )).toEqual({
+      start: 1,
+      end: 2,
+      shadowedSeqs: [1, 2],
+      retainedUserTurns: 2,
+    });
+  });
+
+  it("replaces an earlier archive marker together with the next expired turn", () => {
+    const events = [
+      { type: "system/message" },
+      user("plugin"),
+      user(), { type: "assistant/message" },
+      user(), { type: "assistant/message" },
+      user(), { type: "assistant/message" },
+    ];
+    expect(selectDshRollingCompactionRange(
+      { events, surface: { nodes: events.map((_, index) => index) } },
+      2,
+    )).toEqual({
+      start: 1,
+      end: 3,
+      shadowedSeqs: [1, 2, 3],
+      retainedUserTurns: 2,
+    });
+  });
+
   it("counts a claimed incoming user turn before DSH appends it to the surface", () => {
     const events = [
       user(), { type: "assistant/message" },

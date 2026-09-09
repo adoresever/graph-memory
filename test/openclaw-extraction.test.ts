@@ -25,10 +25,8 @@ describe("OpenClaw completed-turn extraction", () => {
     const dir = mkdtempSync(join(tmpdir(), "gm-openclaw-turn-"));
     const dbPath = join(dir, "memory.db");
     const payload = {
-      turn: {
-        summary: "用户要求记住结果，最终回答给出了已验证结果。",
-        outcome: "completed",
-      },
+      summary: "用户要求记住结果，最终回答给出了已验证结果。",
+      outcome: "completed",
       triples: [{
         subject: "最终回答",
         predicate: "保留",

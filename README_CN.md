@@ -13,7 +13,7 @@
   <a href="README.md">English</a> ·
   <a href="https://www.dsh.so/zh/artifact/graph-memory">dsh.so</a> ·
   <a href="benchmarks/dsh-context-takeover/README.md">20 轮实测</a> ·
-  <a href="docs/DSH_NATIVE_PLAN.md">架构文档</a>
+  <a href="docs/TURN_MEMORY_NAVIGATION_UPGRADE_CN.md">升级与移植指南</a>
 </p>
 
 <p align="center">
@@ -59,13 +59,15 @@ Graph Memory 接管的是**发给模型的历史表面**，不会删除 DSH 的�
 
 ## 安装到 DeepSeek Harness
 
-Node.js 22.13+ · 不 fork DSH · 当前 beta 可直接从 GitHub 安装：
+Node.js 22.13+ · 不 fork DSH · 优先从 npm 安装，网络受限时不再依赖 GitHub clone：
 
 ```bash
-npx @deepseek-ai/dsh plugin --profile web add github:adoresever/graph-memory
+npx @deepseek-ai/dsh plugin --profile web add graph-memory
 npx @deepseek-ai/dsh --profile web --dump-config
 npx @deepseek-ai/dsh web
 ```
+
+也可以直接安装仓库版本：`npx @deepseek-ai/dsh plugin --profile web add github:adoresever/graph-memory`。
 
 在 **Settings → Plugins** 确认 graph-memory/dsh 已启用。默认数据库位于 $DSH_HOME/graph-memory/graph-memory.db，通常是 ~/.dsh/graph-memory/graph-memory.db。
 
@@ -146,11 +148,12 @@ openclaw gateway restart
 
 ## 验证与边界
 
-当前 beta 1.6.0-beta.13 已通过 **124/124 自动化测试**、两套 TypeScript 构建、npm 包验证，并在官方 DSH 0.1.3-alpha.1（d347e70390）完成全新 profile 安装和启动。
+当前 beta 1.6.0-beta.15 已通过 **138/138 自动化测试**、两套 TypeScript 构建、npm 包验证，并用最新 DSH 源码完成真实 20 轮运行。
 
 - 结构化抽取仍依赖模型遵守合同：实测 19/20 成功；失败数据保持隔离，且不会阻塞前台对话。
 - 召回数量由 Top-K 限制。聚焦问题实测成功；一次包含多个主题的宽查询可能需要提高 Top-K 或拆开提问。
 - 当前发布的是工程工作流实测，不是 LoCoMo/LongMemEval 的通用分数。
+- 本次“轮次摘要 + SPO 导航 + 精确问答事实源”升级的设计、代码落点和移植步骤见 [升级与移植指南](docs/TURN_MEMORY_NAVIGATION_UPGRADE_CN.md)。
 
 从 [benchmarks/dsh-context-takeover/](benchmarks/dsh-context-takeover/) 复跑。原始对话、供应商响应、本地路径和密钥均未进入仓库。
 

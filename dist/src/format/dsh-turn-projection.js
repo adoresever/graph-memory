@@ -177,7 +177,10 @@ export function replaceDshCompletedTurnTrace(session, tokenMeter, range) {
                 text: `<graph-memory-trace turn="${range.turn}">Intermediate tool trace archived; the original question and final answer remain visible.</graph-memory-trace>`,
             }],
     }, {
-        surfaceOp: { op: "replace", start: range.start, end: range.end },
+        // DSH's public surface protocol names replacement bounds startSeq/endSeq.
+        // Using start/end writes the adjacent prune audit event but causes the
+        // actual surface append to be rejected, leaving the old trace visible.
+        surfaceOp: { op: "replace", startSeq: range.start, endSeq: range.end },
         sourceEventSeqs: [prune.seq, ...range.shadowedSeqs],
     });
     return {

@@ -11,16 +11,15 @@
  * 原理：每个节点初始自成一个社区，迭代中每个节点采纳邻居中最频繁的社区标签。
  *       收敛后自然形成社区划分。
  *
- * 为什么选 Label Propagation 而不是 Louvain：
- *   - 实现简单（50 行核心逻辑）
- *   - 不需要外部库
- *   - 对小图（< 10000 节点）效果够好
- *   - O(iterations * edges)，几千节点 < 5ms
+ * 为什么选 Label Propagation：
+ *   - 不需要外部依赖，也不需要预先指定社区数量
+ *   - O(iterations * edges)，适合随对话异步更新的小型导航图
+ *   - 社区仅缩小查询候选范围；查询相关性仍由实时 PPR 决定
  *
  * 用途：
  *   - 发现知识域（Docker 相关技能自动聚成一组）
- *   - recall 时可以拉整个社区的节点
- *   - assemble 时同社区节点放一起，上下文更连贯
+ *   - recall 时把社区作为候选范围，不把整个社区注入提示词
+ *   - PPR 选中 memory 后再回溯其原始问答证据
  *   - kg_stats 展示社区分布
  */
 
@@ -163,8 +162,7 @@ function propagateLabels(
 }
 
 /**
- * 获取同社区的节点 ID 列表
- * recall 时用：找到种子节点 → 拉同社区的其他节点作为补充
+ * 获取旧概念图中同社区的节点 ID 列表。
  */
 export function getCommunityPeers(db: DatabaseSyncInstance, nodeId: string, limit = 5): string[] {
   const row = db.prepare(

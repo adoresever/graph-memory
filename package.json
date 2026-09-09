@@ -1,6 +1,6 @@
 {
   "name": "graph-memory",
-  "version": "1.6.0-beta.14",
+  "version": "1.6.0-beta.15",
   "description": "Knowledge graph memory for DeepSeek Harness and OpenClaw — cross-session recall, PageRank, communities, and vector search",
   "keywords": [
     "deepseek-harness",
@@ -17,6 +17,9 @@
   "homepage": "https://github.com/adoresever/graph-memory#readme",
   "bugs": {
     "url": "https://github.com/adoresever/graph-memory/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "engines": {
     "node": ">=22.13.0"

@@ -29,7 +29,7 @@ export async function runMaintenance(db: DatabaseSyncInstance, cfg: GmConfig): P
   const start = Date.now();
 
   // New graph writes require a fresh ranking/cache view.
-  invalidateGraphCache();
+  invalidateGraphCache(db);
 
   // 1. 全局 PageRank（基线）
   const pagerankResult = computeGlobalPageRank(db, cfg);

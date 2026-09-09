@@ -17,7 +17,7 @@ import { detectCommunities, detectNavigationCommunities } from "./community.js";
 export async function runMaintenance(db, cfg) {
     const start = Date.now();
     // New graph writes require a fresh ranking/cache view.
-    invalidateGraphCache();
+    invalidateGraphCache(db);
     // 1. 全局 PageRank（基线）
     const pagerankResult = computeGlobalPageRank(db, cfg);
     // 2. 社区检测
