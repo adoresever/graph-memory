@@ -29,22 +29,34 @@
 
 Graph Memory owns the **model-visible historical surface** without deleting DSH's event log. By default it keeps the newest five completed user turns, removes completed reasoning/tool traces from future requests, and recalls relevant older or cross-session source Q/A automatically.
 
+## The 1.6 turn-memory navigation upgrade
+
+| Before | Now |
+|---|---|
+| Extract TASK / SKILL / EVENT directly from messages | Create one self-contained turn summary, then derive SPO from that same sentence |
+| Graph nodes could become the factual payload | Summary, SPO, and communities only navigate; original question and final answer remain the evidence |
+| Old memories from the active session could be filtered wholesale | Exclude only sources still visible in the fresh window; archived same-session and cross-session recall share one path |
+| Community expansion could pull a whole neighborhood | Local LPA narrows candidates, query-time PPR ranks them, and only matched Q/A is recovered |
+| DSH retained complete tool and reasoning traces | Completed turns retain question + final answer; older prefixes collapse to one fixed marker |
+
+Writing one completed turn costs exactly **one auxiliary LLM call**. Community detection and PPR are local. There are no hard-coded node/edge counts, semantic direction gates, or JSON repair that turns invalid output into accepted data. [Read the complete design, source map, and porting sequence →](docs/TURN_MEMORY_NAVIGATION_UPGRADE_CN.md)
+
 ## Measured first
 
 <p align="center">
   <img src="docs/images/dsh-context-takeover-chart.svg" alt="DSH 20-turn first-request context comparison" width="100%">
 </p>
 
-| Real 20-turn GLM-5.2 run | Native DSH | DSH + Graph Memory | Change |
+| Real 20-turn GLM-5.2 run | Historical native DSH baseline | Latest Graph Memory | Change |
 |---|---:|---:|---:|
-| T20 first request | 56,998 tokens | **16,769 tokens** | **−70.58%** |
-| T20 model-visible messages | 171 | **24** | **−85.96%** |
-| T01–T20 first-request context | 532,451 tokens | **257,656 tokens** | **−51.61%** |
-| All measured tokens¹ | 2,487,776 | **2,401,512** | **−3.47%** |
+| T20 first request | 56,998 tokens | **11,008 tokens** | **−80.69%** |
+| T20 model-visible messages | 171 | **21** | **−87.72%** |
+| T01–T20 first-request context | 532,451 tokens | **165,896 tokens** | **−68.84%** |
+| All measured tokens¹ | 2,487,776 | **2,327,728** | **−6.43%** |
 
-<sub>¹ Includes nondeterministic main-agent tool loops, 20 graph extractions, and 125 embedding requests. Context ownership is the direct adapter metric; the full bill is shown to avoid overstating savings.</sub>
+<sub>¹ The latest candidate includes 166 main-agent requests, 20 turn extractions, and 41 embedding requests; the historical baseline made 77 main requests. DSH commits and nondeterministic tool loops differ, so this is not a simultaneous strict A/B. First-request context is the direct takeover metric; the full bill remains visible.</sub>
 
-**20/20** scenario turns passed · **19/20** structured extractions succeeded · **42** nodes · **55** edges · **42** vectors · cross-session final facts recalled without `gm_search`.
+**20/20** scenario turns passed · **20/20** structured extractions succeeded · **0** quarantined · **20** turn summaries · **92** SPO triples · **30** communities · **20** summary vectors. T11, T19, and T20 automatically recalled out-of-window memory with exact source question and final answer.
 
 [Read the Markdown benchmark, per-turn data, method, and limits →](benchmarks/dsh-context-takeover/README.md)
 
@@ -148,9 +160,9 @@ The repository also contains an experimental read-only DSH Pro Lite Host + Clien
 
 ## Verification and limits
 
-Current beta `1.6.0-beta.15` passes **138/138 automated tests**, both TypeScript builds, npm package verification, and a real 20-turn run against the latest DSH source.
+Current beta `1.6.0-beta.16` passes **138/138 automated tests**, both TypeScript builds, npm package verification, and a real 20-turn run against the latest DSH source.
 
-- Structured extraction still depends on model contract compliance: the measured run succeeded 19/20 times; failures stay quarantined and never block the foreground conversation.
+- Structured extraction still depends on model contract compliance: the latest run succeeded 20/20 times; any future failure stays quarantined and never blocks the foreground conversation.
 - Recall is bounded by configurable Top-K. Focused probes succeeded; one broad multi-topic query can require a larger Top-K or separate questions.
 - The published run is an engineering workload, not a universal LoCoMo/LongMemEval score.
 - The design, source-code map, and porting sequence for the summary + SPO navigation + exact-Q/A upgrade are documented in the [Chinese upgrade guide](docs/TURN_MEMORY_NAVIGATION_UPGRADE_CN.md).

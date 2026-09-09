@@ -1,6 +1,6 @@
 # 轮次记忆导航升级与移植指南
 
-本文记录 Graph Memory `1.6.0-beta.15` 的“轮次摘要 + SPO 导航 + 精确问答事实源”升级。目标是让另一个基于旧版 Graph Memory 的项目能够按明确边界移植，而不是复制一批相互依赖、来源不明的补丁。
+本文记录 Graph Memory `1.6.0-beta.16` 的“轮次摘要 + SPO 导航 + 精确问答事实源”升级。目标是让另一个基于旧版 Graph Memory 的项目能够按明确边界移植，而不是复制一批相互依赖、来源不明的补丁。
 
 ## 一句话定义
 
@@ -52,6 +52,52 @@ DSH turn/end
   ├─ Reciprocal-rank 融合摘要路线和图路线
   └─ 命中 turn memory → 回溯并注入精确原始 Q/A
 ```
+
+## 从旧架构到新架构
+
+| 环节 | 旧实现 | 本次升级 | 为什么要改 |
+|---|---|---|---|
+| 轮次输入 | 宿主消息或一段混合历史 | 首个真实用户问题 + 最终可见回答 | 排除 reasoning、工具和中间草稿 |
+| 模型输出 | TASK/SKILL/EVENT 节点和固定关系类型 | `summary + outcome + triples` | 先有完整轮次语义，再生成轻量导航 |
+| 模型调用 | 容易把摘要、抽图拆开 | 每个完成轮次恰好一次 | 控制成本并避免两次输出不一致 |
+| 事实归属 | 图节点本身承担事实 | 原始 Q/A 才是事实；摘要/SPO 只索引 | 召回可以核对原文，不被摘要替代 |
+| 去重 | 依赖节点名或模型判断 | source IDs、规范化 term、稳定 hash ID | 重放幂等，跨轮次实体自然复用 |
+| 社区 | 旧概念图定期维护 | SPO 写入后本地 LPA 动态更新 | 新完成轮次立即可导航，不加 API |
+| 查询 | 节点向量 + 社区邻居 | 摘要向量/词法 + SPO/PPR 双路融合 | 同时覆盖近义问题与具体实体属性 |
+| 同会话召回 | 容易按 session 整体过滤 | 只排除仍在最近窗口内的 source IDs | 接管上下文后仍能找回窗口外本轮历史 |
+| DSH 压缩 | 宿主压缩或历史持续增长 | 插件用公共 surface replace 接管 | 不 fork DSH，不删除不可变事件 |
+
+## 模块迁移矩阵
+
+另一个项目应按下表移动“职责”，不要仅复制同名文件。宿主 API 不同的部分必须重写适配器，核心记忆模块可以直接复用。
+
+| 模块 | 关键接口/函数 | 输入 | 输出/副作用 | 是否宿主相关 |
+|---|---|---|---|---|
+| `src/types.ts` | `GmTurnMemory`、`GmNavigationTriple`、`ExtractionResult` | 无 | 全链路类型合同 | 否 |
+| `src/store/db.ts` | `m15_turn_memories`、`m16_navigation_triples` | 旧 SQLite | 增量建表，不破坏旧图 | 否 |
+| `src/store/store.ts` | `upsertTurnMemory()`、`replaceNavigationTriples()` | 摘要、状态、SPO、source IDs | 幂等轮次记录和原子导航图 | 否 |
+| `src/extractor/contract.ts` | `GRAPH_EXTRACTION_SCHEMA`、`GRAPH_EXTRACTION_TOOL` | 无 | provider-facing 工具合同 | 否 |
+| `src/extractor/extract.ts` | `Extractor.extract()` | Q/A + 少量前轮摘要 | 内部 `ExtractionResult` | 否 |
+| `src/engine/llm.ts` | `createCompleteFn()` | system/user prompt | 强制工具参数 JSON | provider 相关 |
+| `src/graph/community.ts` | `detectNavigationCommunities()` | SPO 图 | term 的社区标签 | 否 |
+| `src/graph/pagerank.ts` | `personalizedNavigationPageRank()` | 查询种子和候选 term | 查询相关 term 分数 | 否 |
+| `src/recaller/recall.ts` | `recall()`、`mergeTurnMemoryRanks()` | 当前用户 query | 排序后的 memory/SPO | 否 |
+| `src/format/assemble.ts` | `assembleContext()` | 命中 memory/SPO/source | 导航 XML + 精确 Q/A | 仅格式相关 |
+| `src/format/dsh-turn-projection.ts` | `projectDshCompletedTurnMemory()` | DSH 不可变事件 | 一对 user/final assistant | 是 |
+| `src/format/dsh-compaction.ts` | `selectDshRollingCompactionRange()`、`replaceDshArchivedPrefix()` | DSH surface | 保留最近 N 轮的替换事件 | 是 |
+| `src/format/dsh-recall.ts` | `filterDshRecallMemories()`、`insertDshRecallBeforeCurrentUser()` | recall + 当前 surface | 去重后的历史快照 | 是 |
+| `dsh.ts` | `captureCompletedTurn()`、`scheduleExtract()`、`compactBeforeStep()` | DSH 生命周期事件 | 串行后台写入与请求前接管 | 是 |
+| `index.ts` | OpenClaw hooks/context engine | OpenClaw 生命周期 | 复用相同核心记忆 | 是 |
+
+依赖方向必须保持为：
+
+```text
+types → db/store → extractor + graph → recaller → assemble
+                                      ↑              ↑
+                         host adapter (DSH/OpenClaw)
+```
+
+`store`、`graph`、`recaller` 不能反向读取 DSH session；否则另一个宿主无法复用核心。
 
 ## 一、抽取合同：一次调用同时得到摘要和导航
 
@@ -221,7 +267,16 @@ OpenAI-compatible 路线使用 `tools` + 强制 `tool_choice`；Anthropic 路线
 
 ## 七、移植顺序
 
-如果另一个项目与本仓库有共同 Git 历史，优先在独立分支上移植本次发布 tag；发生冲突时仍按下面顺序人工核对，不要只解决到“可以编译”。
+如果另一个项目与本仓库有共同 Git 历史，可以从独立分支开始：
+
+```bash
+git fetch https://github.com/adoresever/graph-memory.git main
+git cherry-pick b65ca1e f5bc55d f5e828c
+```
+
+这三个提交依次建立轮次摘要事实链、移除旧概念型抽取假设、补齐 PPR/社区导航和 DSH surface 合同。最后一个提交还包含本站 README、版本号和生成后的 `dist`；如果另一个项目有自己的品牌与包名，只保留源代码、migration 和测试变更，不要照搬发布元数据。
+
+如果两边已经明显分叉，应按下面顺序人工移植；不要只把冲突解决到“可以编译”。
 
 1. **备份数据库和配置**：复制 SQLite 主文件及 WAL/SHM；记录旧 migration 最大版本。
 2. **移植类型与 migration**：`src/types.ts`、`src/store/db.ts`。
@@ -310,4 +365,3 @@ npm pack --dry-run
 - 不摄入 reasoning/tool trace；
 - 不修改宿主核心；
 - 单元测试、构建、包验证和真实宿主运行全部通过。
-

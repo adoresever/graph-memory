@@ -1,9 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="620" viewBox="0 0 1600 620" role="img" aria-labelledby="title desc">
   <title id="title">DeepSeek Harness 20-turn context token comparison</title>
-  <desc id="desc">Baseline first-request tokens rise to 56,998 while Graph Memory remains at 16,769 by turn 20.</desc>
+  <desc id="desc">Historical baseline first-request tokens rise to 56,998 while the latest Graph Memory run reaches 11,008 by turn 20.</desc>
   <rect width="1600" height="620" fill="#f7f8fa"/>
   <text x="100" y="62" fill="#111827" font-family="Georgia,serif" font-weight="700" font-size="30">Model-visible history stops growing after Graph Memory takes ownership</text>
-  <text x="100" y="92" fill="#586174" font-family="Arial,sans-serif" font-size="15">First main-model request per turn · GLM-5.2 relay · 20-turn continuous-development workload</text>
+  <text x="100" y="92" fill="#586174" font-family="Arial,sans-serif" font-size="15">First main-model request per turn · GLM-5.2 relay · historical baseline vs latest navigation run</text>
   <g stroke="#dce1e9" stroke-width="1">
     <path d="M100 500H1354"/><path d="M100 433.3H1354"/><path d="M100 366.7H1354"/><path d="M100 300H1354"/><path d="M100 233.3H1354"/><path d="M100 166.7H1354"/><path d="M100 100H1354"/>
   </g>
@@ -13,12 +13,12 @@
   <g fill="#667085" font-family="Consolas,monospace" font-size="13" text-anchor="middle">
     <text x="100" y="530">T1</text><text x="364" y="530">T5</text><text x="694" y="530">T10</text><text x="1024" y="530">T15</text><text x="1354" y="530">T20</text>
   </g>
-  <path d="M100 442.4 166 438.8 232 436.5 298 436.9 364 438.2 430 436.6 496 432.2 562 424.2 628 413.4 694 411.9 760 396.1 826 397.3 892 390.5 958 402.6 1024 399.2 1090 403.6 1156 403 1222 399.5 1288 391.1 1354 388.2 L1354 500 L100 500Z" fill="#1748d1" opacity=".10"/>
+  <path d="M100 450.2 166 446.9 232 449.6 298 447.6 364 447.6 430 445.4 496 447 562 447.6 628 447.7 694 447.8 760 442.7 826 442.7 892 442.6 958 441.9 1024 442.3 1090 446.9 1156 447.4 1222 447.1 1288 436.4 1354 426.6 L1354 500 L100 500Z" fill="#1748d1" opacity=".10"/>
   <polyline points="100,443.4 166,431.9 232,426.4 298,419.4 364,410.7 430,401.9 496,384.1 562,379.9 628,368.5 694,354.6 760,297.6 826,317.9 892,297.4 958,283.9 1024,262.3 1090,244.7 1156,226.1 1222,206 1288,173.7 1354,120" fill="none" stroke="#e16645" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
-  <polyline points="100,442.4 166,438.8 232,436.5 298,436.9 364,438.2 430,436.6 496,432.2 562,424.2 628,413.4 694,411.9 760,396.1 826,397.3 892,390.5 958,402.6 1024,399.2 1090,403.6 1156,403 1222,399.5 1288,391.1 1354,388.2" fill="none" stroke="#1748d1" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"/>
-  <circle cx="496" cy="432.2" r="7" fill="#fff" stroke="#1748d1" stroke-width="4"/>
-  <path d="M496 421L544 345" stroke="#1748d1"/><text x="552" y="340" fill="#111827" font-family="Arial,sans-serif" font-weight="700" font-size="14">T7 · first prefix archive</text><text x="552" y="360" fill="#667085" font-family="Arial,sans-serif" font-size="13">old surface replaced by one marker</text>
+  <polyline points="100,450.2 166,446.9 232,449.6 298,447.6 364,447.6 430,445.4 496,447 562,447.6 628,447.7 694,447.8 760,442.7 826,442.7 892,442.6 958,441.9 1024,442.3 1090,446.9 1156,447.4 1222,447.1 1288,436.4 1354,426.6" fill="none" stroke="#1748d1" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"/>
+  <circle cx="496" cy="447" r="7" fill="#fff" stroke="#1748d1" stroke-width="4"/>
+  <path d="M496 436L544 345" stroke="#1748d1"/><text x="552" y="340" fill="#111827" font-family="Arial,sans-serif" font-weight="700" font-size="14">T7 · first prefix archive</text><text x="552" y="360" fill="#667085" font-family="Arial,sans-serif" font-size="13">old surface replaced by one marker</text>
   <circle cx="1354" cy="120" r="8" fill="#fff" stroke="#e16645" stroke-width="4"/><text x="1380" y="124" fill="#e16645" font-family="Consolas,monospace" font-weight="700" font-size="23">56,998</text><text x="1380" y="146" fill="#667085" font-family="Arial,sans-serif" font-size="13">DSH baseline</text>
-  <circle cx="1354" cy="388.2" r="8" fill="#fff" stroke="#1748d1" stroke-width="4"/><text x="1380" y="392" fill="#1748d1" font-family="Consolas,monospace" font-weight="700" font-size="23">16,769</text><text x="1380" y="414" fill="#667085" font-family="Arial,sans-serif" font-size="13">Graph Memory · −70.58%</text>
-  <g transform="translate(100 574)" font-family="Arial,sans-serif" font-size="14"><path d="M0 0H32" stroke="#e16645" stroke-width="5"/><text x="43" y="5" fill="#586174">DSH baseline</text><path d="M190 0H222" stroke="#1748d1" stroke-width="6"/><text x="233" y="5" fill="#586174">DSH + Graph Memory</text><text x="1210" y="5" fill="#111827" font-family="Consolas,monospace" font-weight="700">T20 messages 171 → 24</text></g>
+  <circle cx="1354" cy="426.6" r="8" fill="#fff" stroke="#1748d1" stroke-width="4"/><text x="1380" y="430" fill="#1748d1" font-family="Consolas,monospace" font-weight="700" font-size="23">11,008</text><text x="1380" y="452" fill="#667085" font-family="Arial,sans-serif" font-size="13">Graph Memory · −80.69%</text>
+  <g transform="translate(100 574)" font-family="Arial,sans-serif" font-size="14"><path d="M0 0H32" stroke="#e16645" stroke-width="5"/><text x="43" y="5" fill="#586174">Historical DSH baseline</text><path d="M240 0H272" stroke="#1748d1" stroke-width="6"/><text x="283" y="5" fill="#586174">Latest Graph Memory</text><text x="1210" y="5" fill="#111827" font-family="Consolas,monospace" font-weight="700">T20 messages 171 → 21</text></g>
 </svg>

@@ -11,27 +11,30 @@ This public benchmark measures two different questions separately:
 
 The 20-turn scenario is a synthetic continuous-development task. It deliberately changes previously established facts so that a memory system must preserve the newest value and mark old values as revoked.
 
-## Published V72 result
+## Published V73 navigation result
 
-| Metric | DSH baseline | DSH + Graph Memory | Change |
+| Metric | Historical DSH baseline | Latest Graph Memory | Change |
 |---|---:|---:|---:|
-| First-request tokens, T01–T20 | 532,451 | 257,656 | **−51.61%** |
-| First-request tokens, T20 | 56,998 | 16,769 | **−70.58%** |
-| First-request messages, T20 | 171 | 24 | **−85.96%** |
-| Main-agent tokens, all requests | 2,487,776 | 2,283,572 | −8.21% |
-| All LLM tokens, including GM extraction | 2,487,776 | 2,386,292 | −4.08% |
-| All measured tokens, including embeddings | 2,487,776 | 2,401,512 | −3.47% |
+| First-request tokens, T01–T20 | 532,451 | 165,896 | **−68.84%** |
+| First-request tokens, T20 | 56,998 | 11,008 | **−80.69%** |
+| First-request messages, T20 | 171 | 21 | **−87.72%** |
+| Main-agent tokens, all requests | 2,487,776 | 2,291,077 | −7.91% |
+| All LLM tokens, including GM extraction | 2,487,776 | 2,324,219 | −6.57% |
+| All measured tokens, including embeddings | 2,487,776 | 2,327,728 | −6.43% |
 
-The baseline made 77 main-model requests; the Graph Memory arm made 123 main-model requests plus 20 extraction requests. Because tool loops are model-nondeterministic, first-request context is the direct context-takeover metric. The all-request totals remain visible to avoid overstating bill savings.
+The latest Graph Memory arm made 166 main-model requests, 20 extraction requests, and 41 embedding requests; the historical baseline made 77 main-model requests. The user requested a GM-only rerun, so the baseline and candidate use different DSH commits and are not a strict simultaneous A/B. Because tool loops are model-nondeterministic, first-request context is the direct context-takeover metric. The all-request totals remain visible to avoid overstating bill savings.
 
 Memory checks from the same candidate:
 
 - 20/20 scenario turns completed and their project tests passed.
-- 19/20 structured graph extractions succeeded; one non-tool response failed closed.
-- T20 model surface contained 24 messages instead of 171.
-- A fresh session recalled the final owner, port, rollback window, incident, batch, repair command, and revoked values without an explicit memory tool call.
+- 20/20 structured turn extractions succeeded; 40/40 source messages were linked and none were quarantined.
+- The database contains 20 turn summaries, 92 SPO triples, 112 normalized terms, 30 local communities, and 20 summary vectors.
+- T20 model surface contained 21 messages instead of the historical baseline's 171.
+- T11 recalled T02 after it had left the five-turn window; T19 recalled T02 and T11; T20 recalled T02, T11, and T13.
+- Each match included a compact summary, the relevant SPO route, and the exact original user question/final answer. No explicit `gm_search` call was used.
+- Every completed turn used one Graph Memory LLM extraction call. LPA community detection and query-time PPR used no LLM calls.
 
-The complete, de-identified aggregates are in [`results/v72-summary.json`](results/v72-summary.json).
+The complete, de-identified aggregates are in [`results/v73-navigation-summary.json`](results/v73-navigation-summary.json). The previous [`results/v72-summary.json`](results/v72-summary.json) remains available as historical evidence.
 
 <p align="center">
   <img src="../../docs/images/dsh/vector-cross-session-recall.png" alt="Cross-session source-backed recall in a fresh DSH session" width="88%">
@@ -43,7 +46,8 @@ The complete, de-identified aggregates are in [`results/v72-summary.json`](resul
 - `scripts/run-scenario.mjs` — runs one configured DSH arm without embedding credentials in source.
 - `scripts/dsh-usage-tap.mjs` — a DSH plugin that records request usage and request kind.
 - `scripts/summarize.mjs` — recalculates the public comparison from two JSONL ledgers.
-- `results/v72-summary.json` — published aggregate and per-turn first-request data.
+- `results/v73-navigation-summary.json` — latest aggregate, per-turn context, graph, recall, and limitations.
+- `results/v72-summary.json` — previous candidate result retained for audit history.
 
 Raw conversations, local profile databases, provider responses, API keys, absolute paths, and user session data are intentionally excluded.
 
@@ -84,4 +88,4 @@ Use separate fresh homes and workspaces for baseline and Graph Memory arms. The 
 
 ## Interpretation
 
-This is an engineering workload, not LoCoMo or LongMemEval. It proves that the DSH adapter bounds model-visible history and that a fresh session can recover selected old facts. It does not claim universal savings, a benchmark-wide recall score, or perfect extraction reliability.
+This is an engineering workload, not LoCoMo or LongMemEval. It proves that the DSH adapter bounds model-visible history and that the same active session can recover exact source Q/A after a turn leaves the five-turn window. It does not claim universal savings or a benchmark-wide recall score. The latest all-request comparison uses a historical baseline and must not be presented as a controlled ablation.

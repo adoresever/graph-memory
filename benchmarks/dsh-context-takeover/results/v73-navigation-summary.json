@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-09-09",
+  "workload": "release-orchestrator-continuous-development-v1",
+  "model": "GLM-5.2",
+  "turns": 20,
+  "comparison": {
+    "strictPaired": false,
+    "baselineRun": "historical-native-dsh-v48",
+    "candidateRun": "summary-spo-navigation-v73",
+    "reason": "The user requested a GM-only rerun. DSH commits and nondeterministic main-agent tool loops differ, so first-request context is the direct takeover metric."
+  },
+  "sourceVersions": {
+    "baselineDshCommit": "76fda729799fe9b3848dbe2c211d4b231032b81e",
+    "candidateDshCommit": "5dda764ed3aa172535a7967b06ff95d9cbfe536a",
+    "graphMemoryReleaseCommit": "f5e828c9ce222bc09a29804ad3d8111fb345dc2b"
+  },
+  "firstRequest": {
+    "baselineTokens": 532451,
+    "graphMemoryTokens": 165896,
+    "changePercent": -68.84,
+    "turn20": {
+      "baselineTokens": 56998,
+      "graphMemoryTokens": 11008,
+      "changePercent": -80.69,
+      "baselineMessages": 171,
+      "graphMemoryMessages": 21,
+      "messageChangePercent": -87.72
+    },
+    "baselinePerTurn": [
+      8487, 10221, 11040, 12086, 13392, 14709, 17387, 18021, 19718, 21814,
+      30360, 27312, 30397, 32417, 35652, 38301, 41092, 44107, 48940, 56998
+    ],
+    "graphMemoryPerTurn": [
+      7466, 7961, 7556, 7867, 7856, 8195, 7949, 7856, 7842, 7834,
+      8596, 8600, 8608, 8720, 8653, 7961, 7894, 7941, 9533, 11008
+    ],
+    "graphMemoryMessagesPerTurn": [
+      3, 6, 9, 12, 15, 18, 19, 19, 19, 19,
+      20, 20, 20, 20, 20, 19, 19, 19, 20, 21
+    ]
+  },
+  "allRequests": {
+    "baseline": {
+      "mainRequests": 77,
+      "tokens": 2487776
+    },
+    "graphMemory": {
+      "mainRequests": 166,
+      "mainTokens": 2291077,
+      "extractionRequests": 20,
+      "extractionTokens": 33142,
+      "allLlmTokens": 2324219,
+      "embeddingRequests": 41,
+      "embeddingTokens": 3509,
+      "allMeasuredTokens": 2327728
+    },
+    "allMeasuredChangePercent": -6.43,
+    "graphMemoryLlmOverheadPercent": 1.43
+  },
+  "runtimeEvidence": {
+    "scenarioTurnsPassed": 20,
+    "finalFixtureTestsPassed": 58,
+    "structuredExtractionsSucceeded": 20,
+    "structuredExtractionsAttempted": 20,
+    "sourceMessagesSucceeded": 40,
+    "sourceMessagesQuarantined": 0,
+    "turnMemories": 20,
+    "sourceLinks": 40,
+    "navigationTerms": 112,
+    "navigationTriples": 92,
+    "navigationCommunities": 30,
+    "turnVectors": 20,
+    "prefixArchives": 14,
+    "completedTurnProjections": 20,
+    "sameSessionOutOfWindowRecallTurns": ["T11", "T19", "T20"],
+    "exactSourceQuestionAndAnswerRecalled": true
+  },
+  "lateTurnTotals": {
+    "T19": {
+      "historicalBaselineTokens": 531441,
+      "graphMemoryMainTokens": 262025,
+      "graphMemoryExtractionTokens": 1997,
+      "graphMemoryAllLlmTokens": 264022,
+      "changePercent": -50.32
+    },
+    "T20": {
+      "historicalBaselineTokens": 468223,
+      "graphMemoryMainTokens": 148562,
+      "graphMemoryExtractionTokens": 2153,
+      "graphMemoryAllLlmTokens": 150715,
+      "changePercent": -67.81
+    }
+  },
+  "limitations": [
+    "The baseline was not rerun after the latest DSH and Graph Memory changes.",
+    "Main-agent tool-loop counts differed: 77 baseline requests versus 166 candidate main requests.",
+    "All-request totals therefore include agent-path variance and are not a pure memory-ablation estimate.",
+    "This engineering workload is not a universal LoCoMo or LongMemEval recall score."
+  ]
+}
