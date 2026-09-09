@@ -71,15 +71,15 @@ Graph Memory 接管的是**发给模型的历史表面**，不会删除 DSH 的�
 
 ## 安装到 DeepSeek Harness
 
-Node.js 22.13+ · 不 fork DSH · 优先从 npm 安装，网络受限时不再依赖 GitHub clone：
+Node.js 22.13+ · 不 fork DSH · 在 npm `1.6` 发布完成前，请安装已经固定的 GitHub 版本：
 
 ```bash
-npx @deepseek-ai/dsh plugin --profile web add graph-memory
+npx @deepseek-ai/dsh plugin --profile web add github:adoresever/graph-memory#v1.6.0-beta.16
 npx @deepseek-ai/dsh --profile web --dump-config
 npx @deepseek-ai/dsh web
 ```
 
-也可以直接安装仓库版本：`npx @deepseek-ai/dsh plugin --profile web add github:adoresever/graph-memory`。
+npm registry 当前仍是旧版 `1.5.8`，不要用它验证 DSH。待 `npm view graph-memory version` 返回 `1.6.0-beta.16` 或更新版本后，才改用 `npx @deepseek-ai/dsh plugin --profile web add graph-memory`。
 
 在 **Settings → Plugins** 确认 graph-memory/dsh 已启用。默认数据库位于 $DSH_HOME/graph-memory/graph-memory.db，通常是 ~/.dsh/graph-memory/graph-memory.db。
 

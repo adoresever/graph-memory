@@ -71,15 +71,15 @@ The graph is a **navigation layer**, not a replacement for evidence. `TASK`, `SK
 
 ## Install on DeepSeek Harness
 
-Node.js `22.13+` · no DSH fork · install from npm first, without requiring a GitHub clone:
+Node.js `22.13+` · no DSH fork · until npm `1.6` is published, install the pinned GitHub release:
 
 ```bash
-npx @deepseek-ai/dsh plugin --profile web add graph-memory
+npx @deepseek-ai/dsh plugin --profile web add github:adoresever/graph-memory#v1.6.0-beta.16
 npx @deepseek-ai/dsh --profile web --dump-config
 npx @deepseek-ai/dsh web
 ```
 
-The repository build remains available with `npx @deepseek-ai/dsh plugin --profile web add github:adoresever/graph-memory`.
+The npm registry still serves the old `1.5.8`; do not use it to validate DSH. Switch to `npx @deepseek-ai/dsh plugin --profile web add graph-memory` only after `npm view graph-memory version` reports `1.6.0-beta.16` or newer.
 
 Confirm that `graph-memory/dsh` is active under **Settings → Plugins**. The default database is `$DSH_HOME/graph-memory/graph-memory.db`, normally `~/.dsh/graph-memory/graph-memory.db`.
 
