@@ -24,6 +24,8 @@ The 20-turn scenario is a synthetic continuous-development task. It deliberately
 
 The latest Graph Memory arm made 166 main-model requests, 20 extraction requests, and 41 embedding requests; the historical baseline made 77 main-model requests. The user requested a GM-only rerun, so the baseline and candidate use different DSH commits and are not a strict simultaneous A/B. Because tool loops are model-nondeterministic, first-request context is the direct context-takeover metric. The all-request totals remain visible to avoid overstating bill savings.
 
+The run manifest captured the candidate as a dirty `1.6.0-beta.14` working tree at `f5bc55d`; the exact candidate patch hash is published in the result JSON. Those source changes were then committed as `f5e828c` without changing the tested runtime behavior.
+
 Memory checks from the same candidate:
 
 - 20/20 scenario turns completed and their project tests passed.

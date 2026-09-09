@@ -13,6 +13,10 @@
   "sourceVersions": {
     "baselineDshCommit": "76fda729799fe9b3848dbe2c211d4b231032b81e",
     "candidateDshCommit": "5dda764ed3aa172535a7967b06ff95d9cbfe536a",
+    "candidateRecordedGraphMemoryVersion": "1.6.0-beta.14",
+    "candidateRecordedGraphMemoryCommit": "f5bc55d5cdff090385f8c00decd4c29c83cd0996",
+    "candidateRecordedDirty": true,
+    "candidatePatchSha256": "cbad20fa920e696dbf62e1be4dbff36ebbfbee30c166e97b0d02151f4a5ba512",
     "graphMemoryReleaseCommit": "f5e828c9ce222bc09a29804ad3d8111fb345dc2b"
   },
   "firstRequest": {
