@@ -164,6 +164,24 @@ export function missingIngestMessages(messages: any[], ingestedCount: number): a
   return messages.slice(delivered);
 }
 
+/**
+ * 从宿主内部 hook `session:patch` 事件中解析归档目标 sessionId。
+ *
+ * 归档（CLI `openclaw sessions archive` / Control UI）= gateway RPC
+ * `sessions.patch { archived: true }`，提交后宿主派发 session:patch，
+ * context 为 structuredClone 后的 { sessionEntry(提交后), patch(请求形状), cfg }。
+ * 该事件是所有授权 patch 的通用通知（模型切换等也走），必须按 patch.archived
+ * 过滤；无 durable identity 的条目无法归档，sessionId 理论上恒在，仍防御性校验。
+ * 命中返回 sessionId，非归档 patch 或形状不符返回 null。
+ */
+export function archiveSessionIdFromPatchEvent(event: unknown): string | null {
+  const ctx = (event as any)?.context;
+  if (!ctx || typeof ctx !== "object") return null;
+  if (ctx.patch?.archived !== true) return null;
+  const sid = ctx.sessionEntry?.sessionId;
+  return typeof sid === "string" && sid ? sid : null;
+}
+
 // ─── assemble 消息裁剪：保留最近 N 轮，旧轮只留文本 ──────────
 
 const KEEP_TURNS = 5;
@@ -290,6 +308,28 @@ export function prepareAssemblyMessages(
     tokens: sliced.tokens,
     dropped: sliced.dropped,
   };
+}
+
+// ─── delegating compaction 桥（懒加载） ──────────────────────
+
+type DelegateCompaction = typeof import("openclaw/plugin-sdk/core")["delegateCompactionToRuntime"];
+
+/**
+ * 宿主内置压缩桥的动态加载。不用顶层命名导入：native ESM 下导入目标模块
+ * 不存在的导出是链接期 SyntaxError（整个插件在 register 前加载即崩，typeof
+ * 守卫永远执行不到），且老宿主（<2026.6）可能连 plugin-sdk/core 子路径都
+ * 不存在——动态导入的失败是可捕获的运行时错误，缺导出时属性访问为
+ * undefined。进程内缓存首次结果（模块图不会中途变化）。
+ */
+let delegateCompactionLoader: Promise<DelegateCompaction | null> | null = null;
+
+function loadDelegateCompaction(): Promise<DelegateCompaction | null> {
+  if (!delegateCompactionLoader) {
+    delegateCompactionLoader = import("openclaw/plugin-sdk/core")
+      .then(m => (typeof m?.delegateCompactionToRuntime === "function" ? m.delegateCompactionToRuntime : null))
+      .catch(() => null);
+  }
+  return delegateCompactionLoader;
 }
 
 // ─── 插件对象 ─────────────────────────────────────────────────
@@ -567,6 +607,15 @@ const graphMemoryProPlugin = {
     }
 
     /**
+     * compact 触发的提取门：非 cron 会话放行；cron 会话需 enabled 主开关与
+     * extract 子开关同时开启（与 afterTurn 的回填门 enabled-only 语义不同，
+     * 提取受 extract 单独控制）。
+     */
+    function cronExtractionAllowed(sessionKey?: string): boolean {
+      return !isCronSessionKey(sessionKey) || (cronCfg.enabled && cronCfg.extract);
+    }
+
+    /**
      * 批量提取共享体（compact / batched 模式攒批触发 / session_end 尾批冲洗）：
      * 读未提取消息 → LLM → upsert + 批量向量同步 → markExtracted。
      * 调用方负责 cron/熔断门控；内部经 withExtractLock 与 per-turn 路径串行化。
@@ -634,12 +683,43 @@ const graphMemoryProPlugin = {
       }
     }
 
+    /**
+     * batched 模式尾批冲洗（session_end / 归档共用）：drain 循环（上限
+     * SESSION_END_FLUSH_ROUNDS）——中途 LLM 失败可能积压超过单批 limit
+     * （compactTurnCount*3），只冲一批会留尾部知识缺口；ok=false（本批失败）
+     * 即停，避免同因反复打 LLM。仍超限的残余保持未提取——retention fail-closed
+     * 不删，可再跑 `graph-memory extract` 回填。调用方负责 cron/熔断门控。
+     * 返回成功冲洗的批数（0 = 本就无未提取消息或首批即失败）。
+     */
+    async function flushBatchedTail(sessionId: string): Promise<number> {
+      let flushed = 0;
+      for (let i = 0; i < SESSION_END_FLUSH_ROUNDS; i++) {
+        const flush = await extractUnextractedBatch(sessionId);
+        if (!flush.ok || !flush.compacted) break;
+        flushed++;
+      }
+      return flushed;
+    }
+
     // ── Session 运行时状态 ──────────────────────────────────
     const msgSeq = new Map<string, number>();
     const msgSeqLoaders = new Map<string, Promise<number>>();
     const recalled = new Map<string, RecallResult>();
     // recalled 结果对应的 recall prompt（assemble 复用缓存判定用；继承路径不写，查不到则照常新鲜召回）
     const recalledPrompt = new Map<string, string>();
+
+    /**
+     * 宿主压缩（显式 /compact 或 in-attempt 自动压缩）后，转录被替换为
+     * summary + 近期消息：压缩前召回的图谱节点缓存对应旧语境，继续注入会
+     * 干扰压缩后的上下文组装。失效缓存，下一轮 assemble / before_agent_start
+     * 以新 prompt 重新计算参与组装的节点；消息组装本身只依赖压缩后的
+     * user+assistant 历史（transcript），无需额外处理。
+     */
+    function invalidateRecallCache(sessionId: string): void {
+      recalled.delete(sessionId);
+      recalledPrompt.delete(sessionId);
+    }
+
     const sessionIdsByKey = new Map<string, string>();
     const pendingSubagentRecall = new Map<string, RecallResult>();
     const ingestedSinceTurn = new Map<string, number>();
@@ -872,8 +952,10 @@ const graphMemoryProPlugin = {
     }
 
     // ── before_agent_start：召回 ────────────────────────────
-
-    api.on("before_agent_start", async (event: any, ctx: any) => {
+    // OpenClaw 2026.9 起插件 hook 白名单更名为 before_agent_run（before_agent_start
+    // 只剩 resource-loader 内部分发）。同一处理器双名注册：事件形状一致
+    // （prompt + ctx.sessionId/sessionKey），不认识的名字宿主只警告并忽略。
+    const recallHook = async (event: any, ctx: any) => {
       try {
         // cron session 关闭图谱功能时不召回（cron 标记在 sessionKey 上，sessionId 是随机 UUID）
         if (isCronSessionKey(typeof ctx?.sessionKey === "string" ? ctx.sessionKey : null) && !cronCfg.enabled) return;
@@ -904,7 +986,10 @@ const graphMemoryProPlugin = {
         markRecallBackoffOnTimeout(err);
         api.logger.warn(`[graph-memory-pro] recall failed: ${err}`);
       }
-    });
+    };
+
+    api.on("before_agent_start", recallHook);
+    api.on("before_agent_run", recallHook);
 
     // ── ContextEngine ────────────────────────────────────────
 
@@ -912,7 +997,12 @@ const graphMemoryProPlugin = {
       info: {
         id: "graph-memory-pro",
         name: "Graph Memory Pro",
-        ownsCompaction: true,
+        // Delegating mode（OpenClaw 官方两种合法模式之一，legacy 引擎即此构造）：
+        // false = 宿主的 in-attempt auto-compaction（近窗口/溢出恢复压缩）与
+        // generic pre-prompt 溢出预检保持启用；引擎 compact() 仍被调用
+        // （/compact 与溢出恢复），内部经 delegateCompactionToRuntime 把窗口
+        // 缩减委托回宿主内置摘要管线，自己只负责压缩时的知识提取。
+        ownsCompaction: false,
         // OpenClaw 2026.3.7+ transcript fencing 契约。未声明时 host 会把引擎
         // 逐回合降级到 legacy（"current-turn transcript fencing is not declared"）。
         // 两项承诺：轮前读取只看到 admitted user entry 之前的精确前缀；
@@ -960,6 +1050,10 @@ const graphMemoryProPlugin = {
           return {
             messages: prepared.messages,
             estimatedTokens: prepared.tokens,
+            // 5 轮裁剪窗口可能掩盖底层转录的溢出风险：声明 preassembly_may_overflow
+            // 让宿主保持 generic precheck，按 max(assembled, 未开窗全历史) 估算
+            // 决定是否预防性压缩（cron 分支同样有裁剪窗口，同样声明）
+            promptAuthority: "preassembly_may_overflow",
           };
         }
 
@@ -1024,43 +1118,74 @@ const graphMemoryProPlugin = {
         return {
           messages: prepared.messages,
           estimatedTokens: graphTokens + prepared.tokens,
+          // 同 cron 分支：声明 preassembly_may_overflow 恢复宿主按全历史估量的
+          // 溢出预检（模型看到的 messages 不变，只影响 precheck 的 token 对比）
+          promptAuthority: "preassembly_may_overflow",
           ...(systemPromptAddition ? { systemPromptAddition } : {}),
         };
       },
 
-      async compact({ sessionId, sessionKey, currentTokenCount }: { sessionId: string; sessionKey?: string; sessionFile: string; tokenBudget?: number; force?: boolean; currentTokenCount?: number }) {
-        bindSessionIdentity(sessionId, sessionKey);
-        // cron session 关闭图谱功能或知识提取：不触发 LLM 提取
-        if (isCronSessionKey(sessionKey) && !(cronCfg.enabled && cronCfg.extract)) {
-          return {
-            ok: true, compacted: false,
-            reason: cronCfg.enabled ? "cron session extraction disabled" : "cron session graph disabled",
-          };
+      /**
+       * Delegating mode：窗口缩减（summary 压缩）委托给宿主内置管线
+       * （legacy 引擎同一条 delegateCompactionToRuntime 桥），本引擎只附加
+       * 压缩时的知识提取。params 必须原样透传给 delegate —— 其中的
+       * sessionTarget/runtimeContext/force/currentTokenCount/compactionTarget/
+       * customInstructions/abortSignal 是宿主定位会话与身份校验的依据。
+       */
+      async compact(params: {
+        sessionId: string; sessionKey?: string; sessionFile?: string; tokenBudget?: number;
+        force?: boolean; currentTokenCount?: number; [key: string]: any;
+      }) {
+        bindSessionIdentity(params.sessionId, params.sessionKey);
+        // 压缩请求已发出（无论委托是否成功），转录即将被替换为 summary +
+        // 近期消息：立即失效召回缓存，避免旧语境节点注入压缩后的上下文
+        invalidateRecallCache(params.sessionId);
+
+        // ① 对话快照提取，fire-and-forget：GmMessage 的 extracted=false 前缀即
+        //    快照（宿主压缩只动 transcript，不动 GmMessage）；withExtractLock
+        //    内部与 per-turn 路径串行，不阻塞压缩本身，也不阻塞后续用户消息。
+        //    cron/熔断门控只作用于提取——压缩委托必须无条件执行（non-owning
+        //    引擎 no-op compact 会禁用该槽位的 /compact 与溢出恢复路径）。
+        if (cronExtractionAllowed(params.sessionKey) && neo4jGate.isAvailable()) {
+          void extractUnextractedBatch(params.sessionId).catch(err => {
+            api.logger.error(`[graph-memory-pro] compact-triggered extraction failed: ${err}`);
+          });
         }
-        // 熔断开启时跳过提取：未提取消息保留，恢复后下一次 compact / extract 补上
-        if (!neo4jGate.isAvailable()) {
-          return { ok: true, compacted: false, reason: "neo4j unavailable (circuit open)" };
+
+        // ② 压缩委托给宿主内置管线；老宿主（<2026.6，无该导出或子路径）降级
+        //    （宿主自身的 in-attempt auto-compaction 仍会运行，仅显式 /compact 委托失效）
+        const delegate = await loadDelegateCompaction();
+        if (delegate) {
+          try {
+            return await delegate(params);
+          } catch (err) {
+            // 宿主桥的身份校验（assertCompactionSessionIdentity）等会 throw；
+            // 以结构化失败返回，保持旧 compact 的"不向宿主抛异常"性质
+            api.logger.warn(`[graph-memory-pro] delegated compaction failed: ${err}`);
+            return { ok: false, compacted: false, reason: String(err) };
+          }
         }
-        const res = await extractUnextractedBatch(sessionId);
-        return {
-          ok: res.ok, compacted: res.compacted,
-          ...(res.reason ? { reason: res.reason } : {}),
-          ...(res.summary ? {
-            result: {
-              summary: res.summary,
-              tokensBefore: currentTokenCount ?? 0,
-            },
-          } : {}),
-        };
+        api.logger.warn(
+          "[graph-memory-pro] delegateCompactionToRuntime unavailable; "
+          + "/compact delegated nothing (upgrade OpenClaw to 2026.6+)",
+        );
+        return { ok: true, compacted: false, reason: "runtime delegation unavailable" };
       },
 
-      async afterTurn({ sessionId, sessionKey, messages, prePromptMessageCount, isHeartbeat }: {
+      async afterTurn({ sessionId, sessionKey, messages, prePromptMessageCount, isHeartbeat, autoCompactionSummary }: {
         sessionId: string; sessionKey?: string; sessionFile: string; messages: any[];
         prePromptMessageCount: number; autoCompactionSummary?: string;
         isHeartbeat?: boolean; tokenBudget?: number;
       }) {
         if (isHeartbeat) return;
         bindSessionIdentity(sessionId, sessionKey);
+
+        // 宿主 in-attempt 自动压缩在本轮完成（不经引擎 compact()，宿主只以
+        // autoCompactionSummary 通知）：同样失效召回缓存，下一轮按压缩后的
+        // 转录重新召回
+        if (autoCompactionSummary) {
+          invalidateRecallCache(sessionId);
+        }
 
         const newMessages = messages.slice(prePromptMessageCount ?? 0);
         if (!newMessages.length) {
@@ -1234,14 +1359,9 @@ const graphMemoryProPlugin = {
         }
 
         // batched 模式：会话结束冲洗残留未提取批（攒批未达阈值时保证知识不丢）。
-        // drain 循环（上限 5）：中途 LLM 失败可能积压超过单批 limit（compactTurnCount*3），
-        // 只冲一批会留尾部知识缺口；ok=false（本批失败）即停，避免同因反复打 LLM。
-        // 仍超限的残余保持未提取——retention fail-closed 不删，可再跑 `graph-memory extract` 回填。
+        // 与归档冲洗共用 flushBatchedTail。
         if (extractCfg.mode === "batched") {
-          for (let i = 0; i < SESSION_END_FLUSH_ROUNDS; i++) {
-            const flush = await extractUnextractedBatch(sid);
-            if (!flush.ok || !flush.compacted) break;
-          }
+          await flushBatchedTail(sid);
         }
 
         let nodes: Awaited<ReturnType<typeof getBySession>>;
@@ -1314,6 +1434,48 @@ const graphMemoryProPlugin = {
         }
       }
     });
+
+    // ── session:patch：归档冲洗 ─────────────────────────────
+    // 归档不派发任何 typed hook（session_end 的 reason 枚举没有 archived），
+    // 被 batched 模式攒住未达阈值的尾批会悬挂到会话下次活动或 gateway 重启。
+    // 宿主内部 hook session:patch 在 patch 提交后通知（见
+    // archiveSessionIdFromPatchEvent 注释），此处补上最后一个提取时机。
+    // 宿主派发为浮动 promise：handler 被顺序 await、异常由宿主记录、无超时
+    // ——长耗时 LLM 冲洗不阻塞 RPC 也不会被掐断；与 session_end/攒批路径经
+    // withExtractLock 按 sessionId 串行化，不会与并发轮提取重复提取
+    // （markExtracted 前缀语义天然幂等，已提取消息不会进第二次批）。
+    // 存在性守卫与 registerCli 同款：极老宿主缺方法时静默跳过（归档冲洗
+    // 本就是增强路径，缺失只影响 batched 尾批的归档时机，不影响主流程）。
+    if (typeof api.registerHook === "function") {
+      api.registerHook(
+        "session:patch",
+        async (event) => {
+          const sid = archiveSessionIdFromPatchEvent(event);
+          if (!sid) return;
+          const sessionKey = typeof event?.sessionKey === "string" ? event.sessionKey : undefined;
+
+          try {
+            // 与 session_end 尾批冲洗同门：cron 提取单独开关、熔断开启跳过
+            // （消息保持未提取，恢复后 CLI extract 可回填）、batched-only
+            // （per-turn 模式轮边界即时提取，无攒批语义）。
+            if (!cronExtractionAllowed(sessionKey)) return;
+            if (!neo4jGate.isAvailable()) {
+              api.logger.warn(`[graph-memory-pro] archive flush ${sid.slice(0, 12)}…: neo4j unavailable (circuit open), skipped`);
+              return;
+            }
+            if (extractCfg.mode !== "batched") return;
+
+            const flushed = await flushBatchedTail(sid);
+            if (flushed > 0) {
+              api.logger.info(`[graph-memory-pro] archive flush ${sid.slice(0, 12)}…: ${flushed} batch(es) extracted`);
+            }
+          } catch (err) {
+            api.logger.warn(`[graph-memory-pro] session:patch archive flush error: ${err}`);
+          }
+        },
+        { name: "graph-memory-archive-flush" },
+      );
+    }
 
     // ── Agent Tools ─────────────────────────────────────────
 

@@ -54,12 +54,34 @@
           "purgeAfterDays": { "type": "number", "default": 60, "description": "两阶段生命周期·阶段二：deprecated 节点自弃用起超过该天数后硬删（DETACH DELETE，向量随节点移除）。0 = 永不硬删。适用于所有 deprecated 节点（含手动弃用与合并产物）。" }
         }
       },
+      "extract": {
+        "type": "object",
+        "description": "知识提取配置（LLM 成本控制）。per-turn（默认）每轮即时 LLM 提取；batched 攒批提取将 LLM 调用降为 ~1/N；trivial 轮本地预筛零 LLM 跳过无意义轮次。",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": ["per-turn", "batched"],
+            "default": "per-turn",
+            "description": "per-turn：每轮 afterTurn/commitTurn 即时 LLM 提取（知识实时入库）；batched：攒批提取——未提取消息累计到 compactTurnCount*3 条时批量提取一次，session_end 冲洗尾批。LLM 调用次数降为 ~1/N，代价是会话中途召回不到本会话最新知识。"
+          },
+          "trivialMaxChars": {
+            "type": "number",
+            "default": 5,
+            "description": "本地预筛阈值：用户输入清洗（去空白/标点）后长度 ≤ 该值且不含技术词（连续 ≥3 位字母数字，如 pnpm/jwt）时跳过 LLM 提取直接标记（producedKnowledge=false，原始证据保留）。轮内含工具劳动（tool/toolResult）时不判 trivial。仅作用于 per-turn 路径。"
+          },
+          "trivialPrompts": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "额外无意义词表（与内置表合并，清洗后小写精确匹配，如 \"继续\"、\"resume\"）。"
+          }
+        }
+      },
       "cron": {
         "type": "object",
         "description": "cron 定时会话的图谱行为开关（host 将 cron 标记放在 sessionKey 上，形如 agent:<agentId>:cron:<jobId>）。默认全部启用，与普通会话一致。注意：cron 任务若显式设置自定义 sessionKey，则无法被识别为 cron 会话。",
         "properties": {
           "enabled": { "type": "boolean", "default": true, "description": "是否在 cron session 内启用图谱功能（召回注入 + 消息入库）。关闭后 cron 会话不自动召回、不自动入库；gm_* 工具仍可手动调用。" },
-          "extract": { "type": "boolean", "default": true, "description": "是否在 cron session 内触发知识提取（afterTurn / compact 的 LLM 三元组提取）。关闭后消息仍入库缓冲，可用 openclaw graph-memory extract 手动回填。" },
+          "extract": { "type": "boolean", "default": true, "description": "是否在 cron session 内触发知识提取（afterTurn / commitTurn / compact 的 LLM 三元组提取）。关闭后消息仍入库缓冲，可用 openclaw graph-memory extract 手动回填。" },
           "finalizeAndMaintain": { "type": "boolean", "default": true, "description": "cron session 结束时是否执行 finalize（EVENT→SKILL 晋升）和图维护（decay/PageRank/社区检测）。频繁的 cron 任务可关闭以避免每次结束都跑全局维护。" }
         }
       },

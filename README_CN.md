@@ -130,12 +130,35 @@ OpenClaw 定时任务创建的会话可以独立配置图谱行为。host 把 cr
 | 选项 | 默认 | 说明 |
 | --- | --- | --- |
 | `enabled` | `true` | 是否在 cron 会话内启用图谱功能（召回注入 + 消息入库）。关闭后 cron 会话不自动召回、不自动入库；`gm_*` 工具仍可手动调用（作为显式逃生通道）。 |
-| `extract` | `true` | 是否在 cron 会话内触发知识提取（afterTurn / compact 的 LLM 三元组提取）。关闭后消息仍入库缓冲，之后可用 `openclaw graph-memory extract` 手动回填。 |
+| `extract` | `true` | 是否在 cron 会话内触发知识提取（afterTurn / commitTurn / compact 的 LLM 三元组提取）。关闭后消息仍入库缓冲，之后可用 `openclaw graph-memory extract` 手动回填。 |
 | `finalizeAndMaintain` | `true` | cron 会话结束时是否执行 finalize（EVENT→SKILL 晋升）和图维护（decay / PageRank / 社区检测）。定时任务频繁时可关闭，避免每次会话结束都跑全局维护。 |
 
 三个选项**默认全部开启**：cron 会话默认使用图谱，需按需显式关闭。`enabled=false` 是总开关：即使 `extract`/`finalizeAndMaintain` 设为 `true` 也不生效。非 cron 会话不受这些选项影响。三个子项均可省略，未写的字段取默认值 `true`。
 
 注意：若 cron 任务显式设置了自定义 `sessionKey`，host 不再附加 `cron` 段，此类会话无法被识别，将按普通会话处理。
+
+### 知识提取（extract，LLM 成本控制）
+
+默认每轮即时触发一次 LLM 提取（`per-turn` 模式），并有本地预筛跳过 trivial 轮次（空输入、无意义词表、超短且不含技术词的输入——含工具劳动的轮次不判 trivial），不消耗 LLM 调用。对话轮次密集时可切换 batched 攒批模式，将 LLM 调用次数降为 ~1/N：
+
+```json
+"extract": {
+  "mode": "batched",
+  "trivialMaxChars": 5
+}
+```
+
+| 选项 | 默认 | 说明 |
+| --- | --- | --- |
+| `mode` | `"per-turn"` | `per-turn`=每轮 afterTurn / commitTurn 即时 LLM 提取（知识实时入库）；`batched`=不在轮边界调 LLM——未提取消息累计到 `compactTurnCount * 3` 条时批量提取一次，session_end 冲洗尾批。代价：下一批（或会话结束）运行前，会话中途召回不到最新轮次的知识。 |
+| `trivialMaxChars` | `5` | 本地预筛阈值（仅 per-turn 路径）：用户输入清洗（去空白/标点）后长度 ≤ 该值**且**不含技术词（连续 ≥3 位字母数字，如 `pnpm`/`jwt`）时，跳过 LLM 提取直接标记。被预筛跳过的轮次标记 `producedKnowledge=false`，retention 永不删除其原始证据。 |
+| `trivialPrompts` | — | 额外无意义词表（与内置表合并，清洗后小写精确匹配，如 `"继续"`、`"resume"`）。 |
+
+### 上下文压缩（delegating mode）
+
+本引擎以 OpenClaw 官方 **delegating mode**（`ownsCompaction: false`）运行：`/compact`、近窗口自动压缩与溢出恢复压缩的窗口缩减全部委托给 OpenClaw 内置摘要管线（与 legacy 引擎同一座桥，`openclaw/plugin-sdk/core` 的 `delegateCompactionToRuntime`）。压缩触发时，引擎额外**异步（fire-and-forget）**冲洗未提取消息（GmMessage 积压——宿主压缩只改写 transcript，不动图存储），知识照常固化进图谱，不阻塞压缩本身，也不阻塞后续用户消息。
+
+`assemble()` 声明 `promptAuthority: "preassembly_may_overflow"`：宿主保持通用的发送前溢出预检，并取「组装估算」与「未开窗全历史估算」的最大值决定是否预防性压缩——最近轮次裁剪窗口无法再掩盖会导致回合失败的溢出。需要 OpenClaw 2026.6+（更老的宿主降级为仅提取并告警；宿主自身的 in-attempt 自动压缩仍会运行）。
 
 ### 原始消息保留（messageRetention，opt-in）
 
@@ -160,7 +183,7 @@ OpenClaw 定时任务创建的会话可以独立配置图谱行为。host 把 cr
 删除语义（fail-closed）：
 
 - 只有 `extracted=true` **且** `producedKnowledge=true`（该轮 LLM 提取实际产出节点/边）的消息才会进入候选。
-- LLM 空提取（成功返回零节点零边）的轮次标记 `producedKnowledge=false`，原始证据保留在库中。此类轮次不会自动重提；如需用更好的 prompt/模型重挖，需手动将这些行的 `extracted` 重置为 `false`，再运行 `openclaw graph-memory extract` 回填。
+- 被本地预筛跳过的 trivial 轮次、以及 LLM 空提取（成功返回零节点零边）的轮次，均标记 `producedKnowledge=false`，原始证据保留在库中。此类轮次不会自动重提；如需用更好的 prompt/模型重挖，需手动将这些行的 `extracted` 重置为 `false`，再运行 `openclaw graph-memory extract` 回填。
 - 未提取消息、以及标记机制上线前的遗留行（无 `producedKnowledge` 属性）一律不删。
 - 保留步骤自身失败（非法策略 fail-closed 不删 / Neo4j 故障）不影响维护链的其他步骤，下一周期自动重试。
 
@@ -199,7 +222,8 @@ openclaw graph-memory auth login
   -> embedding -> 向量召回 + 社区扩展 + GDS PPR
   -> XML 上下文注入
 
-会话结束 -> 衰减（遗忘曲线）-> 去重 -> 全局 PageRank -> 社区 -> 社区摘要
+会话结束 -> 衰减（遗忘曲线）-> 过期 deprecated 节点硬删 -> 去重 -> 全局 PageRank -> 社区 -> 社区摘要
+  -> 原始消息保留（opt-in）
 ```
 
 ## 验证

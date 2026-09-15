@@ -5,6 +5,33 @@
 // passes in CI without depending on the openclaw npm package being installed.
 // Keep the real openclaw package in peerDependencies for runtime resolution.
 
+// `openclaw/plugin-sdk/core` — delegating-compaction bridge (OpenClaw 2026.6+).
+// Signature mirrors host src/context-engine/{delegate,types}.ts: params are the
+// engine compact() params passed through verbatim (sessionId/sessionKey/
+// sessionTarget/runtimeContext/force/currentTokenCount/...), and the returned
+// CompactResult is what engine compact() should return to the host.
+declare module "openclaw/plugin-sdk/core" {
+  export interface CompactResult {
+    ok: boolean;
+    compacted: boolean;
+    reason?: string;
+    result?: {
+      summary?: string;
+      firstKeptEntryId?: string;
+      tokensBefore: number;
+      tokensAfter?: number;
+      details?: unknown;
+      sessionId?: string;
+      sessionTarget?: unknown;
+      sessionFile?: string;
+    };
+  }
+
+  export function delegateCompactionToRuntime(
+    params: Record<string, unknown>,
+  ): Promise<CompactResult>;
+}
+
 declare module "openclaw/plugin-sdk" {
   import type { IncomingMessage, ServerResponse } from "http";
 
@@ -53,6 +80,25 @@ declare module "openclaw/plugin-sdk" {
     error(message: string): void;
   }
 
+  // Internal hook system (colon event names, e.g. "session:patch"). Distinct
+  // from the typed runner behind api.on(...): underscore names registered here
+  // are never invoked. Host dispatch awaits handlers sequentially, swallows
+  // handler errors into its own log, and applies no timeout.
+  export interface OpenClawInternalHookEvent {
+    type: "command" | "session" | "agent" | "gateway" | "message";
+    action: string;
+    sessionKey: string;
+    context: Record<string, unknown>;
+    timestamp: Date;
+    messages: string[];
+  }
+
+  export interface OpenClawPluginHookOptions {
+    /** Required: registration name ("hook registration missing name" otherwise). */
+    name?: string;
+    [key: string]: unknown;
+  }
+
   export interface OpenClawPluginApi {
     logger: OpenClawPluginLogger;
     config: any;
@@ -60,6 +106,11 @@ declare module "openclaw/plugin-sdk" {
     registrationMode?: "full" | "discovery" | "tool-discovery" | "setup-only" | "setup-runtime" | "cli-metadata";
     resolvePath(path: string): string;
     on(event: string, handler: (...args: any[]) => any): void;
+    registerHook?(
+      events: string | string[],
+      handler: (event: OpenClawInternalHookEvent) => Promise<void> | void,
+      opts?: OpenClawPluginHookOptions,
+    ): void;
     registerContextEngine(id: string, factory: (...args: any[]) => any): void;
     registerTool(...args: any[]): void;
     registerHttpRoute(params: OpenClawPluginHttpRouteParams): void;

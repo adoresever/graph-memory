@@ -146,7 +146,7 @@ Sessions created by OpenClaw scheduled tasks can be configured independently of 
 | Option | Default | Description |
 | --- | --- | --- |
 | `enabled` | `true` | Enable graph functionality inside cron sessions (recall injection + message buffering). When `false`, cron sessions skip automatic recall and message persistence; the `gm_*` tools remain available for explicit calls (manual escape hatch). |
-| `extract` | `true` | Trigger knowledge extraction (LLM triples) in cron sessions via `afterTurn` / `compact`. When `false`, messages are still buffered and can be backfilled later with `openclaw graph-memory extract`. |
+| `extract` | `true` | Trigger knowledge extraction (LLM triples) in cron sessions via `afterTurn` / `commitTurn` / `compact`. When `false`, messages are still buffered and can be backfilled later with `openclaw graph-memory extract`. |
 | `finalizeAndMaintain` | `true` | Run finalize (EVENT→SKILL promotion) and graph maintenance (decay / PageRank / communities) when a cron session ends. Disable when frequent cron runs make end-of-session global maintenance too costly. |
 
 All three options default to **`true`**: cron sessions behave like normal sessions (recall, buffering, extraction, and end-of-session maintenance all enabled) unless explicitly disabled. `enabled: false` is the master switch — even with `extract` / `finalizeAndMaintain` set to `true`, nothing runs. Non-cron sessions are never affected by these options.
@@ -154,6 +154,29 @@ All three options default to **`true`**: cron sessions behave like normal sessio
 All three sub-options are optional; omitted fields keep the default `true` (e.g. with `"cron": { "extract": false }` only extraction is disabled — recall, buffering, and end-of-session maintenance stay on).
 
 Caveat: when a cron job sets an explicit custom `sessionKey`, the host does not append the `cron` segment — such sessions cannot be detected and are treated as normal sessions.
+
+### Knowledge extraction (extract, LLM cost control)
+
+By default every turn triggers an immediate LLM extraction (`per-turn` mode), with a local pre-filter that skips trivial turns (empty input, filler words, or ultra-short input without technical tokens — turns containing tool work are never skipped) without calling the LLM. Chatty sessions can switch to batched extraction to cut LLM call volume to ~1/N:
+
+```json
+"extract": {
+  "mode": "batched",
+  "trivialMaxChars": 5
+}
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `mode` | `"per-turn"` | `per-turn` = extract immediately after each turn (`afterTurn` / `commitTurn`), so knowledge is queryable mid-session; `batched` = no per-turn LLM calls — unextracted messages accumulate and are batch-extracted once they reach `compactTurnCount * 3` messages, with the tail batch flushed at session end. Trade-off: mid-session recall cannot see the latest turns' knowledge until the next batch (or session end) runs. |
+| `trivialMaxChars` | `5` | Local pre-filter threshold (`per-turn` path only): if the user text, after stripping whitespace/punctuation, is at or under this length **and** contains no technical tokens (3+ alphanumeric run, e.g. `pnpm`/`jwt`), the turn is marked extracted without an LLM call. Trivially-skipped turns are marked `producedKnowledge=false`, so retention never deletes their raw evidence. |
+| `trivialPrompts` | — | Extra filler words merged with the built-in stoplist (exact match after cleaning + lowercasing, e.g. `"继续"`, `"resume"`). |
+
+### Context compaction (delegating mode)
+
+This engine runs in OpenClaw's **delegating mode** (`ownsCompaction: false`): `/compact`, near-limit auto-compaction, and overflow-recovery compaction all delegate window reduction to OpenClaw's built-in summarization pipeline (the same bridge the legacy engine uses, `delegateCompactionToRuntime` from `openclaw/plugin-sdk/core`). When a compaction fires, the engine additionally kicks off a **fire-and-forget** extraction of any unextracted messages (the `GmMessage` backlog — host compaction only rewrites the transcript, never the graph store), so knowledge is preserved into the graph without blocking compaction or the next user message.
+
+`assemble()` declares `promptAuthority: "preassembly_may_overflow"`: the host keeps its generic pre-prompt overflow precheck active and takes the maximum of the assembled estimate and the unwindowed session-history estimate when deciding whether to preemptively compact — the recent-turn window alone can never hide an overflow that would fail the turn. Requires OpenClaw 2026.6+ (older hosts fall back to extraction-only compaction with a warning; the host's own in-attempt auto-compaction still runs).
 
 ### Raw message retention (messageRetention, opt-in)
 
@@ -178,7 +201,7 @@ Context compaction only changes what the model sees — it is **not authorizatio
 Deletion semantics (fail-closed):
 
 - Only messages with `extracted=true` **and** `producedKnowledge=true` (the extraction actually produced nodes/edges) enter the candidate set.
-- Turns where the LLM returned zero nodes and zero edges are marked `producedKnowledge=false` — the raw evidence stays in the database. Such turns are never re-extracted automatically; to re-mine them with a better prompt/model, manually reset their `extracted` flag to `false` and re-run `openclaw graph-memory extract`.
+- Turns skipped by the trivial pre-filter, and turns where the LLM returned zero nodes and zero edges, are marked `producedKnowledge=false` — the raw evidence stays in the database. Such turns are never re-extracted automatically; to re-mine them with a better prompt/model, manually reset their `extracted` flag to `false` and re-run `openclaw graph-memory extract`.
 - Unextracted messages and legacy rows (extracted before this flag existed, no `producedKnowledge` property) are never deleted.
 - A failure in the retention step itself (invalid policy fails closed with zero deletions / Neo4j error) never invalidates the other maintenance steps; it retries next cycle.
 
@@ -220,7 +243,8 @@ conversation messages -> GmMessage nodes -> LLM triple extraction
   -> embeddings -> vector recall + community expansion + GDS PPR
   -> XML context injection
 
-session end -> decay (forgetting curve) -> dedup -> global PageRank -> communities -> summaries
+session end -> decay (forgetting curve) -> purge expired deprecated -> dedup -> global PageRank -> communities -> summaries
+  -> message retention (opt-in)
 ```
 
 ## Verify

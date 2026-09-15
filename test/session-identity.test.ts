@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { isCronSessionKey } from "../src/types.ts";
+import { delegateCompactionToRuntime } from "./fixtures/openclaw-plugin-sdk-core.ts";
 
 const mocks = vi.hoisted(() => ({
   getBySession: vi.fn(async () => [] as unknown[]),
@@ -101,17 +102,20 @@ type EngineHarness = {
     readonly sessionId: string;
     readonly sessionKey?: string;
     readonly messages: readonly unknown[];
+    readonly prompt?: string;
   }) => Promise<unknown>;
   readonly compact: (params: { readonly sessionId: string; readonly sessionKey?: string }) => Promise<{
     readonly ok: boolean;
     readonly compacted: boolean;
     readonly reason?: string;
+    readonly result?: unknown;
   }>;
   readonly afterTurn: (params: {
     readonly sessionId: string;
     readonly sessionKey?: string;
     readonly messages: readonly unknown[];
     readonly prePromptMessageCount: number;
+    readonly autoCompactionSummary?: string;
   }) => Promise<void>;
   readonly prepareSubagentSpawn: (params: {
     readonly parentSessionKey: string;
@@ -207,6 +211,44 @@ describe("session identity", () => {
       expect.objectContaining({ recalledNodes: [{ id: "recalled-node" }] }),
     );
   });
+
+  it("compact 后失效召回缓存：下一轮 assemble 以同 prompt 重新召回", async () => {
+    const { engine } = registerPlugin();
+    const assembleParams = { sessionId: "compact-recall", messages: [] as unknown[], prompt: "hello graph" };
+
+    await engine.assemble(assembleParams);
+    expect(mocks.recall).toHaveBeenCalledTimes(1);
+
+    // 同 prompt 命中缓存：不重复召回
+    await engine.assemble(assembleParams);
+    expect(mocks.recall).toHaveBeenCalledTimes(1);
+
+    // compact 委托宿主压缩（转录被替换为 summary + 近期消息）→ 旧语境的
+    // 召回缓存失效 → 同 prompt 也重新计算参与组装的节点
+    await engine.compact({ sessionId: "compact-recall" });
+    await engine.assemble(assembleParams);
+    expect(mocks.recall).toHaveBeenCalledTimes(2);
+  });
+
+  it("afterTurn 收到 autoCompactionSummary（宿主自动压缩）同样失效召回缓存", async () => {
+    const { engine } = registerPlugin();
+    const assembleParams = { sessionId: "autocompact-recall", messages: [] as unknown[], prompt: "hello graph" };
+
+    await engine.assemble(assembleParams);
+    await engine.assemble(assembleParams);
+    expect(mocks.recall).toHaveBeenCalledTimes(1);
+
+    // 宿主 in-attempt 自动压缩不经引擎 compact()，仅以 autoCompactionSummary 通知
+    await engine.afterTurn({
+      sessionId: "autocompact-recall",
+      messages: [],
+      prePromptMessageCount: 0,
+      autoCompactionSummary: "compacted by host",
+    });
+
+    await engine.assemble(assembleParams);
+    expect(mocks.recall).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("cron session gating (cron 配置)", () => {
@@ -219,6 +261,7 @@ describe("cron session gating (cron 配置)", () => {
     mocks.recall.mockClear();
     mocks.assembleContext.mockClear();
     mocks.runMaintenance.mockClear();
+    delegateCompactionToRuntime.mockClear();
   });
 
   // host 契约：sessionId 是随机 transcript UUID，cron 标记在 sessionKey 上
@@ -313,8 +356,18 @@ describe("cron session gating (cron 配置)", () => {
     expect(mocks.isTurnExtracted).not.toHaveBeenCalled();
 
     const res = await engine.compact({ sessionId: CRON_SID, sessionKey: CRON_KEY });
-    expect(res).toEqual({ ok: true, compacted: false, reason: "cron session graph disabled" });
+    // delegating mode：cron 门控只作用于知识提取，压缩委托必须照常执行
+    //（non-owning 引擎 no-op compact 会禁用该槽位的 /compact 与溢出恢复）
     expect(mocks.getUnextracted).not.toHaveBeenCalled();
+    expect(delegateCompactionToRuntime).toHaveBeenCalledTimes(1);
+    expect(delegateCompactionToRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: CRON_SID, sessionKey: CRON_KEY }),
+    );
+    expect(res).toEqual({
+      ok: true,
+      compacted: true,
+      result: { summary: "host compaction summary", tokensBefore: 100, tokensAfter: 40 },
+    });
   });
 
   it("enabled=true 时 cron session 正常入库", async () => {
@@ -359,8 +412,32 @@ describe("cron session gating (cron 配置)", () => {
 
     const res = await engine.compact({ sessionId: CRON_SID, sessionKey: CRON_KEY });
 
-    expect(res).toEqual({ ok: true, compacted: false, reason: "cron session extraction disabled" });
     expect(mocks.getUnextracted).not.toHaveBeenCalled();
+    expect(delegateCompactionToRuntime).toHaveBeenCalledTimes(1);
+    expect(res).toMatchObject({ ok: true, compacted: true });
+  });
+
+  it("compact 将宿主 params 原样透传给委托桥（身份字段不得解构重组丢失）", async () => {
+    const { engine } = registerPlugin();
+
+    const richParams = {
+      sessionId: "passthrough-1",
+      sessionKey: "agent:main",
+      sessionFile: "/tmp/session.jsonl",
+      tokenBudget: 120_000,
+      force: true,
+      currentTokenCount: 118_000,
+      compactionTarget: "threshold",
+      customInstructions: "focus on the api design",
+      sessionTarget: { sessionId: "passthrough-1", sessionKey: "agent:main" },
+      runtimeContext: { tokenBudget: 120_000, workspaceDir: "/workspace" },
+    };
+    await engine.compact(richParams as any);
+
+    // 全等匹配（非 objectContaining）：锁定"整个 params 透传"这一核心不变量，
+    // 未来任何解构重组 params 的改动都会在此挂掉
+    expect(delegateCompactionToRuntime).toHaveBeenCalledTimes(1);
+    expect(delegateCompactionToRuntime).toHaveBeenCalledWith(richParams);
   });
 
   it("cron 任务设置自定义 sessionKey（无 cron 段）时按普通会话处理", async () => {
@@ -381,6 +458,7 @@ describe("outage buffering (Neo4j 掉线缓冲)", () => {
     mocks.saveMessage.mockClear();
     mocks.getUnextracted.mockClear();
     mocks.getMaxTurnIndex.mockClear();
+    delegateCompactionToRuntime.mockClear();
   });
 
   it("写失败时消息被缓冲且不向 host 抛错", async () => {
@@ -432,7 +510,7 @@ describe("outage buffering (Neo4j 掉线缓冲)", () => {
     expect(mocks.saveMessage).toHaveBeenCalledTimes(2);
   });
 
-  it("compact 在读取未提取消息前先刷缓冲（恢复补提取顺序）", async () => {
+  it("compact 委托宿主管线，快照提取后台先刷缓冲再读未提取集", async () => {
     const { engine } = registerPlugin();
     mocks.saveMessage.mockRejectedValueOnce(new Error("neo4j down"));
 
@@ -440,11 +518,20 @@ describe("outage buffering (Neo4j 掉线缓冲)", () => {
     expect(mocks.saveMessage).toHaveBeenCalledTimes(1);
 
     const res = await engine.compact({ sessionId: "outage-4" });
-    expect(res).toEqual({ ok: true, compacted: false, reason: "no messages" });
+    // 窗口缩减立即委托给宿主内置管线（不等待知识提取）
+    expect(delegateCompactionToRuntime).toHaveBeenCalledTimes(1);
+    expect(delegateCompactionToRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "outage-4" }),
+    );
+    expect(res).toMatchObject({ ok: true, compacted: true });
 
-    // flush 先于 getUnextracted：第二条 saveMessage 是缓冲补写，然后才查未提取集
+    // fire-and-forget 的 extractUnextractedBatch：flush 微任务/宏任务落地后，
+    // 缓冲消息先补写（saveMessage 第 2 次），然后才读未提取集
+    await new Promise(resolve => setTimeout(resolve, 0));
     expect(mocks.saveMessage).toHaveBeenCalledTimes(2);
     expect((mocks.saveMessage.mock.calls[1][4] as { content: string }).content).toContain("buffered turn");
     expect(mocks.getUnextracted).toHaveBeenCalledTimes(1);
+    expect(mocks.saveMessage.mock.invocationCallOrder[1])
+      .toBeLessThan(mocks.getUnextracted.mock.invocationCallOrder[0]);
   });
 });
