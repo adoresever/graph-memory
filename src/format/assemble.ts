@@ -8,8 +8,7 @@
 import type { Driver } from "neo4j-driver";
 import type { GmNode, GmEdge } from "../types.ts";
 import { getCommunitySummary, type CommunitySummary } from "../store/store.ts";
-
-const CHARS_PER_TOKEN = 3;
+import { CHARS_PER_TOKEN, estimateTokens } from "../tokens.ts";
 
 export function buildSystemPromptAddition(params: {
   selectedNodes: Array<{ type: string; src: "active" | "recalled" }>;
@@ -117,13 +116,15 @@ export async function assembleContext(
     selectedIds.has(e.fromId) && selectedIds.has(e.toId) && !seen.has(e.id) && seen.add(e.id)
   );
 
-  // 预加载所有需要的社区摘要
-  const communityIds = new Set(selected.map(n => n.communityId).filter(Boolean) as string[]);
+  // 预加载所有需要的社区摘要（并发拉取，避免逐个 await 的串行往返）
+  const communityIds = Array.from(new Set(selected.map(n => n.communityId).filter(Boolean) as string[]));
+  const summaries = await Promise.all(
+    communityIds.map(cid => getCommunitySummary(driver, cid)),
+  );
   const communitySummaries = new Map<string, CommunitySummary>();
-  for (const cid of communityIds) {
-    const summary = await getCommunitySummary(driver, cid);
-    if (summary) communitySummaries.set(cid, summary);
-  }
+  communityIds.forEach((cid, i) => {
+    if (summaries[i]) communitySummaries.set(cid, summaries[i]!);
+  });
 
   // 按社区分组
   const byCommunity = new Map<string, typeof selected>();
@@ -178,7 +179,7 @@ export async function assembleContext(
   });
 
   const fullContent = systemPrompt + "\n\n" + xml;
-  return { xml, systemPrompt, tokens: Math.ceil(fullContent.length / CHARS_PER_TOKEN) };
+  return { xml, systemPrompt, tokens: estimateTokens(fullContent.length) };
 }
 
 function escapeXml(s: string): string {

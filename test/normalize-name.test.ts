@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import { normalizeName as normalize } from "../src/store/store.ts";
-import { normalizeName as normalizeNameExtract } from "../src/extractor/extract.ts";
 
 describe("normalizeName", () => {
   it("小写化", () => {
@@ -52,24 +51,4 @@ describe("normalizeName", () => {
   it("空字符串", () => {
     expect(normalize("")).toBe("");
   });
-});
-
-describe("normalizeName 跨文件一致性（store.ts 与 extract.ts 必须相同）", () => {
-  const corpus = [
-    "Docker Build",
-    "API_KEY",
-    "React 18!",
-    "数据库迁移",
-    "  mixed_Case Name!  ",
-    "a---b__c   d",
-    "",
-    "已经-标准化",
-    "Neovis 3D 可视化",
-  ];
-
-  for (const input of corpus) {
-    it(`相同输入相同输出: ${JSON.stringify(input)}`, () => {
-      expect(normalizeNameExtract(input)).toBe(normalize(input));
-    });
-  }
 });

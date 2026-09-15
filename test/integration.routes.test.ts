@@ -6,6 +6,7 @@ import { closeDriver, getDriver, getSession, initSchema } from "../src/store/db.
 import { findById, upsertNode } from "../src/store/store.ts";
 
 const ENABLED = !!process.env.NEO4J_INTEGRATION;
+const NEO4J_URI = process.env.NEO4J_TEST_URI ?? "bolt://localhost:7687";
 const TEST_SID = `routes-${Date.now()}`;
 
 let driver: Driver;
@@ -30,7 +31,7 @@ async function request(method: string, path: string, body?: Record<string, unkno
 
 describe.skipIf(!ENABLED)("CRUD route integration", () => {
   beforeAll(async () => {
-    driver = getDriver({ uri: "bolt://localhost:7687", user: "neo4j", password: "graphmemory" });
+    driver = getDriver({ uri: NEO4J_URI, user: "neo4j", password: "graphmemory" });
     await initSchema(driver);
 
     const api = {
@@ -108,5 +109,51 @@ describe.skipIf(!ENABLED)("CRUD route integration", () => {
       instruction: "invalid direction",
     });
     expect(response.status).toBe(400);
+  });
+
+  it("drops direction-violating edges when the node type changes (TASK→EVENT)", async () => {
+    const { node: skill } = await upsertNode(driver, {
+      type: "SKILL", name: "route-typechange-skill", description: "d", content: "c",
+    }, TEST_SID);
+    const { node: task } = await upsertNode(driver, {
+      type: "TASK", name: "route-typechange-task", description: "d", content: "c",
+    }, TEST_SID);
+
+    // TASK→SKILL 的 USED_SKILL 合法；节点改成 EVENT 后 USED_SKILL 出边违反白名单
+    const created = await request("POST", "edges", {
+      fromId: task.id,
+      toId: skill.id,
+      type: "USED_SKILL",
+      instruction: "legal before type change",
+    });
+    expect(created.status).toBe(201);
+
+    const changed = await request("PUT", `nodes?id=${task.id}`, { type: "EVENT" });
+    expect(changed.status).toBe(200);
+
+    const session = getSession(driver);
+    try {
+      const outEdges = await session.run(
+        "MATCH (n {id: $id})-[r]->() RETURN type(r) AS type", { id: task.id },
+      );
+      expect(outEdges.records).toHaveLength(0);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("rejects renaming a node to an existing name with 409", async () => {
+    const { node: keeper } = await upsertNode(driver, {
+      type: "SKILL", name: "route-name-keeper", description: "d", content: "c",
+    }, TEST_SID);
+    const { node: victim } = await upsertNode(driver, {
+      type: "TASK", name: "route-name-victim", description: "d", content: "c",
+    }, TEST_SID);
+
+    const response = await request("PUT", `nodes?id=${victim.id}`, { name: keeper.name });
+    expect(response.status).toBe(409);
+    // 自身同名（标准化后未变）不算冲突
+    const selfRename = await request("PUT", `nodes?id=${victim.id}`, { name: "route-name-victim" });
+    expect(selfRename.status).toBe(200);
   });
 });

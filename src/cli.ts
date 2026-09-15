@@ -25,6 +25,9 @@ import {
   type OAuthProviderId,
 } from "./engine/oauth.ts";
 import type { ReasoningEffort } from "./engine/llm.ts";
+import { runBackfillExtraction } from "./cli-extract.ts";
+import { runReembed } from "./cli-reembed.ts";
+import { DEFAULT_CONFIG, type GmConfig } from "./types.ts";
 
 // ─── 最小 Commander 鸭子类型（避免引入 commander 依赖） ───────────
 // host 运行时注入真正的 commander.Command 实例，结构兼容此接口即可。
@@ -45,6 +48,7 @@ export interface GraphMemoryCliDeps {
   pluginId?: string;
   pluginConfig?: Record<string, unknown> | undefined;
   resolveConfigPath?: (input: string) => string;
+  defaultModel?: string;
   oauthTestHooks?: {
     openUrl?: (url: string) => void | Promise<void>;
     authorizeUrl?: (url: string) => void | Promise<void>;
@@ -373,6 +377,109 @@ export function createGraphMemoryCli(deps: GraphMemoryCliDeps) {
           const message = error instanceof Error ? error.message : String(error);
           console.error("OAuth 登录失败：", message);
           throw new Error(`[graph-memory-pro] OAuth login failed: ${message}`);
+        }
+      });
+
+    root
+      .command("extract")
+      .description(
+        "扫描 Neo4j 中未提取的会话消息，按 compact 流程批量补提知识图谱，并同步节点 embedding",
+      )
+      .option("--yes", "跳过确认提示，直接执行提取", false)
+      .option("--dry-run", "只列出待提取会话，不调用 LLM", false)
+      .option("--limit <n>", "每个会话每批最多提取的消息条数（默认 compactTurnCount * 3）", undefined)
+      .option("--session <id>", "仅提取指定 sessionId（默认全部含未提取消息的会话）", undefined)
+      .option("--model <model>", "本次提取使用的 LLM 模型（覆盖配置中的 llm.model / agents.defaults.model）", undefined)
+      .action(async (options: Record<string, unknown>) => {
+        try {
+          const rawCfg = isPlainObject(deps.pluginConfig)
+            ? (deps.pluginConfig as Record<string, unknown>)
+            : {};
+          const cfg: GmConfig = {
+            ...DEFAULT_CONFIG,
+            ...(rawCfg as Partial<GmConfig>),
+          };
+          if (isPlainObject(rawCfg.neo4j)) {
+            cfg.neo4j = { ...DEFAULT_CONFIG.neo4j, ...(rawCfg.neo4j as any) };
+          }
+
+          const cfgLlm = isPlainObject(rawCfg.llm) ? (rawCfg.llm as any) : undefined;
+          const flagModel = typeof options.model === "string" && options.model.trim()
+            ? options.model.trim()
+            : undefined;
+          const effectiveModel = flagModel ?? cfgLlm?.model ?? deps.defaultModel ?? "";
+
+          const limitFlag = typeof options.limit === "string"
+            ? Number.parseInt(options.limit, 10)
+            : (typeof options.limit === "number" ? options.limit : undefined);
+
+          await runBackfillExtraction({
+            cfg,
+            effectiveModel,
+            options: {
+              yes: options.yes === true,
+              dryRun: options.dryRun === true,
+              session: typeof options.session === "string" ? options.session : undefined,
+              limit: limitFlag !== undefined && Number.isFinite(limitFlag) && limitFlag > 0
+                ? Math.floor(limitFlag)
+                : undefined,
+            },
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error("[graph-memory-pro] extract 失败：", message);
+          throw new Error(`[graph-memory-pro] extract failed: ${message}`);
+        }
+      });
+
+    root
+      .command("reembed")
+      .description(
+        "清除现有向量并用当前 embedding 模型批量重建（换 embedding 模型后必须执行，否则旧向量静默失效）",
+      )
+      .option("--yes", "跳过确认提示，直接执行", false)
+      .option("--dry-run", "只报告向量覆盖情况与维度对照，不写入", false)
+      .option("--batch <n>", "每次 embedding 请求携带的文本条数（默认 32，上限 256）", undefined)
+      .option(
+        "--recreate-index",
+        "向量索引维度与当前模型输出不符时，删除索引并按 embedding.dimensions 重建",
+        false,
+      )
+      .action(async (options: Record<string, unknown>) => {
+        try {
+          const rawCfg = isPlainObject(deps.pluginConfig)
+            ? (deps.pluginConfig as Record<string, unknown>)
+            : {};
+          const cfg: GmConfig = {
+            ...DEFAULT_CONFIG,
+            ...(rawCfg as Partial<GmConfig>),
+          };
+          if (isPlainObject(rawCfg.neo4j)) {
+            cfg.neo4j = { ...DEFAULT_CONFIG.neo4j, ...(rawCfg.neo4j as any) };
+          }
+          if (isPlainObject(rawCfg.embedding)) {
+            cfg.embedding = { ...(rawCfg.embedding as any) };
+          }
+
+          const batchFlag = typeof options.batch === "string"
+            ? Number.parseInt(options.batch, 10)
+            : (typeof options.batch === "number" ? options.batch : undefined);
+
+          await runReembed({
+            cfg,
+            options: {
+              yes: options.yes === true,
+              dryRun: options.dryRun === true,
+              recreateIndex: options.recreateIndex === true,
+              batch: batchFlag !== undefined && Number.isFinite(batchFlag) && batchFlag > 0
+                ? Math.floor(batchFlag)
+                : undefined,
+            },
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error("[graph-memory-pro] reembed 失败：", message);
+          throw new Error(`[graph-memory-pro] reembed failed: ${message}`);
         }
       });
   };

@@ -84,6 +84,18 @@ describe("plugin CLI lifecycle", () => {
     expect(api.registerHttpRoute).not.toHaveBeenCalled();
   });
 
+  it("registers only CLI metadata in discovery/tool-discovery/setup-only modes", () => {
+    for (const mode of ["discovery", "tool-discovery", "setup-only"]) {
+      const api = metadataApi(mode);
+      graphMemoryProPlugin.register(api as any);
+      expect(api.registerCli).toHaveBeenCalledOnce();
+      expect(api.registerTool).not.toHaveBeenCalled();
+      expect(api.registerContextEngine).not.toHaveBeenCalled();
+      expect(api.registerHttpRoute).not.toHaveBeenCalled();
+      expect(api.on).not.toHaveBeenCalled();
+    }
+  });
+
   it("recognizes the plugin command for legacy OpenClaw discovery", () => {
     expect(isGraphMemoryCliInvocation(["node", "openclaw", "graph-memory", "auth", "login"])).toBe(true);
     expect(isGraphMemoryCliInvocation(["node", "openclaw", "gateway"])).toBe(false);

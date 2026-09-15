@@ -15,30 +15,15 @@
  */
 
 import type { EmbeddingConfig } from "../types.ts";
+import { fetchRetry, throwForStatus } from "./http.ts";
 
 export type EmbedMode = "db" | "query";
 export type EmbedFn = (text: string, mode?: EmbedMode) => Promise<number[]>;
+export type EmbedBatchFn = (texts: string[], mode?: EmbedMode) => Promise<number[][]>;
 
-// ─── 带重试 + 超时的 fetch ─────────────────────────────────────
-
-const RETRYABLE = new Set([429, 500, 502, 503, 529]);
-
-async function fetchRetry(url: string, init: RequestInit, retries = 3, timeoutMs = 10_000): Promise<Response> {
-  for (let i = 0; i <= retries; i++) {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
-    try {
-      const res = await fetch(url, { ...init, signal: ctrl.signal });
-      clearTimeout(t);
-      if (res.ok || i >= retries || !RETRYABLE.has(res.status)) return res;
-      await new Promise(r => setTimeout(r, 1000 * Math.pow(2, i)));
-    } catch (err: any) {
-      clearTimeout(t);
-      if (i >= retries) throw err;
-      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
-    }
-  }
-  throw new Error("[graph-memory-pro] embed fetch failed after retries");
+export interface Embedder {
+  embed: EmbedFn;
+  embedBatch: EmbedBatchFn;
 }
 
 // ─── Provider 识别 ───────────────────────────────────────────
@@ -64,9 +49,49 @@ export function isMinimaxEndpoint(baseURL: string): boolean {
   );
 }
 
+// ─── 批量响应解析（纯函数，可测） ─────────────────────────────
+
+/**
+ * 从 /embeddings 响应的 data 数组重建与输入等长、顺序一致的向量数组。
+ * OpenAI 兼容端点按 item.index 归位；缺 index 时按响应位置对齐。
+ * MiniMax 用 item.vector 字段。条数不符 / 缺向量 / index 非法都抛错——
+ * 上层（CLI 重嵌入）会退化为逐条请求兜底。
+ */
+export function parseBatchEmbeddingResponse(
+  data: unknown,
+  expectedCount: number,
+  minimax: boolean,
+): number[][] {
+  if (!Array.isArray(data)) {
+    throw new Error("[graph-memory-pro] Embedding batch response missing data array");
+  }
+  if (data.length !== expectedCount) {
+    throw new Error(
+      `[graph-memory-pro] Embedding batch returned ${data.length} vectors for ${expectedCount} inputs`,
+    );
+  }
+  const out: number[][] = new Array(expectedCount);
+  data.forEach((item: any, position: number) => {
+    const vec = minimax ? item?.vector : item?.embedding;
+    if (!Array.isArray(vec) || !vec.length) {
+      throw new Error(`[graph-memory-pro] Embedding batch response item ${position} has no vector`);
+    }
+    const index = typeof item?.index === "number" ? item.index : position;
+    if (index < 0 || index >= expectedCount || out[index]) {
+      throw new Error(`[graph-memory-pro] Embedding batch response has invalid index ${index}`);
+    }
+    out[index] = vec;
+  });
+  return out;
+}
+
 // ─── EmbedFn 工厂 ───────────────────────────────────────────
 
-export async function createEmbedFn(cfg: EmbeddingConfig | undefined): Promise<EmbedFn | null> {
+/**
+ * 构造单发 + 批量两个 embed 函数（共享 probe 与配置解析）。
+ * 运行时路径只用单发 embed；`graph-memory reembed` 额外消费批量接口。
+ */
+export async function createEmbedder(cfg: EmbeddingConfig | undefined): Promise<Embedder | null> {
   // Local OpenAI-compatible servers commonly do not require a key. A key by
   // itself still selects the default OpenAI endpoint; a URL by itself selects
   // an unauthenticated local/custom endpoint.
@@ -83,12 +108,13 @@ export async function createEmbedFn(cfg: EmbeddingConfig | undefined): Promise<E
   /**
    * 构造请求 body。MiniMax 走 texts+type 分支，其他 OpenAI 兼容端点维持原行为。
    * type: db=入库, query=查询（MiniMax 内部用不同模型）
+   * 批量时 input 为 string[]：标准端点直接传数组，MiniMax 的 texts 本就是数组。
    */
-  function buildBody(input: string, mode: EmbedMode): Record<string, unknown> {
+  function buildBody(input: string | string[], mode: EmbedMode): Record<string, unknown> {
     if (minimax) {
       return {
         model,
-        texts: [input],
+        texts: Array.isArray(input) ? input : [input],
         type: mode,
       };
     }
@@ -97,19 +123,22 @@ export async function createEmbedFn(cfg: EmbeddingConfig | undefined): Promise<E
     return body;
   }
 
-  async function callEmbedding(input: string, mode: EmbedMode): Promise<number[]> {
-    const res = await fetchRetry(`${baseURL}/embeddings`, {
+  async function postEmbedding(body: Record<string, unknown>, timeoutMs: number): Promise<Response> {
+    return fetchRetry(`${baseURL}/embeddings`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         ...(apiKey ? { "Authorization": `Bearer ${apiKey}` } : {}),
       },
-      body: JSON.stringify(buildBody(input, mode)),
-    });
+      body: JSON.stringify(body),
+    }, { timeoutMs, label: "[graph-memory-pro] Embedding", retryOnTimeout: true });
+  }
+
+  async function callEmbedding(input: string, mode: EmbedMode): Promise<number[]> {
+    const res = await postEmbedding(buildBody(input, mode), 10_000);
 
     if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      throw new Error(`[graph-memory-pro] Embedding API ${res.status}: ${errText.slice(0, 200)}`);
+      await throwForStatus(res, "[graph-memory-pro] Embedding API");
     }
 
     const data = await res.json() as any;
@@ -121,15 +150,33 @@ export async function createEmbedFn(cfg: EmbeddingConfig | undefined): Promise<E
     return embedding;
   }
 
+  async function callEmbeddingBatch(texts: string[], mode: EmbedMode): Promise<number[][]> {
+    if (!texts.length) return [];
+    // 批量请求服务端耗时随条数线性增长：按 2s/条 推算超时，下限沿用单发的 10s
+    const res = await postEmbedding(buildBody(texts, mode), Math.max(10_000, 2_000 * texts.length));
+
+    if (!res.ok) {
+      await throwForStatus(res, "[graph-memory-pro] Embedding API");
+    }
+
+    const data = await res.json() as any;
+    return parseBatchEmbeddingResponse(data?.data, texts.length, minimax);
+  }
+
   try {
     const probe = await callEmbedding("ping", "query");
     if (!probe.length) return null;
 
-    return async (text: string, mode: EmbedMode = "db"): Promise<number[]> => {
-      return callEmbedding(text.slice(0, 8000), mode);
+    return {
+      embed: async (text: string, mode: EmbedMode = "db"): Promise<number[]> => {
+        return callEmbedding(text.slice(0, 8000), mode);
+      },
+      embedBatch: async (texts: string[], mode: EmbedMode = "db"): Promise<number[][]> => {
+        return callEmbeddingBatch(texts.map(t => t.slice(0, 8000)), mode);
+      },
     };
-  } catch (err) {
-    console.error(`[graph-memory-pro] embedding probe failed:`, err);
+  } catch {
+    // probe 失败返回 null（调用方日志已有 "text search mode" 降级提示），不在库代码里写 stdout
     return null;
   }
 }

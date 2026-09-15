@@ -17,6 +17,7 @@ import { Recaller, buildNodeEmbeddingText } from "../src/recaller/recall.ts";
 import { DEFAULT_CONFIG, type GmConfig } from "../src/types.ts";
 
 const ENABLED = !!process.env.NEO4J_INTEGRATION;
+const NEO4J_URI = process.env.NEO4J_TEST_URI ?? "bolt://localhost:7687";
 
 let driver: Driver;
 const TEST_SID = `recall-${Date.now()}`;
@@ -24,7 +25,7 @@ const cfg: GmConfig = { ...DEFAULT_CONFIG, recallMaxNodes: 5, recallMaxDepth: 2 
 
 describe.skipIf(!ENABLED)("Recaller integration", () => {
   beforeAll(async () => {
-    driver = getDriver({ uri: "bolt://localhost:7687", user: "neo4j", password: "graphmemory" });
+    driver = getDriver({ uri: NEO4J_URI, user: "neo4j", password: "graphmemory" });
     await initSchema(driver);
 
     // 构造可被关键词召回的图
@@ -62,13 +63,8 @@ describe.skipIf(!ENABLED)("Recaller integration", () => {
     // 结构验证（不依赖具体节点返回 —— PPR 排序受共享 Neo4j 现有数据影响）
     expect(result).toHaveProperty("nodes");
     expect(result).toHaveProperty("edges");
-    expect(result).toHaveProperty("tokenEstimate");
     expect(Array.isArray(result.nodes)).toBe(true);
     expect(Array.isArray(result.edges)).toBe(true);
-    // 如果有节点返回，tokenEstimate 应 > 0
-    if (result.nodes.length > 0) {
-      expect(result.tokenEstimate).toBeGreaterThan(0);
-    }
   });
 
   it("recall 带 mock embedFn：走向量搜索路径，不抛错", async () => {
@@ -85,7 +81,6 @@ describe.skipIf(!ENABLED)("Recaller integration", () => {
     const result = await recaller.recall("docker");
     expect(result).toHaveProperty("nodes");
     expect(result).toHaveProperty("edges");
-    expect(result).toHaveProperty("tokenEstimate");
   });
 
   it("recall 空查询：降级到 topNodes，返回合法结构", async () => {
@@ -93,7 +88,6 @@ describe.skipIf(!ENABLED)("Recaller integration", () => {
     const result = await recaller.recall("   ");
     expect(result).toHaveProperty("nodes");
     expect(result).toHaveProperty("edges");
-    expect(result).toHaveProperty("tokenEstimate");
     expect(result.nodes.length).toBeGreaterThanOrEqual(0);
   });
 
@@ -179,5 +173,64 @@ describe.skipIf(!ENABLED)("Recaller integration", () => {
 
     await recaller.syncEmbed({ ...node, description: "new description" });
     expect(embeddedText).toContain("new description");
+  });
+
+  it("syncEmbedBatch：批量一次往返 + contentHash 短路 + 分块 + 单发回退", async () => {
+    // 40 个节点 > SYNC_EMBED_BATCH(32) → 应拆 2 块
+    const nodes = [];
+    for (let i = 0; i < 40; i++) {
+      const { node } = await upsertNode(driver, {
+        type: "SKILL", name: `syncembed-batch-target-${i}`,
+        description: `batch ${i}`, content: `content ${i}`,
+      }, TEST_SID);
+      nodes.push(node);
+    }
+
+    let batchCalls = 0;
+    let singleCalls = 0;
+    let totalTexts = 0;
+    const recaller = new Recaller(driver, cfg);
+    recaller.setEmbedFn(async () => {
+      singleCalls++;
+      return new Array(1024).fill(0.1);
+    });
+    recaller.setEmbedBatchFn(async (texts) => {
+      batchCalls++;
+      totalTexts += texts.length;
+      return texts.map(() => new Array(1024).fill(0.2));
+    });
+
+    await recaller.syncEmbedBatch(nodes);
+    expect(batchCalls).toBe(2);      // 32 + 8 两块
+    expect(totalTexts).toBe(40);
+    expect(singleCalls).toBe(0);     // 有批量能力时不走单发
+
+    // contentHash 短路：内容未变 → 零新调用
+    await recaller.syncEmbedBatch(nodes);
+    expect(batchCalls).toBe(2);
+    expect(totalTexts).toBe(40);
+
+    // 单节点内容变化 → 只有该节点重嵌入（1 块 1 条文本）
+    await recaller.syncEmbedBatch([{ ...nodes[0], content: "changed content after batch" }]);
+    expect(batchCalls).toBe(3);
+    expect(totalTexts).toBe(41);
+
+    // 旧接线（仅 setEmbedFn）回退到逐节点单发
+    const recaller2 = new Recaller(driver, cfg);
+    let single2 = 0;
+    recaller2.setEmbedFn(async () => {
+      single2++;
+      return new Array(1024).fill(0.3);
+    });
+    const { node: fb } = await upsertNode(driver, {
+      type: "SKILL", name: "syncembed-batch-fallback",
+      description: "f", content: "fallback content",
+    }, TEST_SID);
+    await recaller2.syncEmbedBatch([fb]);
+    expect(single2).toBe(1);
+
+    // 空输入 no-op
+    await recaller.syncEmbedBatch([]);
+    expect(batchCalls).toBe(3);
   });
 });

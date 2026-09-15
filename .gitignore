@@ -7,5 +7,6 @@ dist/
 *.log
 package-lock.json
 .omo/
+.zcode/
 /migrate/staging
 *.pyc

@@ -6,15 +6,19 @@
  * 保留 summarizeCommunities()（需要 LLM）
  */
 
+import { createHash } from "node:crypto";
 import type { Driver } from "neo4j-driver";
 import { getSession } from "../store/db.ts";
 import {
   clearCommunities,
   updateCommunities,
   upsertCommunitySummary,
+  getCommunitySummary,
+  getCommunitySummaryBySignature,
   pruneCommunitySummaries,
 } from "../store/store.ts";
 import { getExistingActiveRelTypes, projectActiveGraph } from "./projection.ts";
+import { stripThinkTags } from "../engine/llm.ts";
 
 export interface CommunityResult {
   labels: Map<string, string>;
@@ -142,17 +146,80 @@ const COMMUNITY_SUMMARY_SYS = `你是知识图谱社区摘要引擎。根据社�
 - 不要使用"社区"这个词
 - 不要加引号或标点以外的格式`;
 
+export function buildCommunityMemberSignature(memberIds: string[]): string {
+  return createHash("sha1").update([...memberIds].sort().join(",")).digest("hex");
+}
+
+/**
+ * top-k 稳定签名（LLM 成本控制）：取 validatedCount 最高的 k 个成员计算签名，
+ * 而非全量成员集合。社区边界抖动（每次微增/减一个低频成员）不再触发 LLM 重摘要——
+ * 摘要语义本就由高价值成员主导。成员数 ≤ k 时退化为全量签名（与旧格式一致）。
+ * 并列的 validatedCount 用 id 字典序决胜负，保证确定性。
+ */
+export const COMMUNITY_SIGNATURE_TOP_K = 8;
+
+export function buildTopKMemberSignature(
+  members: Array<{ id: string; validatedCount: number }>,
+  k: number = COMMUNITY_SIGNATURE_TOP_K,
+): string {
+  const top = [...members]
+    .sort((a, b) =>
+      b.validatedCount - a.validatedCount ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .slice(0, Math.max(1, k))
+    .map((m) => m.id)
+    .sort();
+  return createHash("sha1").update(top.join(",")).digest("hex");
+}
+
 export async function summarizeCommunities(
   driver: Driver,
   communities: Map<string, string[]>,
   llm: CompleteFn,
   embedFn?: EmbedFn,
 ): Promise<number> {
-  await pruneCommunitySummaries(driver);
   let generated = 0;
 
   for (const [communityId, memberIds] of communities) {
     if (memberIds.length === 0) continue;
+
+    // 轻量元数据查询（id + validatedCount）：top-k 签号的输入
+    const metaSession = getSession(driver);
+    let memberMeta: Array<{ id: string; validatedCount: number }>;
+    try {
+      const metaResult = await metaSession.run(`
+        MATCH (n:Task|Skill|Event {status: 'active'})
+        WHERE n.id IN $memberIds
+        RETURN n.id AS id, n.validatedCount AS vc
+      `, { memberIds });
+      memberMeta = metaResult.records.map(r => ({
+        id: r.get("id"),
+        validatedCount: typeof r.get("vc") === "number" ? r.get("vc") : (r.get("vc")?.toNumber?.() ?? 0),
+      }));
+    } finally {
+      await metaSession.close();
+    }
+    if (memberMeta.length === 0) continue;
+
+    const memberSignature = buildTopKMemberSignature(memberMeta);
+
+    const current = await getCommunitySummary(driver, communityId);
+    if (current?.memberSignature === memberSignature && current.summary.trim()) {
+      continue;
+    }
+
+    const reusable = await getCommunitySummaryBySignature(driver, memberSignature);
+    if (reusable?.summary.trim()) {
+      await upsertCommunitySummary(
+        driver,
+        communityId,
+        reusable.summary,
+        memberIds.length,
+        reusable.embedding,
+        memberSignature,
+      );
+      continue;
+    }
 
     const session = getSession(driver);
     let members: any[];
@@ -185,9 +252,7 @@ export async function summarizeCommunities(
         `社区成员：\n${memberText}`,
       );
 
-      const cleaned = summary.trim()
-        .replace(/<think>[\s\S]*?<\/think>/gi, "")
-        .replace(/<think>[\s\S]*/gi, "")
+      const cleaned = stripThinkTags(summary.trim())
         .replace(/^["'「」]|["'「」]$/g, "")
         .replace(/\n/g, " ")
         .replace(/\s{2,}/g, " ")
@@ -204,12 +269,17 @@ export async function summarizeCommunities(
         } catch {}
       }
 
-      await upsertCommunitySummary(driver, communityId, cleaned, memberIds.length, embedding);
+      await upsertCommunitySummary(driver, communityId, cleaned, memberIds.length, embedding, memberSignature);
       generated++;
-    } catch (err) {
-      console.log(`  [WARN] community summary failed for ${communityId}: ${err}`);
+    } catch {
+      // 单社区摘要失败静默跳过（与 syncEmbed 的吞错策略一致）——库代码不直接写 stdout
     }
   }
+
+  // prune 必须在复用查找之后：detectCommunities 每轮按成员数重编号 c-1..c-N，
+  // 旧 id 社区（summary/memberSignature/embedding 的持有者）在新编号下"无人引用"，
+  // 先 prune 会把捐赠者删掉，签名复用永远不生效 → 每轮维护全量重算 LLM 摘要。
+  await pruneCommunitySummaries(driver);
 
   return generated;
 }

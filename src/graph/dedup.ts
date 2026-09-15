@@ -39,36 +39,37 @@ export async function detectDuplicates(driver: Driver, cfg: GmConfig): Promise<D
 
     if (nodesResult.records.length < 2) return [];
 
+    // 逐节点发向量查询是 O(N) 次网络往返，维护链时间随图线性膨胀；
+    // 把循环折叠进单条 UNWIND + CALL（服务端逐节点查向量索引，一次往返流式返回）。
+    const nodes = nodesResult.records.map(r => ({
+      id: r.get("id"),
+      name: r.get("name"),
+      embedding: r.get("embedding"),
+    }));
+    const searchResult = await session.run(`
+      UNWIND $nodes AS n
+      CALL db.index.vector.queryNodes('gm_node_embedding', 5, n.embedding) YIELD node, score
+      WHERE node.id <> n.id AND node.status = 'active' AND score >= $threshold
+      RETURN n.id AS nodeA, n.name AS nameA, node.id AS nodeB, node.name AS nameB, score AS similarity
+    `, { nodes, threshold: cfg.dedupThreshold });
+
     const pairs: DuplicatePair[] = [];
     const seenPairs = new Set<string>();
 
-    // 对每个节点做向量搜索
-    for (const record of nodesResult.records) {
-      const nodeId = record.get("id");
-      const nodeName = record.get("name");
-      const embedding = record.get("embedding");
+    for (const sr of searchResult.records) {
+      const nodeId = sr.get("nodeA");
+      const otherId = sr.get("nodeB");
+      const pairKey = [nodeId, otherId].sort().join("|");
+      if (seenPairs.has(pairKey)) continue;
+      seenPairs.add(pairKey);
 
-      const searchResult = await session.run(`
-        CALL db.index.vector.queryNodes('gm_node_embedding', 5, $vec)
-        YIELD node, score
-        WHERE node.id <> $nodeId AND node.status = 'active' AND score >= $threshold
-        RETURN node.id AS id, node.name AS name, score
-      `, { vec: embedding, nodeId, threshold: cfg.dedupThreshold });
-
-      for (const sr of searchResult.records) {
-        const otherId = sr.get("id");
-        const pairKey = [nodeId, otherId].sort().join("|");
-        if (seenPairs.has(pairKey)) continue;
-        seenPairs.add(pairKey);
-
-        pairs.push({
-          nodeA: nodeId,
-          nodeB: otherId,
-          nameA: nodeName,
-          nameB: sr.get("name"),
-          similarity: sr.get("score"),
-        });
-      }
+      pairs.push({
+        nodeA: nodeId,
+        nodeB: otherId,
+        nameA: sr.get("nameA"),
+        nameB: sr.get("nameB"),
+        similarity: sr.get("similarity"),
+      });
     }
 
     return pairs.sort((a, b) => b.similarity - a.similarity);
