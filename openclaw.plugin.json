@@ -1,8 +1,8 @@
 {
   "id": "graph-memory",
   "name": "Graph Memory",
-  "version": "1.5.8",
-  "description": "知识图谱记忆引擎：从对话提取三元组，FTS5+图遍历+PageRank 跨对话召回，社区聚类+向量去重自动维护",
+  "version": "1.6.0-beta.13",
+  "description": "知识图谱记忆引擎：从对话提取三元组，按当前问题进行向量/FTS5 召回并接管上下文",
   "contracts": {
     "tools": ["gm_search", "gm_record", "gm_update", "gm_stats", "gm_maintain"]
   },
@@ -16,28 +16,26 @@
       },
       "compactTurnCount": {
         "type": "integer",
-        "default": 7,
-        "description": "每隔多少轮检查信号触发知识提取"
+        "default": 6,
+        "description": "每隔多少轮运行 PageRank 与社区维护"
       },
       "recallMaxNodes": {
         "type": "integer",
+        "minimum": 1,
         "default": 6,
-        "description": "跨对话召回最多注入几个节点"
+        "description": "每次按当前问题排序后最多召回几个记忆节点"
       },
-      "recallMaxDepth": {
-        "type": "integer",
-        "default": 2,
-        "description": "图遍历深度（从种子节点出发走几跳）"
-      },
-      "freshTailCount": {
-        "type": "integer",
-        "default": 10,
-        "description": "(deprecated) 已改为按用户轮次切分，此参数不再使用"
-      },
-      "dedupThreshold": {
+      "semanticScoreThreshold": {
         "type": "number",
-        "default": 0.90,
-        "description": "向量去重阈值：余弦相似度超过此值视为重复节点 (0-1)"
+        "minimum": -1,
+        "maximum": 1,
+        "description": "可选的余弦相似度下限；应按所用 embedding 模型校准，不设置时使用排序后的 Top-K"
+      },
+      "freshTurnCount": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 5,
+        "description": "宿主上下文中原样保留的最近用户轮数"
       },
       "pagerankDamping": {
         "type": "number",
@@ -51,7 +49,7 @@
       },
       "embedding": {
         "type": "object",
-        "description": "可选：向量搜索配置。配了用语义搜索+去重，没配用 FTS5 全文搜索",
+        "description": "可选：向量搜索配置。配了使用语义检索，没配使用 FTS5 全文检索",
         "properties": {
           "apiKey": { "type": "string", "description": "Embedding API Key" },
           "baseURL": { "type": "string", "description": "API 地址（兼容旧配置；不填时默认 OpenAI）" },
@@ -67,7 +65,12 @@
           "apiKey": { "type": "string" },
           "baseURL": { "type": "string", "description": "API 地址（兼容旧配置）" },
           "baseUrl": { "type": "string", "description": "API 地址（OpenClaw 标准拼写；与 baseURL 二选一）" },
-          "model": { "type": "string" }
+          "model": { "type": "string" },
+          "maxTokens": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "仅 Anthropic 直连需要；该协议要求调用方明确设置响应上限"
+          }
         }
       }
     }

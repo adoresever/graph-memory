@@ -74,6 +74,21 @@ describe("MiniMax embedding adapter", () => {
     ]);
   });
 
+  it("does not silently discard embedding input after 8000 characters", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify({ data: [{ embedding: [1, 2] }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }));
+    const embed = await createEmbedFn({ baseURL: "https://example.test/v1", model: "embedding-test" });
+    const full = `${"x".repeat(9000)}TAIL`;
+    await embed!(full, "db");
+    expect(bodies.at(-1)?.input).toBe(full);
+  });
+
   it("supports baseUrl and an unauthenticated local endpoint without forcing dimensions", async () => {
     const requests: Array<{ url: string; headers: Headers; body: Record<string, unknown> }> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {

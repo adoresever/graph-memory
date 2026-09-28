@@ -136,7 +136,7 @@ export async function createEmbedFn(cfg: EmbeddingConfig | undefined): Promise<E
     if (!probe.length) return null;
 
     return async (text: string, mode: EmbedMode = "db"): Promise<number[]> => {
-      return callEmbedding(text.slice(0, 8000), mode);
+      return callEmbedding(text, mode);
     };
   } catch (err) {
     console.error(`[graph-memory] embedding probe failed:`, err);

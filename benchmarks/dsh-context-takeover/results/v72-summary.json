@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-09-04",
+  "workload": "release-orchestrator-continuous-development-v1",
+  "model": "GLM-5.2",
+  "turns": 20,
+  "firstRequest": {
+    "baselineTokens": 532451,
+    "graphMemoryTokens": 257656,
+    "changePercent": -51.61,
+    "baselineInputTokens": 359758,
+    "graphMemoryInputTokens": 98854,
+    "inputChangePercent": -72.52,
+    "turn20": {"baselineTokens": 56998, "graphMemoryTokens": 16769, "changePercent": -70.58, "baselineMessages": 171, "graphMemoryMessages": 24},
+    "baselinePerTurn": [8487,10221,11040,12086,13392,14709,17387,18021,19718,21814,30360,27312,30397,32417,35652,38301,41092,44107,48940,56998],
+    "graphMemoryPerTurn": [8636,9175,9519,9471,9266,9517,10168,11365,12984,13221,15583,15411,16422,14613,15125,14460,14551,15071,16329,16769]
+  },
+  "allRequests": {
+    "baseline": {"requests": 77, "tokens": 2487776},
+    "graphMemoryMain": {"requests": 123, "tokens": 2283572},
+    "graphMemoryMaintenance": {"requests": 20, "tokens": 102720},
+    "graphMemoryAllLlmTokens": 2386292,
+    "embedding": {"requests": 125, "tokens": 15220},
+    "graphMemoryAllMeasuredTokens": 2401512,
+    "allMeasuredChangePercent": -3.47
+  },
+  "runtimeEvidence": {
+    "scenarioTurnsPassed": 20,
+    "structuredExtractionsSucceeded": 19,
+    "structuredExtractionsAttempted": 20,
+    "sourceMessagesSucceeded": 38,
+    "sourceMessagesQuarantined": 2,
+    "nodes": 42,
+    "edges": 55,
+    "vectors": 42,
+    "prefixArchives": 14,
+    "completedTurnProjections": 20,
+    "crossSessionFinalFactsRecalled": true
+  },
+  "limitations": [
+    "Main-agent tool-loop counts differed between arms.",
+    "One model response did not invoke the required structured extraction tool and failed closed.",
+    "A broad multi-topic probe was bounded by the configured Top-K; focused probes succeeded.",
+    "This engineering workload is not a universal recall benchmark."
+  ]
+}

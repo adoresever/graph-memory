@@ -1,0 +1,126 @@
+/**
+ * graph-memory
+ *
+ * By: adoresever
+ * Email: Wywelljob@gmail.com
+ */
+import { updateCommunities, updateNavigationCommunities } from "../store/store.js";
+/**
+ * 运行 Label Propagation 并写回 gm_nodes.community_id
+ *
+ * 把有向边当无向边处理（知识关联不分方向）
+ */
+export function detectCommunities(db, maxIter) {
+    // 读取活跃节点
+    const nodeRows = db.prepare("SELECT id FROM gm_nodes WHERE status='active'").all();
+    if (nodeRows.length === 0) {
+        return { labels: new Map(), communities: new Map(), count: 0 };
+    }
+    const nodeIds = nodeRows.map((r) => r.id);
+    // 读取边，构建无向邻接表
+    const edgeRows = db.prepare("SELECT from_id, to_id FROM gm_edges").all();
+    const result = propagateLabels(nodeIds, edgeRows, maxIter);
+    // 写回数据库
+    updateCommunities(db, result.labels);
+    return result;
+}
+/** Build communities on the generic SPO navigation graph. */
+export function detectNavigationCommunities(db, maxIter) {
+    const nodeIds = db.prepare("SELECT id FROM gm_navigation_terms ORDER BY id").all()
+        .map(row => String(row.id));
+    if (!nodeIds.length)
+        return { labels: new Map(), communities: new Map(), count: 0 };
+    const edges = db.prepare("SELECT subject_id AS from_id, object_id AS to_id FROM gm_navigation_triples").all();
+    const result = propagateLabels(nodeIds, edges, maxIter);
+    updateNavigationCommunities(db, result.labels);
+    return result;
+}
+function propagateLabels(nodeIds, edgeRows, maxIter) {
+    const nodeSet = new Set(nodeIds);
+    const adj = new Map();
+    for (const id of nodeIds)
+        adj.set(id, []);
+    for (const edge of edgeRows) {
+        if (!nodeSet.has(edge.from_id) || !nodeSet.has(edge.to_id))
+            continue;
+        adj.get(edge.from_id).push(edge.to_id);
+        adj.get(edge.to_id).push(edge.from_id);
+    }
+    // 初始标签：每个节点 = 自己的 ID
+    const label = new Map();
+    for (const id of nodeIds)
+        label.set(id, id);
+    // A graph cannot need more propagation passes than its node count. Sorted
+    // traversal makes identical data produce identical community assignments.
+    const iterationLimit = maxIter ?? nodeIds.length;
+    for (let iter = 0; iter < iterationLimit; iter++) {
+        let changed = false;
+        for (const nodeId of nodeIds) {
+            const neighbors = adj.get(nodeId) || [];
+            if (neighbors.length === 0)
+                continue;
+            // 统计邻居标签频次
+            const freq = new Map();
+            for (const nb of neighbors) {
+                const l = label.get(nb);
+                freq.set(l, (freq.get(l) || 0) + 1);
+            }
+            // 取频次最高的标签（相同频次取字典序最小，保证确定性）
+            let bestLabel = label.get(nodeId);
+            let bestCount = 0;
+            for (const [l, c] of freq) {
+                if (c > bestCount || (c === bestCount && l < bestLabel)) {
+                    bestLabel = l;
+                    bestCount = c;
+                }
+            }
+            if (label.get(nodeId) !== bestLabel) {
+                label.set(nodeId, bestLabel);
+                changed = true;
+            }
+        }
+        if (!changed)
+            break;
+    }
+    // 构建社区映射
+    const communities = new Map();
+    for (const [nodeId, communityId] of label) {
+        if (!communities.has(communityId))
+            communities.set(communityId, []);
+        communities.get(communityId).push(nodeId);
+    }
+    // 给社区编号（用最大成员数排序，编号 c-1, c-2, ...）
+    const sorted = Array.from(communities.entries())
+        .sort((a, b) => b[1].length - a[1].length);
+    const renameMap = new Map();
+    sorted.forEach(([oldId], i) => renameMap.set(oldId, `c-${i + 1}`));
+    // 重命名标签
+    const finalLabels = new Map();
+    for (const [nodeId, oldLabel] of label) {
+        finalLabels.set(nodeId, renameMap.get(oldLabel) || oldLabel);
+    }
+    const finalCommunities = new Map();
+    for (const [oldId, members] of communities) {
+        const newId = renameMap.get(oldId) || oldId;
+        finalCommunities.set(newId, members);
+    }
+    return {
+        labels: finalLabels,
+        communities: finalCommunities,
+        count: finalCommunities.size,
+    };
+}
+/**
+ * 获取旧概念图中同社区的节点 ID 列表。
+ */
+export function getCommunityPeers(db, nodeId, limit = 5) {
+    const row = db.prepare("SELECT community_id FROM gm_nodes WHERE id=? AND status='active'").get(nodeId);
+    if (!row?.community_id)
+        return [];
+    return db.prepare(`
+    SELECT id FROM gm_nodes
+    WHERE community_id=? AND id!=? AND status='active'
+    ORDER BY validated_count DESC, updated_at DESC
+    LIMIT ?
+  `).all(row.community_id, nodeId, limit).map(r => r.id);
+}

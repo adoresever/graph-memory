@@ -32,10 +32,10 @@ describe("openDb", () => {
     // Child process mirrors a second host connection (e.g. another DSH
     // process sharing the same database file): it takes the write lock, holds
     // it briefly, then commits. Its event loop is its own, so it can release
-    // the lock while this process' busy handler is waiting. The script lives
-    // in the project root so require("@photostructure/sqlite") resolves.
+    // the lock while this process' busy handler is waiting. Use Node's built-in
+    // SQLite, which is the runtime behind the current storage boundary.
     const childScript = `
-      const { DatabaseSync } = require("@photostructure/sqlite");
+      const { DatabaseSync } = require("node:sqlite");
       const file = process.argv[2];
       const db = new DatabaseSync(file);
       db.exec("PRAGMA journal_mode = WAL");

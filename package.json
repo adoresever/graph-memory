@@ -1,6 +1,6 @@
 {
   "name": "graph-memory",
-  "version": "1.6.0-beta.1",
+  "version": "1.6.0-beta.16",
   "description": "Knowledge graph memory for DeepSeek Harness and OpenClaw — cross-session recall, PageRank, communities, and vector search",
   "keywords": [
     "deepseek-harness",
@@ -18,23 +18,32 @@
   "bugs": {
     "url": "https://github.com/adoresever/graph-memory/issues"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13.0"
   },
   "main": "dist/index.js",
   "type": "module",
   "exports": {
     ".": "./dist/index.js",
     "./dsh": "./dist/dsh.js",
+    "./pro": "./dist/pro/index.js",
+    "./pro/dsh": "./dist/pro/dsh.js",
     "./package.json": "./package.json"
   },
   "files": [
     "dist",
     "index.ts",
     "dsh.ts",
+    "tsconfig.json",
+    "tsconfig.dsh.json",
+    "pro",
     "src",
     "docs",
     "cordis.patch.yml",
+    "cordis.pro-lite.patch.yml",
     "openclaw.plugin.json",
     "README.md",
     "README_CN.md",
@@ -42,24 +51,34 @@
   ],
   "scripts": {
     "build": "tsc",
-    "prepare": "npm run build",
+    "build:dsh": "tsc -p tsconfig.dsh.json",
     "prepack": "npm run build",
+    "verify:package": "node scripts/verify-package.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@photostructure/sqlite": "^1.0.0",
     "@sinclair/typebox": "^0.34.48"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-typert-protocol": "^0.1.0-rc.8",
+    "@types/node": "^22.13.0",
     "typescript": "^5.4.0",
     "vitest": "^1.4.0"
   },
   "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.1.0-rc.5",
     "openclaw": "*"
   },
   "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-typert-protocol": {
+      "optional": true
+    },
     "openclaw": {
       "optional": true
     }

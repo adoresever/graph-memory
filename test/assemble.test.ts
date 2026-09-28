@@ -6,11 +6,10 @@
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
+import { DatabaseSync, type DatabaseSyncInstance } from "../src/store/sqlite.ts";
 import { createTestDb, insertNode, insertEdge } from "./helpers.ts";
 import { assembleContext, buildSystemPromptAddition } from "../src/format/assemble.ts";
-import { sanitizeToolUseResultPairing } from "../src/format/transcript-repair.ts";
-import { findById } from "../src/store/store.ts";
+import { findById, saveMessageOnce, upsertNode } from "../src/store/store.ts";
 import type { GmNode, GmEdge } from "../src/types.ts";
 
 let db: DatabaseSyncInstance;
@@ -23,36 +22,28 @@ beforeEach(() => { db = createTestDb(); });
 
 describe("buildSystemPromptAddition", () => {
   it("空节点返回空字符串", () => {
-    const result = buildSystemPromptAddition({ selectedNodes: [], edgeCount: 0 });
+    const result = buildSystemPromptAddition({ hasMemory: false });
     expect(result).toBe("");
   });
 
   it("有节点返回引导文字", () => {
     const result = buildSystemPromptAddition({
-      selectedNodes: [
-        { type: "SKILL", src: "active" },
-        { type: "EVENT", src: "recalled" },
-      ],
-      edgeCount: 2,
+      hasMemory: true,
     });
 
     expect(result).toContain("Graph Memory");
-    expect(result).toContain("1 nodes recalled from OTHER conversations");
+    expect(result).toContain("retrieved for the current user question");
   });
 
-  it("丰富图谱包含导航说明", () => {
+  it("引导词不随节点或边数量改变，便于宿主缓存", () => {
     const result = buildSystemPromptAddition({
-      selectedNodes: [
-        { type: "SKILL", src: "active" },
-        { type: "SKILL", src: "active" },
-        { type: "TASK", src: "active" },
-        { type: "EVENT", src: "recalled" },
-      ],
-      edgeCount: 5,
+      hasMemory: true,
     });
 
-    expect(result).toContain("SOLVED_BY");
-    expect(result).toContain("PATCHES");
+    const small = buildSystemPromptAddition({
+      hasMemory: true,
+    });
+    expect(result).toBe(small);
   });
 });
 
@@ -65,11 +56,8 @@ describe("assembleContext", () => {
     const id = insertNode(db, { name: "test-skill", type: "SKILL", content: "## test\nsome content" });
     const node = findById(db, id)!;
 
-    const { xml, systemPrompt, tokens } = assembleContext(db, {
-      tokenBudget: 128_000,
-      activeNodes: [node],
-      activeEdges: [],
-      recalledNodes: [],
+    const { xml, systemPrompt } = assembleContext(db, {
+      recalledNodes: [node],
       recalledEdges: [],
     });
 
@@ -77,14 +65,27 @@ describe("assembleContext", () => {
     expect(xml).toContain('name="test-skill"');
     expect(xml).toContain("</knowledge_graph>");
     expect(systemPrompt).toContain("Graph Memory");
-    expect(tokens).toBeGreaterThan(0);
+  });
+
+  it("renders evidence-backed temporal meaning into recalled context", () => {
+    const node = upsertNode(db, {
+      type: "EVENT",
+      name: "release-port",
+      description: "当前发布端口",
+      content: "正式端口为 9090",
+      temporal: { validFrom: "2026-09-10", state: "current" },
+    }, "session-a").node;
+
+    const { xml } = assembleContext(db, {
+      recalledNodes: [node], recalledEdges: [],
+    });
+
+    expect(xml).toContain('validFrom="2026-09-10"');
+    expect(xml).toContain('state="current"');
   });
 
   it("空节点返回 null", () => {
     const { xml, systemPrompt } = assembleContext(db, {
-      tokenBudget: 128_000,
-      activeNodes: [],
-      activeEdges: [],
       recalledNodes: [],
       recalledEdges: [],
     });
@@ -98,9 +99,6 @@ describe("assembleContext", () => {
     const node = findById(db, id)!;
 
     const { xml } = assembleContext(db, {
-      tokenBudget: 128_000,
-      activeNodes: [],
-      activeEdges: [],
       recalledNodes: [node],
       recalledEdges: [],
     });
@@ -108,8 +106,7 @@ describe("assembleContext", () => {
     expect(xml).toContain('source="recalled"');
   });
 
-  it("token 预算不截断节点（全量放入）", () => {
-    // 插入很多大节点
+  it("不按字符猜测 Token，也不截断召回器已经选中的节点", () => {
     const nodes: GmNode[] = [];
     for (let i = 0; i < 20; i++) {
       const id = insertNode(db, {
@@ -119,77 +116,53 @@ describe("assembleContext", () => {
       nodes.push(findById(db, id)!);
     }
 
-    // 很小的 token 预算
     const { xml } = assembleContext(db, {
-      tokenBudget: 1000, // 1000 * 0.15 * 3 = 450 字符
-      activeNodes: nodes,
-      activeEdges: [],
-      recalledNodes: [],
+      recalledNodes: nodes,
       recalledEdges: [],
     });
 
-    // 不应该包含所有 20 个节点
-    if (xml) {
-      const matches = xml.match(/name="skill-/g);
-      expect(matches!.length).toBe(20);
-    }
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════
-// sanitizeToolUseResultPairing
-// ═══════════════════════════════════════════════════════════════
-
-describe("sanitizeToolUseResultPairing", () => {
-  it("正常配对不修改", () => {
-    const msgs = [
-      { role: "user", content: "hello" },
-      { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "bash" }] },
-      { role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: "ok" }] },
-    ];
-
-    const result = sanitizeToolUseResultPairing(msgs);
-    expect(result).toHaveLength(3);
+    expect(xml).not.toBeNull();
+    const matches = xml!.match(/name="skill-/g) ?? [];
+    expect(matches).toHaveLength(20);
+    expect(xml).toContain("x".repeat(5000));
   });
 
-  it("缺失的 toolResult 被补充", () => {
-    const msgs = [
-      { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "bash" }] },
-      // 缺少 toolResult for c1
-      { role: "user", content: "next" },
-    ];
+  it("preserves query relevance order for recalled nodes", () => {
+    const answer = findById(db, insertNode(db, {
+      name: "exact-final-answer", type: "EVENT", description: "exact query match", content: "FINAL=" + "a".repeat(300),
+    }))!;
+    const genericSkill = findById(db, insertNode(db, {
+      name: "generic-skill", type: "SKILL", description: "generic", content: "SKILL=" + "b".repeat(300),
+    }))!;
 
-    const result = sanitizeToolUseResultPairing(msgs);
-    // 应该补一个 toolResult
-    const toolResults = result.filter(m => m.role === "toolResult");
-    expect(toolResults.length).toBeGreaterThanOrEqual(1);
+    const { xml } = assembleContext(db, {
+      recalledNodes: [answer, genericSkill], recalledEdges: [],
+    });
+
+    expect(xml).toContain('name="exact-final-answer"');
+    expect(xml!.indexOf('name="exact-final-answer"')).toBeLessThan(xml!.indexOf('name="generic-skill"'));
   });
 
-  it("孤立 toolResult 被移除", () => {
-    const msgs = [
-      { role: "toolResult", toolCallId: "orphan", content: [{ type: "text", text: "lost" }] },
-      { role: "user", content: "hello" },
+  it("多个节点引用同一批原文时只注入一次证据", () => {
+    saveMessageOnce(db, "m-user", "session-a", 1, "user", { content: "唯一用户事实" });
+    saveMessageOnce(db, "m-assistant", "session-a", 2, "assistant", { content: "唯一助手确认" });
+    const sources = [
+      { messageId: "m-user", turnIndex: 1 },
+      { messageId: "m-assistant", turnIndex: 2 },
     ];
+    const first = upsertNode(db, {
+      type: "EVENT", name: "shared-event", description: "shared", content: "fact",
+    }, "session-a", sources).node;
+    const second = upsertNode(db, {
+      type: "TASK", name: "shared-task", description: "shared", content: "task",
+    }, "session-a", sources).node;
 
-    const result = sanitizeToolUseResultPairing(msgs);
-    expect(result.some(m => m.role === "toolResult")).toBe(false);
-  });
+    const { episodicXml } = assembleContext(db, {
+      recalledNodes: [first, second], recalledEdges: [],
+    });
 
-  it("重复 toolResult 保持配对正确", () => {
-    const msgs = [
-      { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "bash" }] },
-      { role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: "first" }] },
-      { role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: "duplicate" }] },
-      { role: "assistant", content: "next response" },
-    ];
-
-    const result = sanitizeToolUseResultPairing(msgs);
-    // assistant 消息保留
-    expect(result.filter(m => m.role === "assistant")).toHaveLength(2);
-    // 至少有一个匹配的 toolResult
-    const toolResults = result.filter(m => m.role === "toolResult");
-    expect(toolResults.length).toBeGreaterThanOrEqual(1);
-    // 第一个 toolResult 的内容是 "first"
-    expect((toolResults[0].content[0] as any).text).toBe("first");
+    expect(episodicXml.match(/唯一用户事实/g)).toHaveLength(1);
+    expect(episodicXml.match(/唯一助手确认/g)).toHaveLength(1);
+    expect(episodicXml.match(/<trace /g)).toHaveLength(1);
   });
 });

@@ -15,15 +15,42 @@
  */
 
 import { LlmFailureGuard } from "./llm-guard.ts";
+import {
+  GRAPH_EXTRACTION_TOOL,
+  GRAPH_EXTRACTION_TOOL_NAME,
+} from "../extractor/contract.ts";
 
 export interface LlmConfig {
   apiKey?: string;
   baseURL?: string;
   baseUrl?: string;
   model?: string;
+  maxTokens?: number;
 }
 
 export type CompleteFn = (system: string, user: string) => Promise<string>;
+
+function openAiStructuredArguments(data: any): string {
+  const calls = data?.choices?.[0]?.message?.tool_calls;
+  if (!Array.isArray(calls) || calls.length !== 1) {
+    throw new Error(`[graph-memory] OpenAI-compatible LLM must call ${GRAPH_EXTRACTION_TOOL_NAME} exactly once`);
+  }
+  const call = calls[0]?.function;
+  if (call?.name !== GRAPH_EXTRACTION_TOOL_NAME || typeof call?.arguments !== "string" || !call.arguments.trim()) {
+    throw new Error(`[graph-memory] OpenAI-compatible LLM returned an invalid ${GRAPH_EXTRACTION_TOOL_NAME} call`);
+  }
+  return call.arguments;
+}
+
+function anthropicStructuredArguments(data: any): string {
+  const calls = Array.isArray(data?.content)
+    ? data.content.filter((block: any) => block?.type === "tool_use")
+    : [];
+  if (calls.length !== 1 || calls[0]?.name !== GRAPH_EXTRACTION_TOOL_NAME || !calls[0]?.input) {
+    throw new Error(`[graph-memory] Anthropic LLM must call ${GRAPH_EXTRACTION_TOOL_NAME} exactly once`);
+  }
+  return JSON.stringify(calls[0].input);
+}
 
 // ─── 带重试+超时的 fetch ─────────────────────────────────────
 
@@ -84,6 +111,18 @@ export function createCompleteFn(
               ...(system.trim() ? [{ role: "system", content: system.trim() }] : []),
               { role: "user", content: user },
             ],
+            tools: [{
+              type: "function",
+              function: {
+                name: GRAPH_EXTRACTION_TOOL.name,
+                description: GRAPH_EXTRACTION_TOOL.description,
+                parameters: GRAPH_EXTRACTION_TOOL.parameters,
+              },
+            }],
+            tool_choice: {
+              type: "function",
+              function: { name: GRAPH_EXTRACTION_TOOL_NAME },
+            },
             temperature: 0.1,
           }),
         });
@@ -92,8 +131,7 @@ export function createCompleteFn(
           throw new Error(`[graph-memory] LLM API ${res.status}: ${errText.slice(0, 200)}`);
         }
         const data = await res.json() as any;
-        const text = data.choices?.[0]?.message?.content ?? "";
-        if (!text) throw new Error("[graph-memory] LLM returned empty content");
+        const text = openAiStructuredArguments(data);
         guard.reset();
         return text;
       }
@@ -104,15 +142,31 @@ export function createCompleteFn(
           "[graph-memory] No LLM available. 在 openclaw.json 的 graph-memory config 中配置 llm.baseURL（远程服务同时配置 apiKey）",
         );
       }
+      const maxTokens = llmConfig?.maxTokens;
+      if (!Number.isInteger(maxTokens) || Number(maxTokens) < 1) {
+        throw new Error(
+          "[graph-memory] llm.maxTokens must be a positive integer for direct Anthropic API calls",
+        );
+      }
       const res = await fetchRetry("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": anthropicApiKey, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify({ model: llmConfig?.model ?? model, max_tokens: 4096, system, messages: [{ role: "user", content: user }] }),
+        body: JSON.stringify({
+          model: llmConfig?.model ?? model,
+          max_tokens: maxTokens,
+          system,
+          messages: [{ role: "user", content: user }],
+          tools: [{
+            name: GRAPH_EXTRACTION_TOOL.name,
+            description: GRAPH_EXTRACTION_TOOL.description,
+            input_schema: GRAPH_EXTRACTION_TOOL.parameters,
+          }],
+          tool_choice: { type: "tool", name: GRAPH_EXTRACTION_TOOL_NAME },
+        }),
       });
       if (!res.ok) throw new Error(`[graph-memory] Anthropic API ${res.status}`);
       const data = await res.json() as any;
-      const text = data.content?.[0]?.text ?? "";
-      if (!text) throw new Error("[graph-memory] Anthropic API returned empty content");
+      const text = anthropicStructuredArguments(data);
       guard.reset();
       return text;
     } catch (error) {

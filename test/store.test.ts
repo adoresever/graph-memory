@@ -6,15 +6,16 @@
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
+import { DatabaseSync, type DatabaseSyncInstance } from "../src/store/sqlite.ts";
 import { createTestDb, insertNode, insertEdge } from "./helpers.ts";
 import {
   findByName, findById, upsertNode, upsertEdge, updateNode, deprecate,
-  mergeNodes, edgesFrom, edgesTo, allActiveNodes, allEdges,
-  searchNodes, topNodes, graphWalk, getBySession,
-  saveMessage, saveMessageOnce, getMessages, getUnextracted, markExtracted, getEpisodicMessages,
-  saveSignal, pendingSignals, markSignalsDone,
-  getStats, saveVector, vectorSearch, getAllVectors, upsertCommunitySummary,
+  edgesFrom, edgesTo, allActiveNodes, allEdges,
+  searchNodes, topNodes, graphWalk, getBySession, getRecentBySession,
+  saveMessageOnce, getNextUnextractedTurn,
+  getExtractionStats, markMessagesExtracted, quarantineMessages, requeueQuarantined,
+  getNodeSourceMessages, markExtractionTurnCompleted, getExtractionCompletedTurn,
+  getStats, saveVector, vectorSearch,
   vectorSearchWithScore,
 } from "../src/store/store.ts";
 
@@ -46,13 +47,51 @@ describe("host event messages", () => {
 
     expect(saveMessageOnce(db, "dsh:s1:7", "dsh:s1", 7, "assistant", payload)).toBe(true);
     expect(saveMessageOnce(db, "dsh:s1:7", "dsh:s1", 7, "assistant", payload)).toBe(false);
-    expect(getMessages(db, "dsh:s1")).toHaveLength(1);
+    expect((db.prepare("SELECT COUNT(*) AS count FROM gm_messages WHERE session_id=?").get("dsh:s1") as any).count).toBe(1);
 
-    const episodic = getEpisodicMessages(db, ["dsh:s1"], Date.now());
+    const { node } = upsertNode(db, {
+      type: "EVENT", name: "nested-content", description: "", content: "summary",
+    }, "dsh:s1", [{ messageId: "dsh:s1:7", turnIndex: 7 }]);
+    const episodic = getNodeSourceMessages(db, node.id);
     expect(episodic).toHaveLength(1);
-    expect(episodic[0].text).toContain("internal analysis");
+    expect(episodic[0].text).not.toContain("internal analysis");
     expect(episodic[0].text).toContain("Graph Memory is active");
     expect(episodic[0].text).not.toContain("[object Object]");
+  });
+
+  it("reads exact node evidence instead of guessing by session time", () => {
+    saveMessageOnce(db, "dsh:s1:7", "dsh:s1", 7, "user", {
+      role: "user", content: [{ type: "text", text: "unrelated earlier text" }],
+    });
+    saveMessageOnce(db, "dsh:s1:19", "dsh:s1", 19, "assistant", {
+      role: "assistant", content: [{ type: "text", text: "the exact retained evidence" }],
+    });
+    const { node } = upsertNode(db, {
+      type: "EVENT", name: "exact-source", description: "", content: "summary",
+    }, "dsh:s1", [{ messageId: "dsh:s1:19", turnIndex: 19 }]);
+
+    expect(getNodeSourceMessages(db, node.id).map(message => message.text)).toEqual([
+      "the exact retained evidence",
+    ]);
+  });
+
+  it("loads every node from the host-configured recent turn window", () => {
+    saveMessageOnce(db, "m1", "dsh:s1", 1, "user", { content: "first" });
+    saveMessageOnce(db, "m2", "dsh:s1", 2, "user", { content: "second" });
+    const old = upsertNode(db, {
+      type: "EVENT", name: "old-node", description: "", content: "old",
+    }, "dsh:s1", [{ messageId: "m1", turnIndex: 1 }]).node;
+    const recentA = upsertNode(db, {
+      type: "EVENT", name: "recent-a", description: "", content: "a",
+    }, "dsh:s1", [{ messageId: "m2", turnIndex: 2 }]).node;
+    const recentB = upsertNode(db, {
+      type: "TASK", name: "recent-b", description: "", content: "b",
+    }, "dsh:s1", [{ messageId: "m2", turnIndex: 2 }]).node;
+
+    expect(getRecentBySession(db, "dsh:s1", 3, 1).map(node => node.id).sort()).toEqual(
+      [recentA.id, recentB.id].sort(),
+    );
+    expect(getRecentBySession(db, "dsh:s1", 3, 2).map(node => node.id)).toContain(old.id);
   });
 });
 
@@ -73,7 +112,7 @@ describe("node CRUD", () => {
     expect(node.validatedCount).toBe(1);
   });
 
-  it("upsertNode 同名节点 merge 而非重复创建", () => {
+  it("同名 create 以当前结构化声明更新，不按文本长度裁决", () => {
     upsertNode(db, {
       type: "SKILL", name: "conda-env-create",
       description: "短描述", content: "短内容",
@@ -81,14 +120,47 @@ describe("node CRUD", () => {
 
     const { node, isNew } = upsertNode(db, {
       type: "SKILL", name: "conda-env-create",
-      description: "更长的描述说明", content: "更长更完整的内容说明文档",
+      description: "当前结论", content: "短而更新的结论",
     }, "s2");
 
     expect(isNew).toBe(false);
+    expect(node.validatedCount).toBe(1);
+    expect(node.description).toBe("当前结论");
+    expect(node.content).toBe("短而更新的结论");
+  });
+
+  it("revise 用较新的短结论替换旧结论并重置旧置信计数", () => {
+    upsertNode(db, {
+      type: "EVENT", name: "project-port",
+      description: "旧端口结论的较长描述", content: "此前错误地认为端口是 8080，附带很多旧过程说明",
+      temporal: { eventTime: "上一轮", state: "current" },
+    }, "s1");
+    const { node } = upsertNode(db, {
+      type: "EVENT", name: "project-port",
+      description: "当前端口", content: "端口是 9090",
+      operation: "revise",
+      temporal: { eventTime: "本轮", state: "current" },
+    }, "s1");
+
+    expect(node.content).toBe("端口是 9090");
+    expect(node.description).toBe("当前端口");
+    expect(node.temporal).toEqual({ eventTime: "本轮", state: "current" });
+    expect(node.validatedCount).toBe(1);
+  });
+
+  it("confirm 保留既有正文并增加验证次数", () => {
+    upsertNode(db, {
+      type: "EVENT", name: "release-day", description: "发布时间", content: "周五发布",
+      temporal: { eventTime: "周五", state: "current" },
+    }, "s1");
+    const { node } = upsertNode(db, {
+      type: "EVENT", name: "release-day", description: "短", content: "确认",
+      operation: "confirm",
+    }, "s2");
+
+    expect(node.content).toBe("周五发布");
+    expect(node.temporal).toEqual({ eventTime: "周五", state: "current" });
     expect(node.validatedCount).toBe(2);
-    // 保留更长的
-    expect(node.description).toBe("更长的描述说明");
-    expect(node.content).toBe("更长更完整的内容说明文档");
   });
 
   it("name 自动标准化：大写→小写，空格→连字符", () => {
@@ -111,6 +183,7 @@ describe("node CRUD", () => {
     deprecate(db, node.id);
     const after = findById(db, node.id);
     expect(after!.status).toBe("deprecated");
+    expect(after!.temporal.state).toBe("historical");
   });
 
   it("findByName 找不到返回 null", () => {
@@ -164,10 +237,12 @@ describe("node CRUD", () => {
       type: "SKILL", name: "preserve-me",
       description: "d1", content: "c1",
     }, "s1");
-    // 第二次 upsert 把 validated_count 提到 2
+    // 明确的 confirm 才把 validated_count 提到 2；无 operation 的当前
+    // 声明不能由存储层擅自当作确认。
     upsertNode(db, {
       type: "SKILL", name: "preserve-me",
       description: "d1", content: "c1",
+      operation: "confirm",
     }, "s2");
     const before = findByName(db, "preserve-me")!;
     expect(before.validatedCount).toBe(2);
@@ -183,26 +258,27 @@ describe("node CRUD", () => {
   });
 });
 
-describe("community summary CRUD", () => {
-  it("clears a stale embedding when a changed summary cannot be re-embedded", () => {
-    upsertCommunitySummary(db, "c1", "old summary", 2, [1, 0], "old-signature");
-    upsertCommunitySummary(db, "c1", "new summary", 3, undefined, "new-signature");
-
-    const row = db.prepare(
-      "SELECT summary, node_count, embedding, member_signature FROM gm_communities WHERE id=?",
-    ).get("c1") as any;
-    expect(row.summary).toBe("new summary");
-    expect(row.node_count).toBe(3);
-    expect(row.embedding).toBeNull();
-    expect(row.member_signature).toBe("new-signature");
-  });
-});
-
 // ═══════════════════════════════════════════════════════════════
 // 边 CRUD
 // ═══════════════════════════════════════════════════════════════
 
 describe("edge CRUD", () => {
+  it("stores a generic topic-navigation predicate", () => {
+    const a = insertNode(db, { name: "graph-memory", type: "TASK" });
+    const b = insertNode(db, { name: "completed-turn", type: "EVENT" });
+
+    upsertEdge(db, {
+      fromId: a, toId: b, type: "RELATES",
+      instruction: "uses as extraction boundary", sessionId: "s1",
+    });
+
+    expect(edgesFrom(db, a)[0]).toMatchObject({
+      toId: b,
+      type: "RELATES",
+      instruction: "uses as extraction boundary",
+    });
+  });
+
   it("upsertEdge 创建边", () => {
     const a = insertNode(db, { name: "task-a", type: "TASK" });
     const b = insertNode(db, { name: "skill-b", type: "SKILL" });
@@ -229,34 +305,6 @@ describe("edge CRUD", () => {
     const edges = edgesFrom(db, a);
     expect(edges).toHaveLength(1);
     expect(edges[0].instruction).toBe("v2");
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════
-// 节点合并
-// ═══════════════════════════════════════════════════════════════
-
-describe("mergeNodes", () => {
-  it("合并后边迁移、被合并节点 deprecated", () => {
-    const a = insertNode(db, { name: "keep-node", validatedCount: 5 });
-    const b = insertNode(db, { name: "merge-node", validatedCount: 3 });
-    const c = insertNode(db, { name: "other-node" });
-
-    insertEdge(db, { fromId: b, toId: c, type: "SOLVED_BY" });
-
-    mergeNodes(db, a, b);
-
-    // b 应该 deprecated
-    const bAfter = findById(db, b);
-    expect(bAfter!.status).toBe("deprecated");
-
-    // a 的 validatedCount = 5 + 3 = 8
-    const aAfter = findById(db, a);
-    expect(aAfter!.validatedCount).toBe(8);
-
-    // 边应该迁移到 a
-    const edges = edgesFrom(db, a);
-    expect(edges.some(e => e.toId === c)).toBe(true);
   });
 });
 
@@ -337,36 +385,40 @@ describe("graphWalk", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// 消息 + 信号
+// 消息提取状态
 // ═══════════════════════════════════════════════════════════════
 
-describe("messages & signals", () => {
-  it("saveMessage + getUnextracted + markExtracted", () => {
-    saveMessage(db, "s1", 1, "user", "hello");
-    saveMessage(db, "s1", 2, "assistant", "hi");
-    saveMessage(db, "s1", 3, "user", "help me");
+describe("message extraction state", () => {
+  it("hides active-turn messages behind the durable completion watermark", () => {
+    saveMessageOnce(db, "done", "s1", 1, "assistant", "completed turn");
+    saveMessageOnce(db, "active", "s1", 2, "user", "still generating");
+    markExtractionTurnCompleted(db, "s1", 1);
 
-    let unext = getUnextracted(db, "s1", 10);
-    expect(unext).toHaveLength(3);
+    expect(getExtractionCompletedTurn(db, "s1")).toBe(1);
+    expect(getNextUnextractedTurn(db, "s1", 1).map(row => row.id)).toEqual(["done"]);
 
-    markExtracted(db, "s1", 2);
-    unext = getUnextracted(db, "s1", 10);
-    expect(unext).toHaveLength(1);
-    expect(unext[0].turn_index).toBe(3);
+    markExtractionTurnCompleted(db, "s1", 2);
+    expect(getExtractionCompletedTurn(db, "s1")).toBe(2);
+    expect(getNextUnextractedTurn(db, "s1", 2).map(row => row.id)).toEqual(["done"]);
+    // A stale completion event can never move the watermark backwards.
+    markExtractionTurnCompleted(db, "s1", 1);
+    expect(getExtractionCompletedTurn(db, "s1")).toBe(2);
   });
 
-  it("saveSignal + pendingSignals + markSignalsDone", () => {
-    saveSignal(db, "s1", { type: "tool_error", turnIndex: 3, data: { snippet: "Error: xxx" } });
-    saveSignal(db, "s1", { type: "task_completed", turnIndex: 5, data: { snippet: "done" } });
+  it("tracks exact extraction success and quarantine without crossing turn boundaries", () => {
+    saveMessageOnce(db, "a", "s1", 1, "user", "first");
+    saveMessageOnce(db, "b", "s1", 1, "tool", "same turn, different event");
+    saveMessageOnce(db, "c", "s1", 2, "assistant", "third");
 
-    let pending = pendingSignals(db, "s1");
-    expect(pending).toHaveLength(2);
-    expect(pending[0].type).toBe("tool_error");
+    markMessagesExtracted(db, ["b"]);
+    quarantineMessages(db, ["a"], "poison input");
+    expect(getExtractionStats(db)).toEqual({ pending: 1, succeeded: 1, quarantined: 1 });
+    expect((db.prepare("SELECT extracted FROM gm_messages WHERE id='a'").get() as any).extracted).toBe(0);
 
-    markSignalsDone(db, "s1");
-    pending = pendingSignals(db, "s1");
-    expect(pending).toHaveLength(0);
+    expect(requeueQuarantined(db, "s1")).toBe(1);
+    expect(getExtractionStats(db)).toEqual({ pending: 2, succeeded: 1, quarantined: 0 });
   });
+
 });
 
 // ═══════════════════════════════════════════════════════════════

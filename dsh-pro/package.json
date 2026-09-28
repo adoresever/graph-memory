@@ -1,0 +1,48 @@
+{
+  "name": "graph-memory-pro-dsh",
+  "version": "0.1.0-beta.1",
+  "description": "Read-only Graph Memory Pro graph view for DeepSeek Harness Web",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README_CN.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-gateway",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "graph-memory": ">=1.6.0-beta.1",
+    "@deepseek-ai/cordis": ">=4",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.1.0-rc.5",
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-typert-protocol": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  },
+  "license": "MIT"
+}

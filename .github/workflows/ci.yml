@@ -26,5 +26,4 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: npm run build
       - run: npm test
-      - name: Verify publishable package
-        run: npm pack --dry-run
+      - run: npm run verify:package

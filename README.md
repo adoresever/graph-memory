@@ -1,240 +1,103 @@
 # Graph Memory
 
-![DeepSeek Harness + OpenClaw → Graph Memory](docs/images/brand/graph-memory-hosts-banner.png)
+<p align="center">
+  <img src="docs/images/brand/graph-memory-hosts-banner.png" alt="Graph Memory for DeepSeek Harness, compatible with OpenClaw" width="100%">
+</p>
 
 <p align="center">
-  <strong>Traceable, searchable, cross-session memory for AI agents.</strong><br>
-  One memory core, native to DeepSeek Harness, with the OpenClaw plugin entry retained.
+  <strong>Bound the context. Keep the memory.</strong><br>
+  A native DeepSeek Harness memory plugin that keeps recent conversation turns, archives older history, and recalls exact source-backed knowledge when it matters.
 </p>
 
 <p align="center">
   <a href="README_CN.md">中文</a> ·
-  <a href="#core-advantages">Advantages</a> ·
-  <a href="#graph-memory-architecture">Architecture</a> ·
-  <a href="#install-on-deepseek-harness">DSH Install</a> ·
-  <a href="#graph-memory-pro-as-a-dsh-plugin">Pro Plugin</a> ·
-  <a href="docs/DSH_NATIVE_PLAN.md">Technical Report (Chinese)</a>
-</p>
-
-Compaction answers “how much of this conversation still fits?” Graph Memory answers “which past knowledge is worth recalling now?”
-
-Reusable conversation knowledge becomes typed nodes:
-
-- `TASK`: goals, execution, and outcomes;
-- `SKILL`: validated reusable methods;
-- `EVENT`: errors, fixes, decisions, changes, and facts.
-
-Typed edges such as `USED_SKILL`, `SOLVED_BY`, `REQUIRES`, `PATCHES`, and `CONFLICTS_WITH` preserve relationships. A new question retrieves a relevant local subgraph instead of replaying the complete history.
-
-## Core advantages
-
-### Native host integration
-
-- Loaded by the DSH/Cordis plugin lifecycle, not simulated through an MCP side channel.
-- Integrates Session, Tool, Agent Loop, Prompt Assembly, LLM, and Credentials seams.
-- Disposes database, cache, and event listeners with its plugin fiber.
-- Does not fork or modify DeepSeek Harness core.
-
-### Durable cross-session memory
-
-- Knowledge from Session A can be recalled automatically in Session B.
-- Memory survives DSH restarts.
-- Stable event IDs make resume and HMR ingestion idempotent.
-- Source sessions and graph edges explain why a memory was recalled.
-
-### Smaller, cleaner context
-
-- Semantic vector retrieval with FTS5 lexical fallback.
-- Community detection, PageRank, personalized PageRank, and bounded graph traversal.
-- Only a relevant local subgraph enters the current prompt.
-- Recalled history is marked as untrusted reference material and cannot override current user instructions.
-
-### Local-first and lightweight
-
-- Community uses SQLite by default; no graph database deployment is required.
-- Embeddings are optional. Without them, recall falls back to FTS5.
-- Data remains in the user's local profile by default.
-- OpenAI-compatible embeddings support DashScope, OpenAI, and local providers.
-
-### Observable and verifiable
-
-- `gm_status` reports store path, graph counts, vector coverage, mode, and dimensions.
-- Model or dimension changes trigger re-embedding.
-- Vectors with different dimensions are never silently compared.
-- Critical knowledge can be recorded deterministically with `gm_record`.
-
-### Scoped token benchmark
-
-The original OpenClaw adapter was measured in a seven-turn workflow that installed, authenticated, and queried `bilibili-mcp`:
-
-<p align="center">
-  <img src="docs/images/token-comparison.png" alt="Seven-turn token comparison" width="82%">
-</p>
-
-| Turn | Without Graph Memory | With Graph Memory |
-|---|---:|---:|
-| R1 | 14,957 | 14,957 |
-| R4 | 81,632 | 29,175 |
-| R7 | **95,187** | **23,977** |
-
-The measured reduction at R7 was approximately **75%** in that specific workflow. This is a scenario-level comparison, not a universal savings guarantee; the mechanism is replacing indiscriminate history replay with a relevant knowledge subgraph.
-
-## Project evolution
-
-The DSH integration does not discard the original project. Graph Memory is evolving from an OpenClaw memory plugin into a graph-memory core that different agent harnesses can load natively.
-
-| Stage | Deliverable | Status |
-|---|---|---|
-| OpenClaw origin | Context Engine, cross-session graph memory, dual-path recall | Maintained |
-| Community graph engine | SQLite, FTS5, vectors, graph ranking, provenance | Available |
-| DeepSeek Harness | Cordis adapter, native tools, auto-recall, Credentials | Implemented and tested |
-| Graph Memory Pro | Visual graph workbench, controlled drag-and-drop, optional Neo4j | Architecture reviewed; DSH Host and Client Plugins not yet implemented |
-
-On March 15, 2026, the project owner presented Graph Memory's architecture at the CLAW program event held in Tsinghua Science Park. The following owner-supplied materials and the [Sina Finance event report](https://cj.sina.com.cn/articles/view/7984421895/1dbe89c0700101nnpq) document that development.
-
-<p align="center">
-  <img src="docs/images/history/tsinghua-sharing.jpg" alt="Graph Memory technical sharing" width="47%">
-  <img src="docs/images/history/sina-report.jpg" alt="Sina Finance event coverage" width="28%">
-</p>
-
-- [Community cross-session memory demo](https://www.bilibili.com/video/BV1xUcZzfEaB/)
-- [Graph Memory Pro technical presentation](https://www.bilibili.com/video/BV1KwwzzGEvD/)
-
-The image below is the existing OpenClaw / ClawX-era Pro graph prototype. It demonstrates a previously explored interaction direction; it is not a shipped DSH frontend.
-
-<p align="center">
-  <img src="docs/images/graph-ui.png" alt="Existing Graph Memory Pro prototype" width="92%">
-</p>
-
-Names and venue information document project history only and do not imply endorsement by Tsinghua University, Sina Finance, DeepSeek, or OpenClaw.
-
-## Graph Memory architecture
-
-### Typed knowledge graph
-
-```text
-TASK   ──USED_SKILL──▶ SKILL
-TASK   ──SOLVED_BY───▶ EVENT
-SKILL  ──REQUIRES────▶ SKILL
-EVENT  ──PATCHES─────▶ SKILL
-SKILL  ──CONFLICTS_WITH──▶ SKILL
-```
-
-Nodes retain episodic user/assistant provenance. This preserves the context in which knowledge was created, not only a lossy summary.
-
-### Dual-path recall
-
-```mermaid
-flowchart LR
-  Q[Current query] --> EXACT[Exact path]
-  Q --> GENERAL[Generalized path]
-  EXACT --> SEARCH[Vector / FTS5]
-  SEARCH --> EXPAND[Community expansion + traversal]
-  GENERAL --> SUMMARY[Community-summary match]
-  SUMMARY --> MEMBERS[Community members]
-  EXPAND --> PPR[Personalized PageRank]
-  MEMBERS --> PPR
-  PPR --> CONTEXT[Deduplicated local context]
-```
-
-### Host data flow
-
-```mermaid
-flowchart LR
-  USER[User message] --> SESSION[DSH Session Events]
-  SESSION --> ADAPTER[Graph Memory Cordis Adapter]
-  ADAPTER --> EXTRACT[Structured Extraction]
-  EXTRACT --> GRAPH[(SQLite / FTS5 / Vectors)]
-
-  USER --> RECALL[Semantic + Lexical Recall]
-  GRAPH --> RECALL
-  RECALL --> RANK[Community Expansion + PPR]
-  RANK --> PROMPT[Prompt Assembly]
-  PROMPT --> LOOP[DSH Agent Loop]
-
-  CREDS[DSH Credentials] --> ADAPTER
-  TOOLS[gm_* Tools] --> ADAPTER
-```
-
-The code follows a host-neutral core plus host adapters:
-
-```text
-graph-memory/
-├── dsh.ts                 # DeepSeek Harness / Cordis adapter
-├── index.ts               # OpenClaw adapter
-├── cordis.patch.yml       # DSH bundle entry
-└── src/
-    ├── extractor/         # conversation → TASK / SKILL / EVENT
-    ├── recaller/          # vector, FTS5, graph expansion and recall
-    ├── graph/             # PageRank, communities and deduplication
-    ├── store/             # SQLite schema and queries
-    ├── format/            # safe context assembly
-    └── engine/            # LLM and embedding providers
-```
-
-## Native DeepSeek Harness status
-
-| Capability | Status | Notes |
-|---|---|---|
-| Native Cordis loading | **Done** | No DSH fork required |
-| Cross-session auto-recall | **Done** | Injected during Prompt Assembly |
-| Explicit record and search | **Done** | `gm_record`, `gm_search` |
-| Vector backfill and migration | **Done** | Model, dimension, and fingerprint tracked |
-| Visible plugin state | **Done** | Active in Plugin Inventory |
-| Pro visual workbench | **Not shipped** | Requires a DSH Client Plugin |
-
-Current beta: `1.6.0-beta.1`. Local acceptance used DeepSeek Harness `0.1.0-rc.5`. DSH remains in Developer Preview and may introduce compatibility-breaking changes. Testing covered tarball installation, active plugin state, 1024-dimensional vector backfill, semantic recall across Sessions, persistence across restarts, and FTS5 fallback. All 107 automated tests passed.
-
-<p align="center">
-  <strong>Plugin enabled: graph-memory/dsh is active in the DSH plugin list</strong><br>
-  <img src="docs/images/dsh/plugin-inventory-active.png" alt="Graph Memory active in the DSH plugin list" width="88%">
+  <a href="https://www.dsh.so/artifact/graph-memory">dsh.so</a> ·
+  <a href="benchmarks/dsh-context-takeover/README.md">20-turn benchmark</a> ·
+  <a href="docs/TURN_MEMORY_NAVIGATION_UPGRADE_CN.md">Upgrade guide</a>
 </p>
 
 <p align="center">
-  <strong>Cross-session semantic recall in a fresh Session</strong><br>
-  <img src="docs/images/dsh/vector-cross-session-recall.png" alt="Cross-session vector recall in DSH" width="88%">
+  <a href="https://www.dsh.so/artifact/graph-memory"><img src="https://www.dsh.so/badge/graph-memory.svg" alt="dsh.so security badge"></a>
+  <a href="https://www.dsh.so/artifact/graph-memory"><img src="https://www.dsh.so/badge/install/graph-memory.svg" alt="dsh.so install badge"></a>
 </p>
+
+## The problem it solves
+
+<p align="center">
+  <img src="docs/images/context-memory-illustration.webp" alt="Long agent history becomes graph navigation plus a compact recent-turn context" width="100%">
+</p>
+
+Graph Memory owns the **model-visible historical surface** without deleting DSH's event log. By default it keeps the newest five completed user turns, removes completed reasoning/tool traces from future requests, and recalls relevant older or cross-session source Q/A automatically.
+
+## The 1.6 turn-memory navigation upgrade
+
+| Before | Now |
+|---|---|
+| Extract TASK / SKILL / EVENT directly from messages | Create one self-contained turn summary, then derive SPO from that same sentence |
+| Graph nodes could become the factual payload | Summary, SPO, and communities only navigate; original question and final answer remain the evidence |
+| Old memories from the active session could be filtered wholesale | Exclude only sources still visible in the fresh window; archived same-session and cross-session recall share one path |
+| Community expansion could pull a whole neighborhood | Local LPA narrows candidates, query-time PPR ranks them, and only matched Q/A is recovered |
+| DSH retained complete tool and reasoning traces | Completed turns retain question + final answer; older prefixes collapse to one fixed marker |
+
+Writing one completed turn costs exactly **one auxiliary LLM call**. Community detection and PPR are local. There are no hard-coded node/edge counts, semantic direction gates, or JSON repair that turns invalid output into accepted data. [Read the complete design, source map, and porting sequence →](docs/TURN_MEMORY_NAVIGATION_UPGRADE_CN.md)
+
+## Measured first
+
+<p align="center">
+  <img src="docs/images/dsh-context-takeover-chart.svg" alt="DSH 20-turn first-request context comparison" width="100%">
+</p>
+
+| Real 20-turn GLM-5.2 run | Historical native DSH baseline | Latest Graph Memory | Change |
+|---|---:|---:|---:|
+| T20 first request | 56,998 tokens | **11,008 tokens** | **−80.69%** |
+| T20 model-visible messages | 171 | **21** | **−87.72%** |
+| T01–T20 first-request context | 532,451 tokens | **165,896 tokens** | **−68.84%** |
+| All measured tokens¹ | 2,487,776 | **2,327,728** | **−6.43%** |
+
+<sub>¹ The latest candidate includes 166 main-agent requests, 20 turn extractions, and 41 embedding requests; the historical baseline made 77 main requests. DSH commits and nondeterministic tool loops differ, so this is not a simultaneous strict A/B. First-request context is the direct takeover metric; the full bill remains visible.</sub>
+
+**20/20** scenario turns passed · **20/20** structured extractions succeeded · **0** quarantined · **20** turn summaries · **92** SPO triples · **30** communities · **20** summary vectors. T11, T19, and T20 automatically recalled out-of-window memory with exact source question and final answer.
+
+[Read the Markdown benchmark, per-turn data, method, and limits →](benchmarks/dsh-context-takeover/README.md)
+
+## Memory survives the context window
+
+<p align="center">
+  <img src="docs/images/dsh/plugin-inventory-active.png" alt="Graph Memory active in DSH" width="48%">
+  <img src="docs/images/dsh/vector-cross-session-recall.png" alt="Cross-session recall in a fresh DSH session" width="48%">
+</p>
+
+The graph is a **navigation layer**, not a replacement for evidence. `TASK`, `SKILL`, and `EVENT` nodes point back to the original user question and final visible answer; recalled context includes those exact source messages.
 
 ## Install on DeepSeek Harness
 
-Prerequisites: Node.js `22.19+` or `24+`. The current beta is not yet published to npm, so build the tarball from source:
+Node.js `22.13+` · no DSH fork · until npm `1.6` is published, install the pinned GitHub release:
 
 ```bash
-git clone https://github.com/adoresever/graph-memory.git
-cd graph-memory
-npm ci
-npm test
-npm run build
-npm pack
-```
-
-Install the generated tarball into the DSH Web profile:
-
-```bash
-npx @deepseek-ai/dsh plugin --profile web add /absolute/path/to/graph-memory-1.6.0-beta.1.tgz
+npx @deepseek-ai/dsh plugin --profile web add github:adoresever/graph-memory#v1.6.0-beta.16
 npx @deepseek-ai/dsh --profile web --dump-config
 npx @deepseek-ai/dsh web
-
-# From a deepseek-harness source checkout:
-pnpm dsh plugin --profile web add /absolute/path/to/graph-memory-1.6.0-beta.1.tgz
-pnpm dsh web
 ```
 
-After installation, verify that `graph-memory/dsh` is enabled under **Settings → Plugins → Plugin list**.
+The npm registry still serves the old `1.5.8`; do not use it to validate DSH. Switch to `npx @deepseek-ai/dsh plugin --profile web add graph-memory` only after `npm view graph-memory version` reports `1.6.0-beta.16` or newer.
 
-Default store:
+Confirm that `graph-memory/dsh` is active under **Settings → Plugins**. The default database is `$DSH_HOME/graph-memory/graph-memory.db`, normally `~/.dsh/graph-memory/graph-memory.db`.
 
-```text
-$DSH_HOME/graph-memory/graph-memory.db
-```
+## What ships
 
-Without `DSH_HOME`, this is normally `~/.dsh/graph-memory/graph-memory.db`.
+| Capability | Implementation |
+|---|---|
+| Context takeover | Configurable newest-N completed turns; one archive marker replaces the older model surface |
+| Lightweight extraction | Only the user question and final answer; strict structured tool contract; no reasoning/tool transcript ingestion |
+| Query-first recall | Vector Top-K with FTS5 fallback; exact source Q/A travels with graph hits |
+| Durable memory | Local SQLite, stable provenance, cross-session and cross-project recall |
+| Failure behavior | Invalid extraction is quarantined; foreground conversation continues; bad data is not repaired or persisted |
+| Host support | Native DSH/Cordis adapter; maintained OpenClaw Context Engine adapter |
 
-## Optional vector retrieval
+<details>
+<summary><strong>Optional embeddings</strong></summary>
 
-Do not send secrets in chat. Cordis stores only a credential reference; DSH `credentials` resolves the real value for each embedding operation.
-
-DashScope example:
+Graph Memory supports OpenAI-compatible embedding endpoints. Without embeddings it falls back to FTS5 and does not block conversation.
 
 ```bash
 export GRAPH_MEMORY_EMBEDDING_API_KEY='replace-with-your-key'
@@ -244,95 +107,26 @@ export GRAPH_MEMORY_EMBEDDING_DIMENSIONS='1024'
 dsh web
 ```
 
-Without embeddings, Graph Memory continues with FTS5 and does not block conversation.
+</details>
 
-![Vector status](docs/images/dsh/vector-status.png)
-
-## DSH tools
+<details>
+<summary><strong>DSH tools and extraction route</strong></summary>
 
 | Tool | Purpose |
 |---|---|
-| `gm_status` | Plugin, store, extraction, recall, and vector state |
-| `gm_search` | Explicit long-term graph search |
-| `gm_record` | Persist a TASK, SKILL, or EVENT |
-| `gm_stats` | Node, edge, type, and community statistics |
+| `gm_status` | Store, extraction, recall, vector, and retention state |
+| `gm_search` | Explicit graph-memory search |
+| `gm_record` | Deterministically persist a `TASK`, `SKILL`, or `EVENT` |
+| `gm_stats` | Graph and retention receipts |
+| `gm_maintain` | One bounded maintenance tick |
+| `gm_retry_extraction` | Explicitly retry quarantined extraction |
 
-Automatic recall does not require an explicit `gm_search` tool call. The plugin retrieves relevant memory during Prompt Assembly.
+Automatic recall needs no tool call. Extraction may use a dedicated model via `GRAPH_MEMORY_LLM_PROVIDER` and `GRAPH_MEMORY_LLM_MODEL`; optional reasoning and output controls are `GRAPH_MEMORY_LLM_REASONING_EFFORT` and `GRAPH_MEMORY_LLM_MAX_TOKENS`.
 
-## Graph Memory Pro as a DSH plugin
+</details>
 
-The accurate conclusion is not “Pro can already be installed into DSH.” It is: **Pro's graph database, retrieval, PageRank, community, and CRUD backend can be migrated; its OpenClaw host code and old ClawX integration must be replaced by a DSH Host + Client Plugin.** The current `desktop-2.0` implementation is OpenClaw + Neo4j and contains no installable DSH Client renderer.
-
-The reviewed `desktop-2.0` code includes Neo4j Driver, GDS, APOC, vector indexes, graph maintenance tools, and CRUD routes. Today it also:
-
-- imports `openclaw/plugin-sdk` at the entry;
-- registers OpenClaw Gateway HTTP routes;
-- writes OpenClaw configuration and restarts its Gateway during installation;
-- exposes Neo4j connection details through `/graph-memory-pro/neo4j-config`;
-- contains no installable DSH Client Plugin.
-
-The correct plugin architecture is:
-
-```mermaid
-flowchart LR
-  CORE[Graph Memory Core] --> STORE[SQLite default / Neo4j optional]
-  STORE --> HOST[DSH Host Plugin]
-  HOST --> REMOTE[Typed Remote API]
-  REMOTE --> CLIENT[DSH Client Plugin]
-  CLIENT --> SPLIT[Conversation + Graph split view]
-  CLIENT --> DROP[Controlled drag-to-context]
-```
-
-The first Pro plugin does not need mandatory Neo4j:
-
-- **Pro Lite:** SQLite plus a 2D/3D DSH graph client;
-- **Neo4j adapter:** optional storage plugin for large graphs, GDS, and advanced analytics;
-- the browser receives bounded `GraphSnapshot` data, never database passwords or arbitrary Cypher access;
-- drag operations submit node IDs and intent; the Host validates them and writes visible, reversible Session context.
-
-Pro should therefore be an optional Graph Memory DSH plugin module, not a separate standalone product.
-
-### Recommended package split
-
-```text
-graph-memory                          # Community: current native Host Plugin
-@adoresever/graph-memory-pro-dsh     # Pro: Host + Client Plugin, to be built
-@adoresever/graph-memory-store-neo4j # Optional large-graph adapter, to be built
-```
-
-The first milestone should be **Pro Lite**: reuse the existing SQLite graph and add the DSH graph workbench, so users do not need Neo4j. Neo4j stays optional for larger graphs, GDS, and advanced analysis. **This is a planned architecture; the existing `desktop-2.0` Pro is still Neo4j-only and does not yet implement a switchable SQLite / Neo4j `GraphStore`.**
-
-### Target installation experience
-
-This illustrates the target experience only. The npm package `graph-memory@1.5.8` is still the OpenClaw release, and `@adoresever/graph-memory-pro-dsh` has not been published. These commands do not work today:
-
-```bash
-# PLANNED — NOT AVAILABLE YET
-dsh plugin --profile web add graph-memory
-dsh plugin --profile web add @adoresever/graph-memory-pro-dsh
-dsh web
-```
-
-During development, install a local tarball:
-
-```bash
-npm run build
-npm pack
-dsh plugin --profile web add /absolute/path/to/graph-memory-pro-dsh-*.tgz
-```
-
-### Four required integration layers
-
-1. **Core contracts:** extract `GraphStore`, `GraphSnapshot`, and `RecallResult` so SQLite and Neo4j implement the same API.
-2. **Host Plugin:** integrate DSH Sessions, Tools, LLM, System Prompt, and Credentials. Database secrets are resolved only on the Host.
-3. **Client Plugin:** register a DSH sidebar, workbench, and tool card for 2D/3D graphs, search, filters, and split-view conversations.
-4. **Controlled context actions:** drag-and-drop sends only a node ID and an intent; the Host validates it and writes visible, reversible Session Context.
-
-The old Pro `/graph-memory-pro/neo4j-config` route returns connection details to the browser; this is a security flaw that must be removed. In the future DSH Pro design, the Host resolves Credentials and the browser receives only a bounded `GraphSnapshot`, never a Bolt password or unrestricted Cypher access.
-
-## OpenClaw compatibility
-
-Existing OpenClaw users retain the original entry:
+<details>
+<summary><strong>OpenClaw compatibility</strong></summary>
 
 ```bash
 openclaw plugins install graph-memory
@@ -340,57 +134,48 @@ openclaw plugins enable graph-memory
 openclaw gateway restart
 ```
 
-The Context Engine slot must also be activated in `~/.openclaw/openclaw.json`; otherwise the package may appear installed without running the full ingestion and extraction pipeline:
+Activate the Context Engine slot in `~/.openclaw/openclaw.json`:
 
 ```json
 {
   "plugins": {
-    "slots": {
-      "contextEngine": "graph-memory"
-    },
-    "entries": {
-      "graph-memory": {
-        "enabled": true
-      }
-    }
+    "slots": { "contextEngine": "graph-memory" },
+    "entries": { "graph-memory": { "enabled": true } }
   }
 }
 ```
 
-The Community memory core is host-neutral. DSH development does not require OpenClaw users to abandon their entry or data.
+<p align="center">
+  <img src="docs/images/token-comparison.png" alt="Earlier OpenClaw seven-turn token comparison" width="76%">
+</p>
+
+</details>
+
+<details>
+<summary><strong>Graph Memory Pro</strong></summary>
+
+The repository also contains an experimental read-only DSH Pro Lite Host + Client plugin backed by Community SQLite. The 2D/3D graph workbench, split view, and controlled drag-to-context remain planned. See [`dsh-pro/README_CN.md`](dsh-pro/README_CN.md).
+
+</details>
+
+## Verification and limits
+
+Current beta `1.6.0-beta.16` passes **138/138 automated tests**, both TypeScript builds, npm package verification, and a real 20-turn run against the latest DSH source.
+
+- Structured extraction still depends on model contract compliance: the latest run succeeded 20/20 times; any future failure stays quarantined and never blocks the foreground conversation.
+- Recall is bounded by configurable Top-K. Focused probes succeeded; one broad multi-topic query can require a larger Top-K or separate questions.
+- The published run is an engineering workload, not a universal LoCoMo/LongMemEval score.
+- The design, source-code map, and porting sequence for the summary + SPO navigation + exact-Q/A upgrade are documented in the [Chinese upgrade guide](docs/TURN_MEMORY_NAVIGATION_UPGRADE_CN.md).
+
+Reproduce it from [`benchmarks/dsh-context-takeover/`](benchmarks/dsh-context-takeover/). Raw conversations, provider responses, local paths, and credentials are excluded.
 
 ## Development
 
 ```bash
-npm ci
+npm install
 npm test
 npm run build
-npm pack
+npm run verify:package
 ```
 
-Release checks:
-
-- tests and TypeScript build pass;
-- tarball contains `dist/dsh.js` and `cordis.patch.yml`;
-- no API keys, local databases, or environment files enter the repository;
-- planned Pro features are never presented as shipped Community behavior.
-
-## Current limitations
-
-- Automatic extraction depends on auxiliary-model output stability. Use `gm_record` for critical beta knowledge.
-- DSH does not yet expose `gm_update` and `gm_maintain`; those remain OpenClaw-entry tools.
-- The Pro DSH visualization client plugin is not implemented.
-- npm registry publication is pending; install the current beta from a GitHub-built tarball.
-
-## Privacy and security
-
-- Memory remains in local SQLite by default.
-- API keys come from host credentials or environment variables, not the database or Cordis patch.
-- Recalled history is reference material; current user instructions always take precedence.
-- Rotate any secret that has appeared in chat, logs, or screenshots.
-
-## License
-
-[MIT](LICENSE) © 2026 adoresever
-
-See [docs/ATTRIBUTIONS.md](docs/ATTRIBUTIONS.md) for asset, logo, and trademark notes.
+[MIT](LICENSE) © 2026 adoresever · [Asset and trademark notes](docs/ATTRIBUTIONS.md)

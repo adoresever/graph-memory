@@ -1,0 +1,12 @@
+- insert:
+    - id: graph-memory-pro
+      name: 'graph-memory/pro/dsh'
+      config:
+        dbPath: !!js dshHomePath('graph-memory/graph-memory.db')
+        defaultNodeLimit: 200
+        maxNodeLimit: 1000
+        maxEdgeLimit: 2000
+        overviewTextLimit: 1000
+        detailContentLimit: 20000
+        modelToolsEnabled: true
+        remoteEnabled: true

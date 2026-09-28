@@ -1,0 +1,1055 @@
+/**
+ * graph-memory
+ *
+ * By: adoresever
+ * Email: Wywelljob@gmail.com
+ */
+import { createHash } from "crypto";
+// ─── 工具 ─────────────────────────────────────────────────────
+function uid(p) {
+    return `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+function embeddingBlob(vector) {
+    const values = new Float32Array(vector);
+    return new Uint8Array(values.buffer, values.byteOffset, values.byteLength);
+}
+function vectorNorm(vector) {
+    return Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
+}
+function cosineSimilarity(query, queryNorm, raw) {
+    const vector = new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
+    if (vector.length !== query.length)
+        return Number.NEGATIVE_INFINITY;
+    let dot = 0;
+    let candidateSquaredNorm = 0;
+    for (let index = 0; index < query.length; index += 1) {
+        dot += vector[index] * query[index];
+        candidateSquaredNorm += vector[index] * vector[index];
+    }
+    return dot / (Math.sqrt(candidateSquaredNorm) * queryNorm + 1e-9);
+}
+function toNode(r) {
+    return {
+        id: r.id, type: r.type, name: r.name,
+        description: r.description ?? "", content: r.content,
+        temporal: JSON.parse(r.temporal_json ?? "{}"),
+        status: r.status, validatedCount: r.validated_count,
+        sourceSessions: JSON.parse(r.source_sessions ?? "[]"),
+        communityId: r.community_id ?? null,
+        pagerank: r.pagerank ?? 0,
+        createdAt: r.created_at, updatedAt: r.updated_at,
+    };
+}
+function toEdge(r) {
+    return {
+        id: r.id, fromId: r.from_id, toId: r.to_id, type: r.type,
+        instruction: r.instruction, condition: r.condition ?? undefined,
+        sessionId: r.session_id, createdAt: r.created_at,
+    };
+}
+/** 标准化 name：全小写，空格转连字符，保留中文 */
+function normalizeName(name) {
+    return name.trim().toLowerCase()
+        .replace(/[\s_]+/g, "-")
+        .replace(/[^a-z0-9\u4e00-\u9fff\-]/g, "")
+        .replace(/-{2,}/g, "-")
+        .replace(/^-|-$/g, "");
+}
+// ─── 节点 CRUD ───────────────────────────────────────────────
+export function findByName(db, name) {
+    const r = db.prepare("SELECT * FROM gm_nodes WHERE name = ?").get(normalizeName(name));
+    return r ? toNode(r) : null;
+}
+export function findById(db, id) {
+    const r = db.prepare("SELECT * FROM gm_nodes WHERE id = ?").get(id);
+    return r ? toNode(r) : null;
+}
+export function allActiveNodes(db) {
+    return db.prepare("SELECT * FROM gm_nodes WHERE status='active'").all().map(toNode);
+}
+export function allEdges(db) {
+    return db.prepare("SELECT * FROM gm_edges").all().map(toEdge);
+}
+export function upsertNode(db, c, sessionId, sources = []) {
+    const name = normalizeName(c.name);
+    const ex = findByName(db, name);
+    if (ex) {
+        const sessions = JSON.stringify(Array.from(new Set([...ex.sourceSessions, sessionId])));
+        // The extractor owns the claim operation.  Content length is not evidence
+        // of correctness, so the store must never use it to choose a version.
+        // Only an explicit confirmation preserves the current claim; create and
+        // revise both publish the model's current structured claim as a revision.
+        const replace = c.operation !== "confirm";
+        const content = replace ? c.content : ex.content;
+        const desc = replace ? c.description : ex.description;
+        const temporal = replace
+            ? (c.temporal ?? {})
+            : c.temporal && Object.keys(c.temporal).length
+                ? c.temporal
+                : ex.temporal;
+        // A correction is a new claim version, not another validation of the old
+        // claim. Confirmation alone increases confidence.
+        const count = replace ? 1 : ex.validatedCount + 1;
+        if (replace) {
+            const previousSourceRefs = db.prepare(`
+        SELECT session_id, message_id, turn_index
+        FROM gm_node_sources WHERE node_id=?
+        ORDER BY turn_index, message_id
+      `).all(ex.id);
+            db.prepare(`INSERT INTO gm_node_revisions
+        (node_id, previous_description, previous_content, previous_temporal_json,
+         previous_validated_count, previous_source_refs, replacement_session_id, replaced_at)
+        VALUES (?,?,?,?,?,?,?,?)`)
+                .run(ex.id, ex.description, ex.content, JSON.stringify(ex.temporal), ex.validatedCount, JSON.stringify(previousSourceRefs), sessionId, Date.now());
+            // The active node must cite only evidence for its current claim. Older
+            // provenance remains auditable in gm_node_revisions.
+            db.prepare("DELETE FROM gm_node_sources WHERE node_id=?").run(ex.id);
+        }
+        db.prepare(`UPDATE gm_nodes SET content=?, description=?, temporal_json=?, status='active', validated_count=?,
+      source_sessions=?, updated_at=? WHERE id=?`)
+            .run(content, desc, JSON.stringify(temporal), count, sessions, Date.now(), ex.id);
+        saveNodeSources(db, ex.id, sessionId, sources);
+        return { node: { ...ex, content, description: desc, temporal, status: "active", validatedCount: count }, isNew: false };
+    }
+    const id = uid("n");
+    db.prepare(`INSERT INTO gm_nodes
+    (id, type, name, description, content, temporal_json, status, validated_count, source_sessions, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,'active',1,?,?,?)`)
+        .run(id, c.type, name, c.description, c.content, JSON.stringify(c.temporal ?? {}), JSON.stringify([sessionId]), Date.now(), Date.now());
+    const node = findByName(db, name);
+    saveNodeSources(db, node.id, sessionId, sources);
+    return { node, isNew: true };
+}
+/** Link one graph node to durable message rows that actually exist. */
+export function saveNodeSources(db, nodeId, sessionId, sources) {
+    const insert = db.prepare(`
+    INSERT OR IGNORE INTO gm_node_sources (node_id, session_id, message_id, turn_index)
+    SELECT ?, ?, id, turn_index FROM gm_messages WHERE id=?
+  `);
+    for (const source of sources) {
+        insert.run(nodeId, sessionId, source.messageId);
+    }
+}
+/** Read exact provenance refs without loading or truncating message content. */
+export function getNodeSources(db, nodeIds) {
+    if (!nodeIds.length)
+        return [];
+    const placeholders = nodeIds.map(() => "?").join(",");
+    return db.prepare(`
+    SELECT node_id, session_id, message_id, turn_index
+    FROM gm_node_sources
+    WHERE node_id IN (${placeholders})
+    ORDER BY node_id, turn_index, message_id
+  `).all(...nodeIds).map(row => ({
+        nodeId: String(row.node_id),
+        sessionId: String(row.session_id),
+        messageId: String(row.message_id),
+        turnIndex: Number(row.turn_index),
+    }));
+}
+/** 按 name 精确更新 description / content；找不到返回 null（调用方决定报错语义） */
+export function updateNode(db, name, patch) {
+    const ex = findByName(db, name);
+    if (!ex)
+        return null;
+    const now = Date.now();
+    const description = patch.description ?? ex.description;
+    const content = patch.content ?? ex.content;
+    db.prepare("UPDATE gm_nodes SET description=?, content=?, updated_at=? WHERE id=?")
+        .run(description, content, now, ex.id);
+    return { ...ex, description, content, updatedAt: now };
+}
+export function deprecate(db, nodeId, temporalState = "historical") {
+    const node = findById(db, nodeId);
+    if (!node)
+        return;
+    const temporal = { ...node.temporal, state: temporalState };
+    db.prepare("UPDATE gm_nodes SET status='deprecated', temporal_json=?, updated_at=? WHERE id=?")
+        .run(JSON.stringify(temporal), Date.now(), nodeId);
+}
+/** 批量更新 PageRank 分数 */
+export function updatePageranks(db, scores) {
+    const stmt = db.prepare("UPDATE gm_nodes SET pagerank=? WHERE id=?");
+    db.exec("BEGIN");
+    try {
+        for (const [id, score] of scores) {
+            stmt.run(score, id);
+        }
+        db.exec("COMMIT");
+    }
+    catch (e) {
+        db.exec("ROLLBACK");
+        throw e;
+    }
+}
+/** 批量更新社区 ID */
+export function updateCommunities(db, labels) {
+    const stmt = db.prepare("UPDATE gm_nodes SET community_id=? WHERE id=?");
+    db.exec("BEGIN");
+    try {
+        for (const [id, cid] of labels) {
+            stmt.run(cid, id);
+        }
+        db.exec("COMMIT");
+    }
+    catch (e) {
+        db.exec("ROLLBACK");
+        throw e;
+    }
+}
+// ─── 边 CRUD ─────────────────────────────────────────────────
+export function upsertEdge(db, e) {
+    const ex = db.prepare("SELECT id FROM gm_edges WHERE from_id=? AND to_id=? AND type=?")
+        .get(e.fromId, e.toId, e.type);
+    if (ex) {
+        db.prepare("UPDATE gm_edges SET instruction=?, condition=?, session_id=? WHERE id=?")
+            .run(e.instruction, e.condition ?? null, e.sessionId, ex.id);
+        return;
+    }
+    db.prepare(`INSERT INTO gm_edges (id, from_id, to_id, type, instruction, condition, session_id, created_at)
+    VALUES (?,?,?,?,?,?,?,?)`)
+        .run(uid("e"), e.fromId, e.toId, e.type, e.instruction, e.condition ?? null, e.sessionId, Date.now());
+}
+export function edgesFrom(db, id) {
+    return db.prepare("SELECT * FROM gm_edges WHERE from_id=?").all(id).map(toEdge);
+}
+export function edgesTo(db, id) {
+    return db.prepare("SELECT * FROM gm_edges WHERE to_id=?").all(id).map(toEdge);
+}
+// ─── FTS5 搜索 ───────────────────────────────────────────────
+// FTS support belongs to a concrete connection. A process-global boolean is
+// incorrect when multiple host profiles use different SQLite builds or when
+// tests/DSH fibers own independent databases.
+const fts5Availability = new WeakMap();
+function fts5Available(db) {
+    const cached = fts5Availability.get(db);
+    if (cached !== undefined)
+        return cached;
+    try {
+        db.prepare("SELECT * FROM gm_nodes_fts LIMIT 0").all();
+        fts5Availability.set(db, true);
+        return true;
+    }
+    catch {
+        fts5Availability.set(db, false);
+        return false;
+    }
+}
+export function searchNodes(db, query, limit = 6, withoutTurnMemory = false) {
+    const terms = Array.from(new Set(query.trim().split(/\s+/).filter(Boolean)));
+    if (!terms.length)
+        return topNodes(db, limit);
+    if (fts5Available(db)) {
+        try {
+            const ftsQuery = terms.map(t => `"${t.replace(/"/g, "")}"`).join(" OR ");
+            const rows = db.prepare(`
+        SELECT n.*, rank FROM gm_nodes_fts fts
+        JOIN gm_nodes n ON n.rowid = fts.rowid
+        WHERE gm_nodes_fts MATCH ? AND n.status = 'active'
+          ${withoutTurnMemory ? `AND NOT EXISTS (
+            SELECT 1 FROM gm_node_sources node_source
+            JOIN gm_turn_memory_sources memory_source
+              ON memory_source.message_id=node_source.message_id
+            WHERE node_source.node_id=n.id
+          )` : ""}
+        ORDER BY rank LIMIT ?
+      `).all(ftsQuery, limit);
+            if (rows.length > 0)
+                return rows.map(toNode);
+        }
+        catch { /* FTS 查询失败，降级 */ }
+    }
+    const where = terms.map(() => "(name LIKE ? OR description LIKE ? OR content LIKE ?)").join(" OR ");
+    const likes = terms.flatMap(t => [`%${t}%`, `%${t}%`, `%${t}%`]);
+    return db.prepare(`
+    SELECT * FROM gm_nodes n WHERE status='active' AND (${where})
+      ${withoutTurnMemory ? `AND NOT EXISTS (
+        SELECT 1 FROM gm_node_sources node_source
+        JOIN gm_turn_memory_sources memory_source
+          ON memory_source.message_id=node_source.message_id
+        WHERE node_source.node_id=n.id
+      )` : ""}
+    ORDER BY pagerank DESC, validated_count DESC, updated_at DESC LIMIT ?
+  `).all(...likes, limit).map(toNode);
+}
+/** 热门节点：综合 pagerank + validatedCount 排序 */
+export function topNodes(db, limit = 6) {
+    return db.prepare(`
+    SELECT * FROM gm_nodes WHERE status='active'
+    ORDER BY pagerank DESC, validated_count DESC, updated_at DESC LIMIT ?
+  `).all(limit).map(toNode);
+}
+// ─── 递归 CTE 图遍历 ────────────────────────────────────────
+export function graphWalk(db, seedIds, maxDepth) {
+    if (!seedIds.length)
+        return { nodes: [], edges: [] };
+    const placeholders = seedIds.map(() => "?").join(",");
+    const walkRows = db.prepare(`
+    WITH RECURSIVE walk(node_id, depth) AS (
+      SELECT id, 0 FROM gm_nodes WHERE id IN (${placeholders}) AND status='active'
+      UNION
+      SELECT
+        CASE WHEN e.from_id = w.node_id THEN e.to_id ELSE e.from_id END,
+        w.depth + 1
+      FROM walk w
+      JOIN gm_edges e ON (e.from_id = w.node_id OR e.to_id = w.node_id)
+      WHERE w.depth < ?
+    )
+    SELECT DISTINCT node_id FROM walk
+  `).all(...seedIds, maxDepth);
+    const nodeIds = walkRows.map((r) => r.node_id);
+    if (!nodeIds.length)
+        return { nodes: [], edges: [] };
+    const np = nodeIds.map(() => "?").join(",");
+    const nodes = db.prepare(`
+    SELECT * FROM gm_nodes WHERE id IN (${np}) AND status='active'
+  `).all(...nodeIds).map(toNode);
+    const edges = db.prepare(`
+    SELECT * FROM gm_edges WHERE from_id IN (${np}) AND to_id IN (${np})
+  `).all(...nodeIds, ...nodeIds).map(toEdge);
+    return { nodes, edges };
+}
+// ─── 按 session 查询 ────────────────────────────────────────
+export function getBySession(db, sessionId) {
+    return db.prepare(`
+    SELECT DISTINCT n.* FROM gm_nodes n, json_each(n.source_sessions) j
+    WHERE j.value = ? AND n.status = 'active'
+  `).all(sessionId).map(toNode);
+}
+/**
+ * Nodes supported by the current session's recent completed turns.
+ * The turn window follows the host's visible-history policy; it is not a
+ * second node-count cap and therefore keeps every concept extracted per turn.
+ */
+export function getRecentBySession(db, sessionId, currentTurn, turnCount) {
+    const firstTurn = Math.max(0, currentTurn - turnCount);
+    return db.prepare(`
+    SELECT DISTINCT n.*
+    FROM gm_nodes n
+    JOIN gm_node_sources s ON s.node_id=n.id
+    WHERE n.status='active' AND s.session_id=?
+      AND s.turn_index>=? AND s.turn_index<?
+    ORDER BY n.updated_at DESC
+  `).all(sessionId, firstTurn, currentTurn).map(toNode);
+}
+// ─── 消息 CRUD ───────────────────────────────────────────────
+export function saveMessage(db, sid, turn, role, content) {
+    const id = uid("m");
+    db.prepare(`INSERT OR IGNORE INTO gm_messages (id, session_id, turn_index, role, content, created_at)
+    VALUES (?,?,?,?,?,?)`)
+        .run(id, sid, turn, role, JSON.stringify(content), Date.now());
+    return id;
+}
+/**
+ * Persist one host event exactly once.
+ *
+ * DSH session events already carry a stable, monotonically increasing seq.
+ * Host adapters use that identity instead of the legacy random id so replay,
+ * resume and HMR backfill cannot duplicate a message.
+ */
+export function saveMessageOnce(db, eventId, sid, turn, role, content) {
+    const result = db.prepare(`INSERT OR IGNORE INTO gm_messages
+    (id, session_id, turn_index, role, content, created_at)
+    VALUES (?,?,?,?,?,?)`)
+        .run(eventId, sid, turn, role, JSON.stringify(content), Date.now());
+    return result.changes > 0;
+}
+/**
+ * Read the oldest pending completed turn as one semantic extraction job.
+ * No character/message batching is involved: the DSH adapter persists exactly
+ * one user question and one final assistant answer for each completed turn.
+ */
+export function getNextUnextractedTurn(db, sid, completedTurn) {
+    const next = db.prepare(`
+    SELECT MIN(turn_index) AS turn_index
+    FROM gm_messages
+    WHERE session_id=? AND extracted=0 AND extraction_state='pending'
+      AND turn_index<=?
+  `).get(sid, completedTurn);
+    if (next?.turn_index === null || next?.turn_index === undefined)
+        return [];
+    return db.prepare(`
+    SELECT * FROM gm_messages
+    WHERE session_id=? AND turn_index=? AND extracted=0 AND extraction_state='pending'
+    ORDER BY rowid
+  `).all(sid, Number(next.turn_index));
+}
+/**
+ * Read one exact completed turn. Live DSH extraction uses this path so an
+ * unrelated legacy backlog can never be pulled into a foreground session.
+ * Historical retries deliberately use getNextUnextractedTurn instead.
+ */
+export function getUnextractedTurn(db, sid, turn) {
+    if (!Number.isInteger(turn) || turn < 1)
+        return [];
+    return db.prepare(`
+    SELECT * FROM gm_messages
+    WHERE session_id=? AND turn_index=? AND extracted=0 AND extraction_state='pending'
+    ORDER BY rowid
+  `).all(sid, turn);
+}
+/** Persist the highest DSH/OpenClaw turn known to be complete. */
+export function markExtractionTurnCompleted(db, sid, completedTurn) {
+    if (!Number.isFinite(completedTurn))
+        return;
+    db.prepare(`
+    INSERT INTO gm_extraction_sessions (session_id, completed_turn, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET
+      completed_turn=MAX(completed_turn, excluded.completed_turn),
+      updated_at=excluded.updated_at
+  `).run(sid, completedTurn, Date.now());
+}
+export function getExtractionCompletedTurn(db, sid) {
+    const row = db.prepare(`
+    SELECT completed_turn FROM gm_extraction_sessions WHERE session_id=?
+  `).get(sid);
+    return row?.completed_turn === undefined ? null : Number(row.completed_turn);
+}
+function messageIdPlaceholders(ids) {
+    return ids.map(() => "?").join(",");
+}
+/** Mark only the source rows actually accepted by the extractor. */
+export function markMessagesExtracted(db, ids) {
+    if (!ids.length)
+        return 0;
+    const result = db.prepare(`
+    UPDATE gm_messages
+    SET extracted=1, extraction_state='succeeded', extraction_error=NULL,
+        extraction_next_retry_at=NULL, extraction_updated_at=?
+    WHERE id IN (${messageIdPlaceholders(ids)}) AND extraction_state='pending'
+  `).run(Date.now(), ...ids);
+    return Number(result.changes);
+}
+export function recordExtractionFailure(db, ids, error, nextRetryAt) {
+    if (!ids.length)
+        return 0;
+    const result = db.prepare(`
+    UPDATE gm_messages
+    SET extraction_attempts=extraction_attempts+1, extraction_error=?,
+        extraction_next_retry_at=?, extraction_updated_at=?
+    WHERE id IN (${messageIdPlaceholders(ids)}) AND extraction_state='pending'
+  `).run(error.slice(0, 2_000), nextRetryAt, Date.now(), ...ids);
+    return Number(result.changes);
+}
+/** A poison message remains durable and explicitly unlearned until retried. */
+export function quarantineMessages(db, ids, error) {
+    if (!ids.length)
+        return 0;
+    const result = db.prepare(`
+    UPDATE gm_messages
+    SET extracted=0, extraction_state='quarantined', extraction_error=?,
+        extraction_next_retry_at=NULL, extraction_updated_at=?
+    WHERE id IN (${messageIdPlaceholders(ids)}) AND extraction_state='pending'
+  `).run(error.slice(0, 2_000), Date.now(), ...ids);
+    return Number(result.changes);
+}
+export function requeueQuarantined(db, sid) {
+    const result = sid
+        ? db.prepare(`
+        UPDATE gm_messages
+        SET extraction_state='pending', extraction_attempts=0, extraction_error=NULL,
+            extraction_next_retry_at=NULL, extraction_updated_at=?
+        WHERE extraction_state='quarantined' AND session_id=?
+      `).run(Date.now(), sid)
+        : db.prepare(`
+        UPDATE gm_messages
+        SET extraction_state='pending', extraction_attempts=0, extraction_error=NULL,
+            extraction_next_retry_at=NULL, extraction_updated_at=?
+        WHERE extraction_state='quarantined'
+      `).run(Date.now());
+    return Number(result.changes);
+}
+export function getExtractionStats(db) {
+    const rows = db.prepare(`
+    SELECT extraction_state AS state, COUNT(*) AS count
+    FROM gm_messages GROUP BY extraction_state
+  `).all();
+    const result = { pending: 0, succeeded: 0, quarantined: 0 };
+    for (const row of rows) {
+        if (row.state in result)
+            result[row.state] = Number(row.count);
+    }
+    return result;
+}
+export function getPendingSessionIds(db, limit = 100) {
+    return db.prepare(`
+    SELECT session_id, MIN(turn_index) AS first_turn
+    FROM gm_messages
+    WHERE extracted=0 AND extraction_state='pending'
+      AND (extraction_next_retry_at IS NULL OR extraction_next_retry_at<=?)
+    GROUP BY session_id ORDER BY first_turn, session_id LIMIT ?
+  `).all(Date.now(), limit).map(row => row.session_id);
+}
+/** Read exact durable message evidence for one node, in source order. */
+export function getNodeSourceMessages(db, nodeId, excludedMessageIds = new Set()) {
+    const rows = db.prepare(`
+    SELECT s.message_id, s.session_id, s.turn_index, m.role, m.content, m.created_at
+    FROM gm_node_sources s
+    JOIN gm_messages m ON m.id=s.message_id
+    WHERE s.node_id=?
+    ORDER BY s.turn_index, m.created_at
+  `).all(nodeId);
+    const results = [];
+    for (const row of rows) {
+        if (excludedMessageIds.has(String(row.message_id)))
+            continue;
+        let text = "";
+        try {
+            text = extractStoredText(JSON.parse(row.content));
+        }
+        catch {
+            text = String(row.content);
+        }
+        if (!text.trim())
+            continue;
+        results.push({
+            sessionId: row.session_id,
+            turnIndex: row.turn_index,
+            role: row.role,
+            text,
+            createdAt: row.created_at,
+        });
+    }
+    return results;
+}
+/** Read text from legacy OpenClaw payloads and DSH block-based messages. */
+export function extractStoredText(value) {
+    if (typeof value === "string")
+        return value;
+    if (Array.isArray(value))
+        return value.map(extractStoredText).filter(Boolean).join("\n");
+    if (!value || typeof value !== "object")
+        return "";
+    const record = value;
+    if (record.type === "text" && typeof record.text === "string") {
+        return record.text;
+    }
+    // Typed non-text blocks are reasoning/tool protocol data, not user-visible
+    // evidence. Do not recurse into their payloads.
+    if (typeof record.type === "string")
+        return "";
+    if (record.content !== undefined)
+        return extractStoredText(record.content);
+    if (record.message !== undefined)
+        return extractStoredText(record.message);
+    return "";
+}
+// ─── 分层轮次记忆 ──────────────────────────────────────────
+function toTurnMemory(db, row) {
+    const sources = db.prepare(`
+    SELECT message_id, turn_index
+    FROM gm_turn_memory_sources
+    WHERE memory_id=?
+    ORDER BY source_order
+  `).all(row.id).map(source => ({
+        messageId: String(source.message_id),
+        turnIndex: Number(source.turn_index),
+    }));
+    return {
+        id: String(row.id),
+        sessionId: String(row.session_id),
+        summary: String(row.summary),
+        outcome: row.outcome,
+        sources,
+        createdAt: Number(row.created_at),
+        updatedAt: Number(row.updated_at),
+    };
+}
+function turnMemoryId(sessionId, sources) {
+    const sourceKey = sources.map(source => source.messageId).sort().join("\0");
+    const digest = createHash("sha256").update(`${sessionId}\0${sourceKey}`).digest("hex");
+    return `tm-${digest.slice(0, 32)}`;
+}
+function normalizedNavigationTerm(text) {
+    return text.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+}
+function navigationTermId(normalized) {
+    return `nt-${createHash("sha256").update(normalized).digest("hex").slice(0, 32)}`;
+}
+function navigationTripleId(memoryId, subjectId, predicate, objectId) {
+    const key = `${memoryId}\0${subjectId}\0${predicate.trim()}\0${objectId}`;
+    return `tr-${createHash("sha256").update(key).digest("hex").slice(0, 32)}`;
+}
+/** Store one compact index while retaining exact message provenance. */
+export function upsertTurnMemory(db, input) {
+    if (!input.sources.length)
+        throw new Error("turn memory requires at least one durable source message");
+    const id = turnMemoryId(input.sessionId, input.sources);
+    const now = Date.now();
+    db.prepare(`
+    INSERT INTO gm_turn_memories (id, session_id, summary, outcome, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      summary=excluded.summary,
+      outcome=excluded.outcome,
+      updated_at=excluded.updated_at
+  `).run(id, input.sessionId, input.summary, input.outcome, now, now);
+    const link = db.prepare(`
+    INSERT OR IGNORE INTO gm_turn_memory_sources (memory_id, message_id, turn_index, source_order)
+    SELECT ?, id, turn_index, ? FROM gm_messages WHERE id=?
+  `);
+    input.sources.forEach((source, index) => link.run(id, index, source.messageId));
+    const row = db.prepare("SELECT * FROM gm_turn_memories WHERE id=?").get(id);
+    return toTurnMemory(db, row);
+}
+export function getTurnMemoriesByIds(db, ids) {
+    const memories = [];
+    const statement = db.prepare("SELECT * FROM gm_turn_memories WHERE id=?");
+    for (const id of ids) {
+        const row = statement.get(id);
+        if (row)
+            memories.push(toTurnMemory(db, row));
+    }
+    return memories;
+}
+/**
+ * Recent summaries are reference-resolution context, not extraction evidence.
+ * `beforeTurn` prevents the current Q/A pair from feeding itself on retries.
+ */
+export function getRecentTurnMemoriesBySession(db, sessionId, beforeTurn, limit) {
+    if (!Number.isFinite(beforeTurn) || limit <= 0)
+        return [];
+    const rows = db.prepare(`
+    SELECT tm.*
+    FROM gm_turn_memories tm
+    WHERE tm.session_id=?
+      AND NOT EXISTS (
+        SELECT 1 FROM gm_turn_memory_sources source
+        WHERE source.memory_id=tm.id AND source.turn_index>=?
+      )
+    ORDER BY (
+      SELECT MAX(source.turn_index)
+      FROM gm_turn_memory_sources source
+      WHERE source.memory_id=tm.id
+    ) DESC, tm.updated_at DESC, tm.id
+    LIMIT ?
+  `).all(sessionId, beforeTurn, limit);
+    return rows.map(row => toTurnMemory(db, row)).reverse();
+}
+function upsertNavigationTerm(db, text) {
+    const display = text.trim().replace(/\s+/g, " ");
+    const normalized = normalizedNavigationTerm(display);
+    if (!normalized)
+        throw new TypeError("navigation term must not be empty");
+    const id = navigationTermId(normalized);
+    const now = Date.now();
+    db.prepare(`
+    INSERT INTO gm_navigation_terms
+      (id, normalized, display_text, community_id, created_at, updated_at)
+    VALUES (?, ?, ?, NULL, ?, ?)
+    ON CONFLICT(normalized) DO UPDATE SET
+      display_text=excluded.display_text,
+      updated_at=excluded.updated_at
+  `).run(id, normalized, display, now, now);
+    return id;
+}
+/**
+ * Atomically replace the navigation generated for one compact turn. The
+ * model's subject/predicate/object values are stored verbatim after whitespace
+ * normalization; the host applies no semantic gate or inferred relation.
+ */
+export function replaceNavigationTriples(db, memory, triples) {
+    db.exec("BEGIN");
+    try {
+        db.prepare("DELETE FROM gm_navigation_triples WHERE memory_id=?").run(memory.id);
+        const insert = db.prepare(`
+      INSERT OR IGNORE INTO gm_navigation_triples
+        (id, memory_id, session_id, subject_id, predicate, object_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+        for (const triple of triples) {
+            const subjectId = upsertNavigationTerm(db, triple.subject);
+            const objectId = upsertNavigationTerm(db, triple.object);
+            const predicate = triple.predicate.trim().replace(/\s+/g, " ");
+            if (!predicate)
+                throw new TypeError("navigation predicate must not be empty");
+            insert.run(navigationTripleId(memory.id, subjectId, predicate, objectId), memory.id, memory.sessionId, subjectId, predicate, objectId, Date.now());
+        }
+        db.exec("COMMIT");
+    }
+    catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+    }
+}
+/** Return navigation in the same memory-relevance order supplied by recall. */
+export function getNavigationTriplesForMemories(db, memoryIds, termScores) {
+    if (!memoryIds.length)
+        return [];
+    const query = db.prepare(`
+    SELECT triple.*, subject.display_text AS subject,
+           subject.community_id AS subject_community_id,
+           object.display_text AS object,
+           object.community_id AS object_community_id
+    FROM gm_navigation_triples triple
+    JOIN gm_navigation_terms subject ON subject.id=triple.subject_id
+    JOIN gm_navigation_terms object ON object.id=triple.object_id
+    WHERE triple.memory_id=?
+    ORDER BY triple.created_at, triple.id
+  `);
+    return memoryIds.flatMap(memoryId => {
+        const triples = query.all(memoryId).map(row => ({
+            id: String(row.id),
+            memoryId: String(row.memory_id),
+            sessionId: String(row.session_id),
+            subjectId: String(row.subject_id),
+            subject: String(row.subject),
+            predicate: String(row.predicate),
+            objectId: String(row.object_id),
+            object: String(row.object),
+            subjectCommunityId: row.subject_community_id ? String(row.subject_community_id) : null,
+            objectCommunityId: row.object_community_id ? String(row.object_community_id) : null,
+            createdAt: Number(row.created_at),
+        }));
+        if (!termScores?.size || triples.length < 2)
+            return triples;
+        // A selected source memory may contain many facts. Send only the edge(s)
+        // that best explain this query-time graph route; the complete original Q/A
+        // remains the factual evidence and is never shortened here.
+        const relevance = triples.map(triple => {
+            const subject = termScores.get(triple.subjectId) ?? 0;
+            const object = termScores.get(triple.objectId) ?? 0;
+            return {
+                triple,
+                connected: subject > 0 && object > 0,
+                score: subject > 0 && object > 0
+                    ? Math.sqrt(subject * object)
+                    : Math.max(subject, object),
+            };
+        });
+        const connected = relevance.some(candidate => candidate.connected);
+        const eligible = connected
+            ? relevance.filter(candidate => candidate.connected)
+            : relevance;
+        const best = Math.max(...eligible.map(candidate => candidate.score));
+        return eligible
+            .filter(candidate => candidate.score === best)
+            .map(candidate => candidate.triple);
+    });
+}
+/**
+ * Resolve query seeds from the compact SPO index without another model call.
+ * Summary vectors handle paraphrases; this path deliberately handles literal
+ * entity/attribute mentions and preserves the graph's exact vocabulary.
+ */
+export function findNavigationSeedTermIds(db, query, memoryIds = []) {
+    const normalizedQuery = normalizedNavigationTerm(query);
+    const seeds = [];
+    const seen = new Set();
+    const append = (id) => {
+        if (seen.has(id))
+            return;
+        seen.add(id);
+        seeds.push(id);
+    };
+    if (normalizedQuery) {
+        const rows = db.prepare("SELECT id, normalized FROM gm_navigation_terms ORDER BY updated_at DESC, id").all();
+        const literalMatches = rows.filter(row => normalizedQuery.includes(row.normalized) || row.normalized.includes(normalizedQuery));
+        // Prefer the most specific stored phrase. If both "ReleaseOrchestrator"
+        // and "ReleaseOrchestrator addService" match, the shorter hub must not
+        // expand unrelated memories. Independent terms remain separate seeds.
+        for (const row of literalMatches) {
+            const isContainedByMoreSpecificMatch = literalMatches.some(other => other.id !== row.id
+                && other.normalized.length > row.normalized.length
+                && other.normalized.includes(row.normalized));
+            if (!isContainedByMoreSpecificMatch)
+                append(String(row.id));
+        }
+    }
+    // Literal entity/attribute evidence is the strongest routing signal. Only
+    // fall back to endpoints from semantically matched summaries when the user
+    // phrased the question differently from every stored navigation term.
+    if (!seeds.length && memoryIds.length) {
+        const statement = db.prepare(`
+      SELECT subject_id, object_id
+      FROM gm_navigation_triples
+      WHERE memory_id=?
+      ORDER BY created_at, id
+    `);
+        for (const memoryId of memoryIds) {
+            for (const row of statement.all(memoryId)) {
+                append(String(row.subject_id));
+                append(String(row.object_id));
+            }
+        }
+    }
+    return seeds;
+}
+/**
+ * A community is a local candidate scope, never prompt content by itself.
+ * When fresh terms have not been assigned yet, the complete compact graph is
+ * still cheap enough for query-time PPR and avoids a false negative.
+ */
+export function navigationCandidateTermIds(db, seedIds) {
+    if (!seedIds.length)
+        return [];
+    const communityStatement = db.prepare("SELECT community_id FROM gm_navigation_terms WHERE id=?");
+    const communities = new Set();
+    for (const seedId of seedIds) {
+        const row = communityStatement.get(seedId);
+        if (row?.community_id)
+            communities.add(String(row.community_id));
+    }
+    if (!communities.size) {
+        return db.prepare("SELECT id FROM gm_navigation_terms ORDER BY id").all()
+            .map(row => String(row.id));
+    }
+    const candidates = new Set(seedIds);
+    const statement = db.prepare("SELECT id FROM gm_navigation_terms WHERE community_id=? ORDER BY id");
+    for (const community of communities) {
+        for (const row of statement.all(community))
+            candidates.add(String(row.id));
+    }
+    return Array.from(candidates);
+}
+/** Map query-local graph relevance back to the exact dialogue evidence. */
+export function rankTurnMemoryIdsByNavigation(db, termScores) {
+    if (!termScores.size)
+        return [];
+    const scores = new Map();
+    const rows = db.prepare(`
+    SELECT memory_id, subject_id, object_id
+    FROM gm_navigation_triples
+    ORDER BY created_at, id
+  `).all();
+    for (const row of rows) {
+        // Max endpoint relevance prevents a verbose turn with many triples from
+        // outranking a concise turn solely because it emitted more graph edges.
+        const score = Math.max(termScores.get(String(row.subject_id)) ?? 0, termScores.get(String(row.object_id)) ?? 0);
+        const memoryId = String(row.memory_id);
+        if (score > (scores.get(memoryId) ?? 0))
+            scores.set(memoryId, score);
+    }
+    return Array.from(scores)
+        .filter(([, score]) => score > 0)
+        .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+        .map(([memoryId]) => memoryId);
+}
+export function updateNavigationCommunities(db, labels) {
+    const statement = db.prepare("UPDATE gm_navigation_terms SET community_id=? WHERE id=?");
+    db.exec("BEGIN");
+    try {
+        for (const [id, communityId] of labels)
+            statement.run(communityId, id);
+        db.exec("COMMIT");
+    }
+    catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+    }
+}
+export function hasTurnMemories(db) {
+    return Number(db.prepare("SELECT COUNT(*) AS count FROM gm_turn_memories").get()?.count ?? 0) > 0;
+}
+/** Lexical fallback for hosts without a working embedding provider. */
+export function searchTurnMemories(db, query, limit) {
+    const phrase = query.trim().replace(/\s+/g, " ");
+    if (!phrase)
+        return [];
+    // Semantic search handles paraphrases. The lexical fallback deliberately
+    // requires the complete phrase; OR-ing common words such as "is"/"the"
+    // turns a fallback into another source of unrelated prompt injection.
+    const rows = db.prepare(`
+    SELECT * FROM gm_turn_memories
+    WHERE summary LIKE ?
+    ORDER BY updated_at DESC
+    LIMIT ?
+  `).all(`%${phrase}%`, limit);
+    return rows.map(row => toTurnMemory(db, row));
+}
+export function saveTurnVector(db, memoryId, content, vec) {
+    const hash = createHash("md5").update(content).digest("hex");
+    db.prepare(`
+    INSERT INTO gm_turn_vectors (memory_id, content_hash, embedding)
+    VALUES (?, ?, ?)
+    ON CONFLICT(memory_id) DO UPDATE SET
+      content_hash=excluded.content_hash,
+      embedding=excluded.embedding
+  `).run(memoryId, hash, embeddingBlob(vec));
+}
+export function getTurnVectorHash(db, memoryId) {
+    return db.prepare("SELECT content_hash FROM gm_turn_vectors WHERE memory_id=?").get(memoryId)
+        ?.content_hash ?? null;
+}
+export function turnMemoryVectorSearchWithScore(db, queryVec, limit, minScore) {
+    const rows = db.prepare(`
+    SELECT v.embedding, m.*
+    FROM gm_turn_vectors v
+    JOIN gm_turn_memories m ON m.id=v.memory_id
+  `).all();
+    if (!rows.length)
+        return [];
+    const query = new Float32Array(queryVec);
+    const queryNorm = vectorNorm(query);
+    if (queryNorm === 0)
+        return [];
+    return rows.map(row => ({
+        memory: toTurnMemory(db, row),
+        score: cosineSimilarity(query, queryNorm, row.embedding),
+    })).filter(result => result.score >= minScore)
+        .sort((left, right) => right.score - left.score)
+        .slice(0, limit);
+}
+/** Resolve graph navigation nodes whose evidence belongs to matched turns. */
+export function nodesForTurnMemories(db, memoryIds, limit) {
+    const results = [];
+    const seen = new Set();
+    const statement = db.prepare(`
+    SELECT DISTINCT n.*
+    FROM gm_turn_memory_sources memory_source
+    JOIN gm_node_sources node_source ON node_source.message_id=memory_source.message_id
+    JOIN gm_nodes n ON n.id=node_source.node_id
+    WHERE memory_source.memory_id=? AND n.status='active'
+    ORDER BY n.updated_at DESC
+  `);
+    for (const memoryId of memoryIds) {
+        for (const row of statement.all(memoryId)) {
+            if (seen.has(row.id))
+                continue;
+            seen.add(row.id);
+            results.push(toNode(row));
+            if (results.length >= limit)
+                return results;
+        }
+    }
+    return results;
+}
+/** Read exact Q/A evidence for matched compact memories. */
+export function getTurnMemorySourceMessages(db, memoryId, excludedMessageIds = new Set()) {
+    const rows = db.prepare(`
+    SELECT m.id, tm.session_id, source.turn_index, m.role, m.content, m.created_at
+    FROM gm_turn_memory_sources source
+    JOIN gm_turn_memories tm ON tm.id=source.memory_id
+    JOIN gm_messages m ON m.id=source.message_id
+    WHERE source.memory_id=?
+    ORDER BY source.source_order
+  `).all(memoryId);
+    return rows.flatMap(row => {
+        if (excludedMessageIds.has(String(row.id)))
+            return [];
+        let text = "";
+        try {
+            text = extractStoredText(JSON.parse(row.content));
+        }
+        catch {
+            text = String(row.content);
+        }
+        return text.trim() ? [{
+                sessionId: String(row.session_id),
+                turnIndex: Number(row.turn_index),
+                role: String(row.role),
+                text,
+                createdAt: Number(row.created_at),
+            }] : [];
+    });
+}
+// ─── 统计 ────────────────────────────────────────────────────
+export function getStats(db) {
+    const totalNodes = db.prepare("SELECT COUNT(*) as c FROM gm_nodes WHERE status='active'").get().c;
+    const byType = {};
+    for (const r of db.prepare("SELECT type, COUNT(*) as c FROM gm_nodes WHERE status='active' GROUP BY type").all()) {
+        byType[r.type] = r.c;
+    }
+    const totalEdges = db.prepare("SELECT COUNT(*) as c FROM gm_edges").get().c;
+    const byEdgeType = {};
+    for (const r of db.prepare("SELECT type, COUNT(*) as c FROM gm_edges GROUP BY type").all()) {
+        byEdgeType[r.type] = r.c;
+    }
+    const communities = db.prepare("SELECT COUNT(DISTINCT community_id) as c FROM gm_nodes WHERE status='active' AND community_id IS NOT NULL").get().c;
+    const turnMemories = Number(db.prepare("SELECT COUNT(*) AS c FROM gm_turn_memories").get().c);
+    const navigationTerms = Number(db.prepare("SELECT COUNT(*) AS c FROM gm_navigation_terms").get().c);
+    const navigationTriples = Number(db.prepare("SELECT COUNT(*) AS c FROM gm_navigation_triples").get().c);
+    const navigationCommunities = Number(db.prepare("SELECT COUNT(DISTINCT community_id) AS c FROM gm_navigation_terms WHERE community_id IS NOT NULL").get().c);
+    return {
+        totalNodes,
+        byType,
+        totalEdges,
+        byEdgeType,
+        communities,
+        turnMemories,
+        navigationTerms,
+        navigationTriples,
+        navigationCommunities,
+    };
+}
+// ─── 向量存储 + 搜索 ────────────────────────────────────────
+export function saveVector(db, nodeId, content, vec) {
+    const hash = createHash("md5").update(content).digest("hex");
+    db.prepare(`INSERT INTO gm_vectors (node_id, content_hash, embedding) VALUES (?,?,?)
+    ON CONFLICT(node_id) DO UPDATE SET content_hash=excluded.content_hash, embedding=excluded.embedding`)
+        .run(nodeId, hash, embeddingBlob(vec));
+}
+export function getVectorHash(db, nodeId) {
+    return db.prepare("SELECT content_hash FROM gm_vectors WHERE node_id=?").get(nodeId)?.content_hash ?? null;
+}
+export function getVectorStats(db) {
+    const count = Number(db.prepare("SELECT COUNT(*) AS c FROM gm_vectors").get()?.c ?? 0);
+    const rows = db.prepare("SELECT embedding FROM gm_vectors").all();
+    const dimensions = [...new Set(rows.map((row) => row.embedding.byteLength / 4))].sort((a, b) => a - b);
+    return { count, dimensions };
+}
+export function vectorSearchWithScore(db, queryVec, limit, minScore, withoutTurnMemory = false) {
+    const rows = db.prepare(`
+    SELECT v.node_id, v.embedding, n.*
+    FROM gm_vectors v JOIN gm_nodes n ON n.id = v.node_id
+    WHERE n.status = 'active'
+      ${withoutTurnMemory ? `AND NOT EXISTS (
+        SELECT 1 FROM gm_node_sources node_source
+        JOIN gm_turn_memory_sources memory_source
+          ON memory_source.message_id=node_source.message_id
+        WHERE node_source.node_id=n.id
+      )` : ""}
+  `).all();
+    if (!rows.length)
+        return [];
+    const q = new Float32Array(queryVec);
+    const qNorm = vectorNorm(q);
+    if (qNorm === 0)
+        return [];
+    return rows
+        .map(row => ({
+        score: cosineSimilarity(q, qNorm, row.embedding),
+        node: toNode(row),
+    }))
+        .filter(s => minScore === undefined || s.score >= minScore)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit);
+}
+/** 兼容旧接口 */
+export function vectorSearch(db, queryVec, limit, minScore) {
+    return vectorSearchWithScore(db, queryVec, limit, minScore).map(s => s.node);
+}
+/**
+ * 社区代表节点：每个社区取最近更新的 topN 个节点
+ * 用于泛化召回 —— 用户问"做了哪些工作"时按领域返回概览
+ */
+export function communityRepresentatives(db, perCommunity = 2) {
+    const rows = db.prepare(`
+    SELECT * FROM gm_nodes
+    WHERE status = 'active' AND community_id IS NOT NULL
+    ORDER BY community_id, updated_at DESC
+  `).all();
+    const byCommunity = new Map();
+    for (const r of rows) {
+        const node = toNode(r);
+        const cid = r.community_id;
+        if (!byCommunity.has(cid))
+            byCommunity.set(cid, []);
+        const list = byCommunity.get(cid);
+        if (list.length < perCommunity)
+            list.push(node);
+    }
+    // 社区按最新更新时间排序
+    const communities = Array.from(byCommunity.entries())
+        .sort((a, b) => {
+        const aTime = Math.max(...a[1].map(n => n.updatedAt));
+        const bTime = Math.max(...b[1].map(n => n.updatedAt));
+        return bTime - aTime;
+    });
+    const result = [];
+    for (const [, nodes] of communities) {
+        result.push(...nodes);
+    }
+    return result;
+}

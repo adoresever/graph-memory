@@ -6,8 +6,36 @@
         extractionEnabled: true
         recallEnabled: true
         recallMaxNodes: 6
-        recallMaxDepth: 2
+        # Optional cosine floor. Leave unset unless calibrated for the chosen
+        # embedding model; ranked top-k is provider-neutral by default.
+        semanticScoreThreshold: !!js "process.env.GRAPH_MEMORY_SEMANTIC_SCORE_THRESHOLD === undefined ? undefined : Number(process.env.GRAPH_MEMORY_SEMANTIC_SCORE_THRESHOLD)"
+        # Automatic recall is the default path and needs no tool schema.
+        # Set to search for gm_search, or all for administrative tools.
+        assistantTools: none
         maintenanceInterval: 6
+        # Extraction is a separate, lightweight workload. If these variables
+        # are set, this route takes precedence over the foreground Agent model.
+        llmProvider: !!js process.env.GRAPH_MEMORY_LLM_PROVIDER
+        llmModel: !!js process.env.GRAPH_MEMORY_LLM_MODEL
+        llmReasoningEffort: !!js process.env.GRAPH_MEMORY_LLM_REASONING_EFFORT
+        llmMaxTokens: !!js "process.env.GRAPH_MEMORY_LLM_MAX_TOKENS ? Number(process.env.GRAPH_MEMORY_LLM_MAX_TOKENS) : undefined"
+        # Each committed DSH turn is one extraction job containing only the
+        # original user question and the final visible assistant answer.
+        # Tool traffic and reasoning are never sent to the extraction model.
+        # Durable events are separate from the compacted model surface. The
+        # safe default never deletes raw messages. To opt in, first use
+        # keep: referenced with dryRun: true and inspect gm_stats/gm_maintain.
+        messageRetention:
+          keep: all
+          recentTurns: 0
+          retentionDays: 0
+          batchSize: 500
+          dryRun: false
+        # Graph Memory retains the newest completed user turns and replaces
+        # the older model-surface prefix itself. This is model-free: no DSH
+        # compaction/summarization request and no growing checkpoint.
+        contextCompactionEnabled: true
+        freshTurnCount: 5
         # Secrets stay outside the bundle and repository. Set these variables
         # in the environment that starts DSH to enable semantic vector recall.
         embedding:

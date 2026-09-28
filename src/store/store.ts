@@ -5,9 +5,18 @@
  * Email: Wywelljob@gmail.com
  */
 
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
+import { DatabaseSync, type DatabaseSyncInstance } from "./sqlite.ts";
 import { createHash } from "crypto";
-import type { GmNode, GmEdge, EdgeType, NodeType, Signal } from "../types.ts";
+import type {
+  GmNode,
+  GmEdge,
+  GmNavigationTriple,
+  GmTurnMemory,
+  EdgeType,
+  NodeTemporal,
+  NodeType,
+  TurnOutcome,
+} from "../types.ts";
 
 // ─── 工具 ─────────────────────────────────────────────────────
 
@@ -15,10 +24,32 @@ function uid(p: string): string {
   return `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
+function embeddingBlob(vector: number[]): Uint8Array {
+  const values = new Float32Array(vector);
+  return new Uint8Array(values.buffer, values.byteOffset, values.byteLength);
+}
+
+function vectorNorm(vector: Float32Array): number {
+  return Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
+}
+
+function cosineSimilarity(query: Float32Array, queryNorm: number, raw: Uint8Array): number {
+  const vector = new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
+  if (vector.length !== query.length) return Number.NEGATIVE_INFINITY;
+  let dot = 0;
+  let candidateSquaredNorm = 0;
+  for (let index = 0; index < query.length; index += 1) {
+    dot += vector[index] * query[index];
+    candidateSquaredNorm += vector[index] * vector[index];
+  }
+  return dot / (Math.sqrt(candidateSquaredNorm) * queryNorm + 1e-9);
+}
+
 function toNode(r: any): GmNode {
   return {
     id: r.id, type: r.type, name: r.name,
     description: r.description ?? "", content: r.content,
+    temporal: JSON.parse(r.temporal_json ?? "{}"),
     status: r.status, validatedCount: r.validated_count,
     sourceSessions: JSON.parse(r.source_sessions ?? "[]"),
     communityId: r.community_id ?? null,
@@ -66,29 +97,119 @@ export function allEdges(db: DatabaseSyncInstance): GmEdge[] {
 
 export function upsertNode(
   db: DatabaseSyncInstance,
-  c: { type: NodeType; name: string; description: string; content: string },
+  c: {
+    type: NodeType;
+    name: string;
+    description: string;
+    content: string;
+    operation?: "create" | "confirm" | "revise";
+    temporal?: NodeTemporal;
+  },
   sessionId: string,
+  sources: Array<{ messageId: string; turnIndex: number }> = [],
 ): { node: GmNode; isNew: boolean } {
   const name = normalizeName(c.name);
   const ex = findByName(db, name);
 
   if (ex) {
     const sessions = JSON.stringify(Array.from(new Set([...ex.sourceSessions, sessionId])));
-    const content = c.content.length > ex.content.length ? c.content : ex.content;
-    const desc = c.description.length > ex.description.length ? c.description : ex.description;
-    const count = ex.validatedCount + 1;
-    db.prepare(`UPDATE gm_nodes SET content=?, description=?, validated_count=?,
+    // The extractor owns the claim operation.  Content length is not evidence
+    // of correctness, so the store must never use it to choose a version.
+    // Only an explicit confirmation preserves the current claim; create and
+    // revise both publish the model's current structured claim as a revision.
+    const replace = c.operation !== "confirm";
+    const content = replace ? c.content : ex.content;
+    const desc = replace ? c.description : ex.description;
+    const temporal = replace
+      ? (c.temporal ?? {})
+      : c.temporal && Object.keys(c.temporal).length
+        ? c.temporal
+        : ex.temporal;
+    // A correction is a new claim version, not another validation of the old
+    // claim. Confirmation alone increases confidence.
+    const count = replace ? 1 : ex.validatedCount + 1;
+    if (replace) {
+      const previousSourceRefs = db.prepare(`
+        SELECT session_id, message_id, turn_index
+        FROM gm_node_sources WHERE node_id=?
+        ORDER BY turn_index, message_id
+      `).all(ex.id);
+      db.prepare(`INSERT INTO gm_node_revisions
+        (node_id, previous_description, previous_content, previous_temporal_json,
+         previous_validated_count, previous_source_refs, replacement_session_id, replaced_at)
+        VALUES (?,?,?,?,?,?,?,?)`)
+        .run(
+          ex.id,
+          ex.description,
+          ex.content,
+          JSON.stringify(ex.temporal),
+          ex.validatedCount,
+          JSON.stringify(previousSourceRefs),
+          sessionId,
+          Date.now(),
+        );
+      // The active node must cite only evidence for its current claim. Older
+      // provenance remains auditable in gm_node_revisions.
+      db.prepare("DELETE FROM gm_node_sources WHERE node_id=?").run(ex.id);
+    }
+    db.prepare(`UPDATE gm_nodes SET content=?, description=?, temporal_json=?, status='active', validated_count=?,
       source_sessions=?, updated_at=? WHERE id=?`)
-      .run(content, desc, count, sessions, Date.now(), ex.id);
-    return { node: { ...ex, content, description: desc, validatedCount: count }, isNew: false };
+      .run(content, desc, JSON.stringify(temporal), count, sessions, Date.now(), ex.id);
+    saveNodeSources(db, ex.id, sessionId, sources);
+    return { node: { ...ex, content, description: desc, temporal, status: "active", validatedCount: count }, isNew: false };
   }
 
   const id = uid("n");
   db.prepare(`INSERT INTO gm_nodes
-    (id, type, name, description, content, status, validated_count, source_sessions, created_at, updated_at)
-    VALUES (?,?,?,?,?,'active',1,?,?,?)`)
-    .run(id, c.type, name, c.description, c.content, JSON.stringify([sessionId]), Date.now(), Date.now());
-  return { node: findByName(db, name)!, isNew: true };
+    (id, type, name, description, content, temporal_json, status, validated_count, source_sessions, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,'active',1,?,?,?)`)
+    .run(id, c.type, name, c.description, c.content, JSON.stringify(c.temporal ?? {}), JSON.stringify([sessionId]), Date.now(), Date.now());
+  const node = findByName(db, name)!;
+  saveNodeSources(db, node.id, sessionId, sources);
+  return { node, isNew: true };
+}
+
+/** Link one graph node to durable message rows that actually exist. */
+export function saveNodeSources(
+  db: DatabaseSyncInstance,
+  nodeId: string,
+  sessionId: string,
+  sources: Array<{ messageId: string; turnIndex: number }>,
+): void {
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO gm_node_sources (node_id, session_id, message_id, turn_index)
+    SELECT ?, ?, id, turn_index FROM gm_messages WHERE id=?
+  `);
+  for (const source of sources) {
+    insert.run(nodeId, sessionId, source.messageId);
+  }
+}
+
+export interface GmNodeSource {
+  nodeId: string;
+  sessionId: string;
+  messageId: string;
+  turnIndex: number;
+}
+
+/** Read exact provenance refs without loading or truncating message content. */
+export function getNodeSources(
+  db: DatabaseSyncInstance,
+  nodeIds: string[],
+): GmNodeSource[] {
+  if (!nodeIds.length) return [];
+  const placeholders = nodeIds.map(() => "?").join(",");
+  return (db.prepare(`
+    SELECT node_id, session_id, message_id, turn_index
+    FROM gm_node_sources
+    WHERE node_id IN (${placeholders})
+    ORDER BY node_id, turn_index, message_id
+  `).all(...nodeIds) as any[]).map(row => ({
+    nodeId: String(row.node_id),
+    sessionId: String(row.session_id),
+    messageId: String(row.message_id),
+    turnIndex: Number(row.turn_index),
+  }));
 }
 
 /** 按 name 精确更新 description / content；找不到返回 null（调用方决定报错语义） */
@@ -107,44 +228,16 @@ export function updateNode(
   return { ...ex, description, content, updatedAt: now };
 }
 
-export function deprecate(db: DatabaseSyncInstance, nodeId: string): void {
-  db.prepare("UPDATE gm_nodes SET status='deprecated', updated_at=? WHERE id=?")
-    .run(Date.now(), nodeId);
-}
-
-/** 合并两个节点：keepId 保留，mergeId 标记 deprecated，边迁移 */
-export function mergeNodes(db: DatabaseSyncInstance, keepId: string, mergeId: string): void {
-  const keep = findById(db, keepId);
-  const merge = findById(db, mergeId);
-  if (!keep || !merge) return;
-
-  // 合并 validatedCount + sourceSessions
-  const sessions = JSON.stringify(
-    Array.from(new Set([...keep.sourceSessions, ...merge.sourceSessions]))
-  );
-  const count = keep.validatedCount + merge.validatedCount;
-  const content = keep.content.length >= merge.content.length ? keep.content : merge.content;
-  const desc = keep.description.length >= merge.description.length ? keep.description : merge.description;
-
-  db.prepare(`UPDATE gm_nodes SET content=?, description=?, validated_count=?,
-    source_sessions=?, updated_at=? WHERE id=?`)
-    .run(content, desc, count, sessions, Date.now(), keepId);
-
-  // 迁移边：mergeId 的边指向 keepId
-  db.prepare("UPDATE gm_edges SET from_id=? WHERE from_id=?").run(keepId, mergeId);
-  db.prepare("UPDATE gm_edges SET to_id=? WHERE to_id=?").run(keepId, mergeId);
-
-  // 删除自环（合并后可能出现 keepId → keepId）
-  db.prepare("DELETE FROM gm_edges WHERE from_id = to_id").run();
-
-  // 删除重复边（同 from+to+type 只保留一条）
-  db.prepare(`
-    DELETE FROM gm_edges WHERE id NOT IN (
-      SELECT MIN(id) FROM gm_edges GROUP BY from_id, to_id, type
-    )
-  `).run();
-
-  deprecate(db, mergeId);
+export function deprecate(
+  db: DatabaseSyncInstance,
+  nodeId: string,
+  temporalState: "historical" | "superseded" = "historical",
+): void {
+  const node = findById(db, nodeId);
+  if (!node) return;
+  const temporal = { ...node.temporal, state: temporalState };
+  db.prepare("UPDATE gm_nodes SET status='deprecated', temporal_json=?, updated_at=? WHERE id=?")
+    .run(JSON.stringify(temporal), Date.now(), nodeId);
 }
 
 /** 批量更新 PageRank 分数 */
@@ -186,8 +279,8 @@ export function upsertEdge(
   const ex = db.prepare("SELECT id FROM gm_edges WHERE from_id=? AND to_id=? AND type=?")
     .get(e.fromId, e.toId, e.type) as any;
   if (ex) {
-    db.prepare("UPDATE gm_edges SET instruction=? WHERE id=?")
-      .run(e.instruction, ex.id);
+    db.prepare("UPDATE gm_edges SET instruction=?, condition=?, session_id=? WHERE id=?")
+      .run(e.instruction, e.condition ?? null, e.sessionId, ex.id);
     return;
   }
   db.prepare(`INSERT INTO gm_edges (id, from_id, to_id, type, instruction, condition, session_id, created_at)
@@ -223,8 +316,13 @@ function fts5Available(db: DatabaseSyncInstance): boolean {
   }
 }
 
-export function searchNodes(db: DatabaseSyncInstance, query: string, limit = 6): GmNode[] {
-  const terms = query.trim().split(/\s+/).filter(Boolean).slice(0, 8);
+export function searchNodes(
+  db: DatabaseSyncInstance,
+  query: string,
+  limit = 6,
+  withoutTurnMemory = false,
+): GmNode[] {
+  const terms = Array.from(new Set(query.trim().split(/\s+/).filter(Boolean)));
   if (!terms.length) return topNodes(db, limit);
 
   if (fts5Available(db)) {
@@ -234,6 +332,12 @@ export function searchNodes(db: DatabaseSyncInstance, query: string, limit = 6):
         SELECT n.*, rank FROM gm_nodes_fts fts
         JOIN gm_nodes n ON n.rowid = fts.rowid
         WHERE gm_nodes_fts MATCH ? AND n.status = 'active'
+          ${withoutTurnMemory ? `AND NOT EXISTS (
+            SELECT 1 FROM gm_node_sources node_source
+            JOIN gm_turn_memory_sources memory_source
+              ON memory_source.message_id=node_source.message_id
+            WHERE node_source.node_id=n.id
+          )` : ""}
         ORDER BY rank LIMIT ?
       `).all(ftsQuery, limit) as any[];
       if (rows.length > 0) return rows.map(toNode);
@@ -243,7 +347,13 @@ export function searchNodes(db: DatabaseSyncInstance, query: string, limit = 6):
   const where = terms.map(() => "(name LIKE ? OR description LIKE ? OR content LIKE ?)").join(" OR ");
   const likes = terms.flatMap(t => [`%${t}%`, `%${t}%`, `%${t}%`]);
   return (db.prepare(`
-    SELECT * FROM gm_nodes WHERE status='active' AND (${where})
+    SELECT * FROM gm_nodes n WHERE status='active' AND (${where})
+      ${withoutTurnMemory ? `AND NOT EXISTS (
+        SELECT 1 FROM gm_node_sources node_source
+        JOIN gm_turn_memory_sources memory_source
+          ON memory_source.message_id=node_source.message_id
+        WHERE node_source.node_id=n.id
+      )` : ""}
     ORDER BY pagerank DESC, validated_count DESC, updated_at DESC LIMIT ?
   `).all(...likes, limit) as any[]).map(toNode);
 }
@@ -305,14 +415,38 @@ export function getBySession(db: DatabaseSyncInstance, sessionId: string): GmNod
   `).all(sessionId) as any[]).map(toNode);
 }
 
+/**
+ * Nodes supported by the current session's recent completed turns.
+ * The turn window follows the host's visible-history policy; it is not a
+ * second node-count cap and therefore keeps every concept extracted per turn.
+ */
+export function getRecentBySession(
+  db: DatabaseSyncInstance,
+  sessionId: string,
+  currentTurn: number,
+  turnCount: number,
+): GmNode[] {
+  const firstTurn = Math.max(0, currentTurn - turnCount);
+  return (db.prepare(`
+    SELECT DISTINCT n.*
+    FROM gm_nodes n
+    JOIN gm_node_sources s ON s.node_id=n.id
+    WHERE n.status='active' AND s.session_id=?
+      AND s.turn_index>=? AND s.turn_index<?
+    ORDER BY n.updated_at DESC
+  `).all(sessionId, firstTurn, currentTurn) as any[]).map(toNode);
+}
+
 // ─── 消息 CRUD ───────────────────────────────────────────────
 
 export function saveMessage(
   db: DatabaseSyncInstance, sid: string, turn: number, role: string, content: unknown
-): void {
+): string {
+  const id = uid("m");
   db.prepare(`INSERT OR IGNORE INTO gm_messages (id, session_id, turn_index, role, content, created_at)
     VALUES (?,?,?,?,?,?)`)
-    .run(uid("m"), sid, turn, role, JSON.stringify(content), Date.now());
+    .run(id, sid, turn, role, JSON.stringify(content), Date.now());
+  return id;
 }
 
 /**
@@ -337,111 +471,705 @@ export function saveMessageOnce(
   return result.changes > 0;
 }
 
-export function getMessages(db: DatabaseSyncInstance, sid: string, limit?: number): any[] {
-  if (limit) {
-    return db.prepare("SELECT * FROM gm_messages WHERE session_id=? ORDER BY turn_index DESC LIMIT ?")
-      .all(sid, limit) as any[];
-  }
-  return db.prepare("SELECT * FROM gm_messages WHERE session_id=? ORDER BY turn_index")
-    .all(sid) as any[];
-}
-
-export function getUnextracted(db: DatabaseSyncInstance, sid: string, limit: number): any[] {
-  return db.prepare("SELECT * FROM gm_messages WHERE session_id=? AND extracted=0 ORDER BY turn_index LIMIT ?")
-    .all(sid, limit) as any[];
-}
-
-export function markExtracted(db: DatabaseSyncInstance, sid: string, upToTurn: number): void {
-  db.prepare("UPDATE gm_messages SET extracted=1 WHERE session_id=? AND turn_index<=?")
-    .run(sid, upToTurn);
+/**
+ * Read the oldest pending completed turn as one semantic extraction job.
+ * No character/message batching is involved: the DSH adapter persists exactly
+ * one user question and one final assistant answer for each completed turn.
+ */
+export function getNextUnextractedTurn(
+  db: DatabaseSyncInstance,
+  sid: string,
+  completedTurn: number,
+): any[] {
+  const next = db.prepare(`
+    SELECT MIN(turn_index) AS turn_index
+    FROM gm_messages
+    WHERE session_id=? AND extracted=0 AND extraction_state='pending'
+      AND turn_index<=?
+  `).get(sid, completedTurn) as { turn_index?: number | null } | undefined;
+  if (next?.turn_index === null || next?.turn_index === undefined) return [];
+  return db.prepare(`
+    SELECT * FROM gm_messages
+    WHERE session_id=? AND turn_index=? AND extracted=0 AND extraction_state='pending'
+    ORDER BY rowid
+  `).all(sid, Number(next.turn_index)) as any[];
 }
 
 /**
- * 溯源选拉：按 session 拉取 user/assistant 核心对话（跳过 tool/toolResult）
- * 用于 assemble 时补充三元组的原始上下文
- *
- * @param nearTime  优先取时间最接近的消息（节点的 updatedAt）
- * @param maxChars  总字符上限
+ * Read one exact completed turn. Live DSH extraction uses this path so an
+ * unrelated legacy backlog can never be pulled into a foreground session.
+ * Historical retries deliberately use getNextUnextractedTurn instead.
  */
-export function getEpisodicMessages(
+export function getUnextractedTurn(
   db: DatabaseSyncInstance,
-  sessionIds: string[],
-  nearTime: number,
-  maxChars: number = 1500,
-): Array<{ sessionId: string; turnIndex: number; role: string; text: string; createdAt: number }> {
-  if (!sessionIds.length) return [];
+  sid: string,
+  turn: number,
+): any[] {
+  if (!Number.isInteger(turn) || turn < 1) return [];
+  return db.prepare(`
+    SELECT * FROM gm_messages
+    WHERE session_id=? AND turn_index=? AND extracted=0 AND extraction_state='pending'
+    ORDER BY rowid
+  `).all(sid, turn) as any[];
+}
 
-  const results: Array<{ sessionId: string; turnIndex: number; role: string; text: string; createdAt: number }> = [];
-  let usedChars = 0;
+/** Persist the highest DSH/OpenClaw turn known to be complete. */
+export function markExtractionTurnCompleted(
+  db: DatabaseSyncInstance,
+  sid: string,
+  completedTurn: number,
+): void {
+  if (!Number.isFinite(completedTurn)) return;
+  db.prepare(`
+    INSERT INTO gm_extraction_sessions (session_id, completed_turn, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET
+      completed_turn=MAX(completed_turn, excluded.completed_turn),
+      updated_at=excluded.updated_at
+  `).run(sid, completedTurn, Date.now());
+}
 
-  // 按 session 逐个拉，优先最近的 session
-  for (const sid of sessionIds) {
-    if (usedChars >= maxChars) break;
+export function getExtractionCompletedTurn(
+  db: DatabaseSyncInstance,
+  sid: string,
+): number | null {
+  const row = db.prepare(`
+    SELECT completed_turn FROM gm_extraction_sessions WHERE session_id=?
+  `).get(sid) as { completed_turn?: number } | undefined;
+  return row?.completed_turn === undefined ? null : Number(row.completed_turn);
+}
 
-    // 只拉 user 和 assistant，按时间距离 nearTime 最近排序
-    const rows = db.prepare(`
-      SELECT turn_index, role, content, created_at FROM gm_messages
-      WHERE session_id = ? AND role IN ('user', 'assistant')
-      ORDER BY ABS(created_at - ?) ASC
-      LIMIT 6
-    `).all(sid, nearTime) as any[];
+function messageIdPlaceholders(ids: string[]): string {
+  return ids.map(() => "?").join(",");
+}
 
-    for (const r of rows) {
-      if (usedChars >= maxChars) break;
-      let text = "";
-      try {
-        const parsed = JSON.parse(r.content);
-        text = extractStoredText(parsed);
-      } catch {
-        text = String(r.content).slice(0, 300);
-      }
+/** Mark only the source rows actually accepted by the extractor. */
+export function markMessagesExtracted(db: DatabaseSyncInstance, ids: string[]): number {
+  if (!ids.length) return 0;
+  const result = db.prepare(`
+    UPDATE gm_messages
+    SET extracted=1, extraction_state='succeeded', extraction_error=NULL,
+        extraction_next_retry_at=NULL, extraction_updated_at=?
+    WHERE id IN (${messageIdPlaceholders(ids)}) AND extraction_state='pending'
+  `).run(Date.now(), ...ids);
+  return Number(result.changes);
+}
 
-      if (!text.trim()) continue;
-      const truncated = text.slice(0, Math.min(text.length, maxChars - usedChars));
-      results.push({
-        sessionId: sid,
-        turnIndex: r.turn_index,
-        role: r.role,
-        text: truncated,
-        createdAt: r.created_at,
-      });
-      usedChars += truncated.length;
-    }
+export function recordExtractionFailure(
+  db: DatabaseSyncInstance,
+  ids: string[],
+  error: string,
+  nextRetryAt: number | null,
+): number {
+  if (!ids.length) return 0;
+  const result = db.prepare(`
+    UPDATE gm_messages
+    SET extraction_attempts=extraction_attempts+1, extraction_error=?,
+        extraction_next_retry_at=?, extraction_updated_at=?
+    WHERE id IN (${messageIdPlaceholders(ids)}) AND extraction_state='pending'
+  `).run(error.slice(0, 2_000), nextRetryAt, Date.now(), ...ids);
+  return Number(result.changes);
+}
+
+/** A poison message remains durable and explicitly unlearned until retried. */
+export function quarantineMessages(db: DatabaseSyncInstance, ids: string[], error: string): number {
+  if (!ids.length) return 0;
+  const result = db.prepare(`
+    UPDATE gm_messages
+    SET extracted=0, extraction_state='quarantined', extraction_error=?,
+        extraction_next_retry_at=NULL, extraction_updated_at=?
+    WHERE id IN (${messageIdPlaceholders(ids)}) AND extraction_state='pending'
+  `).run(error.slice(0, 2_000), Date.now(), ...ids);
+  return Number(result.changes);
+}
+
+export function requeueQuarantined(db: DatabaseSyncInstance, sid?: string): number {
+  const result = sid
+    ? db.prepare(`
+        UPDATE gm_messages
+        SET extraction_state='pending', extraction_attempts=0, extraction_error=NULL,
+            extraction_next_retry_at=NULL, extraction_updated_at=?
+        WHERE extraction_state='quarantined' AND session_id=?
+      `).run(Date.now(), sid)
+    : db.prepare(`
+        UPDATE gm_messages
+        SET extraction_state='pending', extraction_attempts=0, extraction_error=NULL,
+            extraction_next_retry_at=NULL, extraction_updated_at=?
+        WHERE extraction_state='quarantined'
+      `).run(Date.now());
+  return Number(result.changes);
+}
+
+export function getExtractionStats(db: DatabaseSyncInstance): {
+  pending: number;
+  succeeded: number;
+  quarantined: number;
+} {
+  const rows = db.prepare(`
+    SELECT extraction_state AS state, COUNT(*) AS count
+    FROM gm_messages GROUP BY extraction_state
+  `).all() as Array<{ state: string; count: number }>;
+  const result = { pending: 0, succeeded: 0, quarantined: 0 };
+  for (const row of rows) {
+    if (row.state in result) (result as any)[row.state] = Number(row.count);
   }
+  return result;
+}
 
+export function getPendingSessionIds(db: DatabaseSyncInstance, limit: number = 100): string[] {
+  return (db.prepare(`
+    SELECT session_id, MIN(turn_index) AS first_turn
+    FROM gm_messages
+    WHERE extracted=0 AND extraction_state='pending'
+      AND (extraction_next_retry_at IS NULL OR extraction_next_retry_at<=?)
+    GROUP BY session_id ORDER BY first_turn, session_id LIMIT ?
+  `).all(Date.now(), limit) as Array<{ session_id: string }>).map(row => row.session_id);
+}
+
+/** Read exact durable message evidence for one node, in source order. */
+export function getNodeSourceMessages(
+  db: DatabaseSyncInstance,
+  nodeId: string,
+  excludedMessageIds: ReadonlySet<string> = new Set(),
+): Array<{ sessionId: string; turnIndex: number; role: string; text: string; createdAt: number }> {
+  const rows = db.prepare(`
+    SELECT s.message_id, s.session_id, s.turn_index, m.role, m.content, m.created_at
+    FROM gm_node_sources s
+    JOIN gm_messages m ON m.id=s.message_id
+    WHERE s.node_id=?
+    ORDER BY s.turn_index, m.created_at
+  `).all(nodeId) as any[];
+  const results: Array<{ sessionId: string; turnIndex: number; role: string; text: string; createdAt: number }> = [];
+  for (const row of rows) {
+    if (excludedMessageIds.has(String(row.message_id))) continue;
+    let text = "";
+    try {
+      text = extractStoredText(JSON.parse(row.content));
+    } catch {
+      text = String(row.content);
+    }
+    if (!text.trim()) continue;
+    results.push({
+      sessionId: row.session_id,
+      turnIndex: row.turn_index,
+      role: row.role,
+      text,
+      createdAt: row.created_at,
+    });
+  }
   return results;
 }
 
 /** Read text from legacy OpenClaw payloads and DSH block-based messages. */
-function extractStoredText(value: unknown): string {
+export function extractStoredText(value: unknown): string {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) return value.map(extractStoredText).filter(Boolean).join("\n");
   if (!value || typeof value !== "object") return "";
   const record = value as Record<string, unknown>;
-  if ((record.type === "text" || record.type === "reasoning") && typeof record.text === "string") {
+  if (record.type === "text" && typeof record.text === "string") {
     return record.text;
   }
+  // Typed non-text blocks are reasoning/tool protocol data, not user-visible
+  // evidence. Do not recurse into their payloads.
+  if (typeof record.type === "string") return "";
   if (record.content !== undefined) return extractStoredText(record.content);
   if (record.message !== undefined) return extractStoredText(record.message);
   return "";
 }
 
-// ─── 信号 CRUD ───────────────────────────────────────────────
+// ─── 分层轮次记忆 ──────────────────────────────────────────
 
-export function saveSignal(db: DatabaseSyncInstance, sid: string, s: Signal): void {
-  db.prepare(`INSERT INTO gm_signals (id, session_id, turn_index, type, data, created_at)
-    VALUES (?,?,?,?,?,?)`)
-    .run(uid("s"), sid, s.turnIndex, s.type, JSON.stringify(s.data), Date.now());
+function toTurnMemory(db: DatabaseSyncInstance, row: any): GmTurnMemory {
+  const sources = (db.prepare(`
+    SELECT message_id, turn_index
+    FROM gm_turn_memory_sources
+    WHERE memory_id=?
+    ORDER BY source_order
+  `).all(row.id) as any[]).map(source => ({
+    messageId: String(source.message_id),
+    turnIndex: Number(source.turn_index),
+  }));
+  return {
+    id: String(row.id),
+    sessionId: String(row.session_id),
+    summary: String(row.summary),
+    outcome: row.outcome as TurnOutcome,
+    sources,
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
 }
 
-export function pendingSignals(db: DatabaseSyncInstance, sid: string): Signal[] {
-  return (db.prepare("SELECT * FROM gm_signals WHERE session_id=? AND processed=0 ORDER BY turn_index")
-    .all(sid) as any[])
-    .map(r => ({ type: r.type, turnIndex: r.turn_index, data: JSON.parse(r.data) }));
+function turnMemoryId(sessionId: string, sources: Array<{ messageId: string }>): string {
+  const sourceKey = sources.map(source => source.messageId).sort().join("\0");
+  const digest = createHash("sha256").update(`${sessionId}\0${sourceKey}`).digest("hex");
+  return `tm-${digest.slice(0, 32)}`;
 }
 
-export function markSignalsDone(db: DatabaseSyncInstance, sid: string): void {
-  db.prepare("UPDATE gm_signals SET processed=1 WHERE session_id=?").run(sid);
+function normalizedNavigationTerm(text: string): string {
+  return text.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+}
+
+function navigationTermId(normalized: string): string {
+  return `nt-${createHash("sha256").update(normalized).digest("hex").slice(0, 32)}`;
+}
+
+function navigationTripleId(memoryId: string, subjectId: string, predicate: string, objectId: string): string {
+  const key = `${memoryId}\0${subjectId}\0${predicate.trim()}\0${objectId}`;
+  return `tr-${createHash("sha256").update(key).digest("hex").slice(0, 32)}`;
+}
+
+/** Store one compact index while retaining exact message provenance. */
+export function upsertTurnMemory(
+  db: DatabaseSyncInstance,
+  input: {
+    sessionId: string;
+    summary: string;
+    outcome: TurnOutcome;
+    sources: Array<{ messageId: string; turnIndex: number }>;
+  },
+): GmTurnMemory {
+  if (!input.sources.length) throw new Error("turn memory requires at least one durable source message");
+  const id = turnMemoryId(input.sessionId, input.sources);
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO gm_turn_memories (id, session_id, summary, outcome, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      summary=excluded.summary,
+      outcome=excluded.outcome,
+      updated_at=excluded.updated_at
+  `).run(id, input.sessionId, input.summary, input.outcome, now, now);
+  const link = db.prepare(`
+    INSERT OR IGNORE INTO gm_turn_memory_sources (memory_id, message_id, turn_index, source_order)
+    SELECT ?, id, turn_index, ? FROM gm_messages WHERE id=?
+  `);
+  input.sources.forEach((source, index) => link.run(id, index, source.messageId));
+  const row = db.prepare("SELECT * FROM gm_turn_memories WHERE id=?").get(id);
+  return toTurnMemory(db, row);
+}
+
+export function getTurnMemoriesByIds(
+  db: DatabaseSyncInstance,
+  ids: string[],
+): GmTurnMemory[] {
+  const memories: GmTurnMemory[] = [];
+  const statement = db.prepare("SELECT * FROM gm_turn_memories WHERE id=?");
+  for (const id of ids) {
+    const row = statement.get(id);
+    if (row) memories.push(toTurnMemory(db, row));
+  }
+  return memories;
+}
+
+/**
+ * Recent summaries are reference-resolution context, not extraction evidence.
+ * `beforeTurn` prevents the current Q/A pair from feeding itself on retries.
+ */
+export function getRecentTurnMemoriesBySession(
+  db: DatabaseSyncInstance,
+  sessionId: string,
+  beforeTurn: number,
+  limit: number,
+): GmTurnMemory[] {
+  if (!Number.isFinite(beforeTurn) || limit <= 0) return [];
+  const rows = db.prepare(`
+    SELECT tm.*
+    FROM gm_turn_memories tm
+    WHERE tm.session_id=?
+      AND NOT EXISTS (
+        SELECT 1 FROM gm_turn_memory_sources source
+        WHERE source.memory_id=tm.id AND source.turn_index>=?
+      )
+    ORDER BY (
+      SELECT MAX(source.turn_index)
+      FROM gm_turn_memory_sources source
+      WHERE source.memory_id=tm.id
+    ) DESC, tm.updated_at DESC, tm.id
+    LIMIT ?
+  `).all(sessionId, beforeTurn, limit) as any[];
+  return rows.map(row => toTurnMemory(db, row)).reverse();
+}
+
+function upsertNavigationTerm(db: DatabaseSyncInstance, text: string): string {
+  const display = text.trim().replace(/\s+/g, " ");
+  const normalized = normalizedNavigationTerm(display);
+  if (!normalized) throw new TypeError("navigation term must not be empty");
+  const id = navigationTermId(normalized);
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO gm_navigation_terms
+      (id, normalized, display_text, community_id, created_at, updated_at)
+    VALUES (?, ?, ?, NULL, ?, ?)
+    ON CONFLICT(normalized) DO UPDATE SET
+      display_text=excluded.display_text,
+      updated_at=excluded.updated_at
+  `).run(id, normalized, display, now, now);
+  return id;
+}
+
+/**
+ * Atomically replace the navigation generated for one compact turn. The
+ * model's subject/predicate/object values are stored verbatim after whitespace
+ * normalization; the host applies no semantic gate or inferred relation.
+ */
+export function replaceNavigationTriples(
+  db: DatabaseSyncInstance,
+  memory: GmTurnMemory,
+  triples: Array<{ subject: string; predicate: string; object: string }>,
+): void {
+  db.exec("BEGIN");
+  try {
+    db.prepare("DELETE FROM gm_navigation_triples WHERE memory_id=?").run(memory.id);
+    const insert = db.prepare(`
+      INSERT OR IGNORE INTO gm_navigation_triples
+        (id, memory_id, session_id, subject_id, predicate, object_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const triple of triples) {
+      const subjectId = upsertNavigationTerm(db, triple.subject);
+      const objectId = upsertNavigationTerm(db, triple.object);
+      const predicate = triple.predicate.trim().replace(/\s+/g, " ");
+      if (!predicate) throw new TypeError("navigation predicate must not be empty");
+      insert.run(
+        navigationTripleId(memory.id, subjectId, predicate, objectId),
+        memory.id,
+        memory.sessionId,
+        subjectId,
+        predicate,
+        objectId,
+        Date.now(),
+      );
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+/** Return navigation in the same memory-relevance order supplied by recall. */
+export function getNavigationTriplesForMemories(
+  db: DatabaseSyncInstance,
+  memoryIds: string[],
+  termScores?: ReadonlyMap<string, number>,
+): GmNavigationTriple[] {
+  if (!memoryIds.length) return [];
+  const query = db.prepare(`
+    SELECT triple.*, subject.display_text AS subject,
+           subject.community_id AS subject_community_id,
+           object.display_text AS object,
+           object.community_id AS object_community_id
+    FROM gm_navigation_triples triple
+    JOIN gm_navigation_terms subject ON subject.id=triple.subject_id
+    JOIN gm_navigation_terms object ON object.id=triple.object_id
+    WHERE triple.memory_id=?
+    ORDER BY triple.created_at, triple.id
+  `);
+  return memoryIds.flatMap(memoryId => {
+    const triples = (query.all(memoryId) as any[]).map(row => ({
+      id: String(row.id),
+      memoryId: String(row.memory_id),
+      sessionId: String(row.session_id),
+      subjectId: String(row.subject_id),
+      subject: String(row.subject),
+      predicate: String(row.predicate),
+      objectId: String(row.object_id),
+      object: String(row.object),
+      subjectCommunityId: row.subject_community_id ? String(row.subject_community_id) : null,
+      objectCommunityId: row.object_community_id ? String(row.object_community_id) : null,
+      createdAt: Number(row.created_at),
+    } satisfies GmNavigationTriple));
+    if (!termScores?.size || triples.length < 2) return triples;
+
+    // A selected source memory may contain many facts. Send only the edge(s)
+    // that best explain this query-time graph route; the complete original Q/A
+    // remains the factual evidence and is never shortened here.
+    const relevance = triples.map(triple => {
+      const subject = termScores.get(triple.subjectId) ?? 0;
+      const object = termScores.get(triple.objectId) ?? 0;
+      return {
+        triple,
+        connected: subject > 0 && object > 0,
+        score: subject > 0 && object > 0
+          ? Math.sqrt(subject * object)
+          : Math.max(subject, object),
+      };
+    });
+    const connected = relevance.some(candidate => candidate.connected);
+    const eligible = connected
+      ? relevance.filter(candidate => candidate.connected)
+      : relevance;
+    const best = Math.max(...eligible.map(candidate => candidate.score));
+    return eligible
+      .filter(candidate => candidate.score === best)
+      .map(candidate => candidate.triple);
+  });
+}
+
+/**
+ * Resolve query seeds from the compact SPO index without another model call.
+ * Summary vectors handle paraphrases; this path deliberately handles literal
+ * entity/attribute mentions and preserves the graph's exact vocabulary.
+ */
+export function findNavigationSeedTermIds(
+  db: DatabaseSyncInstance,
+  query: string,
+  memoryIds: string[] = [],
+): string[] {
+  const normalizedQuery = normalizedNavigationTerm(query);
+  const seeds: string[] = [];
+  const seen = new Set<string>();
+  const append = (id: string) => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    seeds.push(id);
+  };
+
+  if (normalizedQuery) {
+    const rows = db.prepare(
+      "SELECT id, normalized FROM gm_navigation_terms ORDER BY updated_at DESC, id",
+    ).all() as Array<{ id: string; normalized: string }>;
+    const literalMatches = rows.filter(row =>
+      normalizedQuery.includes(row.normalized) || row.normalized.includes(normalizedQuery)
+    );
+    // Prefer the most specific stored phrase. If both "ReleaseOrchestrator"
+    // and "ReleaseOrchestrator addService" match, the shorter hub must not
+    // expand unrelated memories. Independent terms remain separate seeds.
+    for (const row of literalMatches) {
+      const isContainedByMoreSpecificMatch = literalMatches.some(other =>
+        other.id !== row.id
+        && other.normalized.length > row.normalized.length
+        && other.normalized.includes(row.normalized)
+      );
+      if (!isContainedByMoreSpecificMatch) append(String(row.id));
+    }
+  }
+
+  // Literal entity/attribute evidence is the strongest routing signal. Only
+  // fall back to endpoints from semantically matched summaries when the user
+  // phrased the question differently from every stored navigation term.
+  if (!seeds.length && memoryIds.length) {
+    const statement = db.prepare(`
+      SELECT subject_id, object_id
+      FROM gm_navigation_triples
+      WHERE memory_id=?
+      ORDER BY created_at, id
+    `);
+    for (const memoryId of memoryIds) {
+      for (const row of statement.all(memoryId) as any[]) {
+        append(String(row.subject_id));
+        append(String(row.object_id));
+      }
+    }
+  }
+  return seeds;
+}
+
+/**
+ * A community is a local candidate scope, never prompt content by itself.
+ * When fresh terms have not been assigned yet, the complete compact graph is
+ * still cheap enough for query-time PPR and avoids a false negative.
+ */
+export function navigationCandidateTermIds(
+  db: DatabaseSyncInstance,
+  seedIds: string[],
+): string[] {
+  if (!seedIds.length) return [];
+  const communityStatement = db.prepare(
+    "SELECT community_id FROM gm_navigation_terms WHERE id=?",
+  );
+  const communities = new Set<string>();
+  for (const seedId of seedIds) {
+    const row = communityStatement.get(seedId) as { community_id?: string | null } | undefined;
+    if (row?.community_id) communities.add(String(row.community_id));
+  }
+
+  if (!communities.size) {
+    return (db.prepare("SELECT id FROM gm_navigation_terms ORDER BY id").all() as any[])
+      .map(row => String(row.id));
+  }
+
+  const candidates = new Set(seedIds);
+  const statement = db.prepare(
+    "SELECT id FROM gm_navigation_terms WHERE community_id=? ORDER BY id",
+  );
+  for (const community of communities) {
+    for (const row of statement.all(community) as any[]) candidates.add(String(row.id));
+  }
+  return Array.from(candidates);
+}
+
+/** Map query-local graph relevance back to the exact dialogue evidence. */
+export function rankTurnMemoryIdsByNavigation(
+  db: DatabaseSyncInstance,
+  termScores: ReadonlyMap<string, number>,
+): string[] {
+  if (!termScores.size) return [];
+  const scores = new Map<string, number>();
+  const rows = db.prepare(`
+    SELECT memory_id, subject_id, object_id
+    FROM gm_navigation_triples
+    ORDER BY created_at, id
+  `).all() as Array<{ memory_id: string; subject_id: string; object_id: string }>;
+  for (const row of rows) {
+    // Max endpoint relevance prevents a verbose turn with many triples from
+    // outranking a concise turn solely because it emitted more graph edges.
+    const score = Math.max(
+      termScores.get(String(row.subject_id)) ?? 0,
+      termScores.get(String(row.object_id)) ?? 0,
+    );
+    const memoryId = String(row.memory_id);
+    if (score > (scores.get(memoryId) ?? 0)) scores.set(memoryId, score);
+  }
+  return Array.from(scores)
+    .filter(([, score]) => score > 0)
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([memoryId]) => memoryId);
+}
+
+export function updateNavigationCommunities(
+  db: DatabaseSyncInstance,
+  labels: Map<string, string>,
+): void {
+  const statement = db.prepare("UPDATE gm_navigation_terms SET community_id=? WHERE id=?");
+  db.exec("BEGIN");
+  try {
+    for (const [id, communityId] of labels) statement.run(communityId, id);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+export function hasTurnMemories(db: DatabaseSyncInstance): boolean {
+  return Number((db.prepare("SELECT COUNT(*) AS count FROM gm_turn_memories").get() as any)?.count ?? 0) > 0;
+}
+
+/** Lexical fallback for hosts without a working embedding provider. */
+export function searchTurnMemories(
+  db: DatabaseSyncInstance,
+  query: string,
+  limit: number,
+): GmTurnMemory[] {
+  const phrase = query.trim().replace(/\s+/g, " ");
+  if (!phrase) return [];
+  // Semantic search handles paraphrases. The lexical fallback deliberately
+  // requires the complete phrase; OR-ing common words such as "is"/"the"
+  // turns a fallback into another source of unrelated prompt injection.
+  const rows = db.prepare(`
+    SELECT * FROM gm_turn_memories
+    WHERE summary LIKE ?
+    ORDER BY updated_at DESC
+    LIMIT ?
+  `).all(`%${phrase}%`, limit) as any[];
+  return rows.map(row => toTurnMemory(db, row));
+}
+
+export function saveTurnVector(
+  db: DatabaseSyncInstance,
+  memoryId: string,
+  content: string,
+  vec: number[],
+): void {
+  const hash = createHash("md5").update(content).digest("hex");
+  db.prepare(`
+    INSERT INTO gm_turn_vectors (memory_id, content_hash, embedding)
+    VALUES (?, ?, ?)
+    ON CONFLICT(memory_id) DO UPDATE SET
+      content_hash=excluded.content_hash,
+      embedding=excluded.embedding
+  `).run(memoryId, hash, embeddingBlob(vec));
+}
+
+export function getTurnVectorHash(db: DatabaseSyncInstance, memoryId: string): string | null {
+  return (db.prepare("SELECT content_hash FROM gm_turn_vectors WHERE memory_id=?").get(memoryId) as any)
+    ?.content_hash ?? null;
+}
+
+export type ScoredTurnMemory = { memory: GmTurnMemory; score: number };
+
+export function turnMemoryVectorSearchWithScore(
+  db: DatabaseSyncInstance,
+  queryVec: number[],
+  limit: number,
+  minScore: number,
+): ScoredTurnMemory[] {
+  const rows = db.prepare(`
+    SELECT v.embedding, m.*
+    FROM gm_turn_vectors v
+    JOIN gm_turn_memories m ON m.id=v.memory_id
+  `).all() as any[];
+  if (!rows.length) return [];
+  const query = new Float32Array(queryVec);
+  const queryNorm = vectorNorm(query);
+  if (queryNorm === 0) return [];
+  return rows.map(row => ({
+    memory: toTurnMemory(db, row),
+    score: cosineSimilarity(query, queryNorm, row.embedding as Uint8Array),
+  })).filter(result => result.score >= minScore)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, limit);
+}
+
+/** Resolve graph navigation nodes whose evidence belongs to matched turns. */
+export function nodesForTurnMemories(
+  db: DatabaseSyncInstance,
+  memoryIds: string[],
+  limit: number,
+): GmNode[] {
+  const results: GmNode[] = [];
+  const seen = new Set<string>();
+  const statement = db.prepare(`
+    SELECT DISTINCT n.*
+    FROM gm_turn_memory_sources memory_source
+    JOIN gm_node_sources node_source ON node_source.message_id=memory_source.message_id
+    JOIN gm_nodes n ON n.id=node_source.node_id
+    WHERE memory_source.memory_id=? AND n.status='active'
+    ORDER BY n.updated_at DESC
+  `);
+  for (const memoryId of memoryIds) {
+    for (const row of statement.all(memoryId) as any[]) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      results.push(toNode(row));
+      if (results.length >= limit) return results;
+    }
+  }
+  return results;
+}
+
+/** Read exact Q/A evidence for matched compact memories. */
+export function getTurnMemorySourceMessages(
+  db: DatabaseSyncInstance,
+  memoryId: string,
+  excludedMessageIds: ReadonlySet<string> = new Set(),
+): Array<{ sessionId: string; turnIndex: number; role: string; text: string; createdAt: number }> {
+  const rows = db.prepare(`
+    SELECT m.id, tm.session_id, source.turn_index, m.role, m.content, m.created_at
+    FROM gm_turn_memory_sources source
+    JOIN gm_turn_memories tm ON tm.id=source.memory_id
+    JOIN gm_messages m ON m.id=source.message_id
+    WHERE source.memory_id=?
+    ORDER BY source.source_order
+  `).all(memoryId) as any[];
+  return rows.flatMap(row => {
+    if (excludedMessageIds.has(String(row.id))) return [];
+    let text = "";
+    try {
+      text = extractStoredText(JSON.parse(row.content));
+    } catch {
+      text = String(row.content);
+    }
+    return text.trim() ? [{
+      sessionId: String(row.session_id),
+      turnIndex: Number(row.turn_index),
+      role: String(row.role),
+      text,
+      createdAt: Number(row.created_at),
+    }] : [];
+  });
 }
 
 // ─── 统计 ────────────────────────────────────────────────────
@@ -452,6 +1180,10 @@ export function getStats(db: DatabaseSyncInstance): {
   totalEdges: number;
   byEdgeType: Record<string, number>;
   communities: number;
+  turnMemories: number;
+  navigationTerms: number;
+  navigationTriples: number;
+  navigationCommunities: number;
 } {
   const totalNodes = (db.prepare("SELECT COUNT(*) as c FROM gm_nodes WHERE status='active'").get() as any).c;
   const byType: Record<string, number> = {};
@@ -466,18 +1198,32 @@ export function getStats(db: DatabaseSyncInstance): {
   const communities = (db.prepare(
     "SELECT COUNT(DISTINCT community_id) as c FROM gm_nodes WHERE status='active' AND community_id IS NOT NULL"
   ).get() as any).c;
-  return { totalNodes, byType, totalEdges, byEdgeType, communities };
+  const turnMemories = Number((db.prepare("SELECT COUNT(*) AS c FROM gm_turn_memories").get() as any).c);
+  const navigationTerms = Number((db.prepare("SELECT COUNT(*) AS c FROM gm_navigation_terms").get() as any).c);
+  const navigationTriples = Number((db.prepare("SELECT COUNT(*) AS c FROM gm_navigation_triples").get() as any).c);
+  const navigationCommunities = Number((db.prepare(
+    "SELECT COUNT(DISTINCT community_id) AS c FROM gm_navigation_terms WHERE community_id IS NOT NULL",
+  ).get() as any).c);
+  return {
+    totalNodes,
+    byType,
+    totalEdges,
+    byEdgeType,
+    communities,
+    turnMemories,
+    navigationTerms,
+    navigationTriples,
+    navigationCommunities,
+  };
 }
 
 // ─── 向量存储 + 搜索 ────────────────────────────────────────
 
 export function saveVector(db: DatabaseSyncInstance, nodeId: string, content: string, vec: number[]): void {
   const hash = createHash("md5").update(content).digest("hex");
-  const f32 = new Float32Array(vec);
-  const blob = new Uint8Array(f32.buffer, f32.byteOffset, f32.byteLength);
   db.prepare(`INSERT INTO gm_vectors (node_id, content_hash, embedding) VALUES (?,?,?)
     ON CONFLICT(node_id) DO UPDATE SET content_hash=excluded.content_hash, embedding=excluded.embedding`)
-    .run(nodeId, hash, blob);
+    .run(nodeId, hash, embeddingBlob(vec));
 }
 
 export function getVectorHash(db: DatabaseSyncInstance, nodeId: string): string | null {
@@ -491,55 +1237,45 @@ export function getVectorStats(db: DatabaseSyncInstance): { count: number; dimen
   return { count, dimensions };
 }
 
-/** 获取所有向量（供去重/聚类用） */
-export function getAllVectors(db: DatabaseSyncInstance): Array<{ nodeId: string; embedding: Float32Array }> {
-  const rows = db.prepare(`
-    SELECT v.node_id, v.embedding FROM gm_vectors v
-    JOIN gm_nodes n ON n.id = v.node_id WHERE n.status = 'active'
-  `).all() as any[];
-  return rows.map(r => {
-    const raw = r.embedding as Uint8Array;
-    return {
-      nodeId: r.node_id,
-      embedding: new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4),
-    };
-  });
-}
-
 export type ScoredNode = { node: GmNode; score: number };
 
-export function vectorSearchWithScore(db: DatabaseSyncInstance, queryVec: number[], limit: number, minScore = 0.35): ScoredNode[] {
+export function vectorSearchWithScore(
+  db: DatabaseSyncInstance,
+  queryVec: number[],
+  limit: number,
+  minScore?: number,
+  withoutTurnMemory = false,
+): ScoredNode[] {
   const rows = db.prepare(`
     SELECT v.node_id, v.embedding, n.*
     FROM gm_vectors v JOIN gm_nodes n ON n.id = v.node_id
     WHERE n.status = 'active'
+      ${withoutTurnMemory ? `AND NOT EXISTS (
+        SELECT 1 FROM gm_node_sources node_source
+        JOIN gm_turn_memory_sources memory_source
+          ON memory_source.message_id=node_source.message_id
+        WHERE node_source.node_id=n.id
+      )` : ""}
   `).all() as any[];
 
   if (!rows.length) return [];
 
   const q = new Float32Array(queryVec);
-  const qNorm = Math.sqrt(q.reduce((s, x) => s + x * x, 0));
+  const qNorm = vectorNorm(q);
   if (qNorm === 0) return [];
 
   return rows
-    .map(row => {
-      const raw = row.embedding as Uint8Array;
-      const v = new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
-      let dot = 0, vNorm = 0;
-      if (v.length !== q.length) return { score: Number.NEGATIVE_INFINITY, node: toNode(row) };
-      for (let i = 0; i < q.length; i++) {
-        dot += v[i] * q[i];
-        vNorm += v[i] * v[i];
-      }
-      return { score: dot / (Math.sqrt(vNorm) * qNorm + 1e-9), node: toNode(row) };
-    })
-    .filter(s => s.score > minScore)
+    .map(row => ({
+      score: cosineSimilarity(q, qNorm, row.embedding as Uint8Array),
+      node: toNode(row),
+    }))
+    .filter(s => minScore === undefined || s.score >= minScore)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
 }
 
 /** 兼容旧接口 */
-export function vectorSearch(db: DatabaseSyncInstance, queryVec: number[], limit: number, minScore = 0.35): GmNode[] {
+export function vectorSearch(db: DatabaseSyncInstance, queryVec: number[], limit: number, minScore?: number): GmNode[] {
   return vectorSearchWithScore(db, queryVec, limit, minScore).map(s => s.node);
 }
 
@@ -576,166 +1312,4 @@ export function communityRepresentatives(db: DatabaseSyncInstance, perCommunity 
     result.push(...nodes);
   }
   return result;
-}
-
-// ─── 社区描述 CRUD ──────────────────────────────────────────
-
-export interface CommunitySummary {
-  id: string;
-  summary: string;
-  nodeCount: number;
-  memberSignature: string | null;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export function upsertCommunitySummary(
-  db: DatabaseSyncInstance,
-  id: string,
-  summary: string,
-  nodeCount: number,
-  embedding?: number[] | Uint8Array,
-  memberSignature?: string,
-): void {
-  const now = Date.now();
-  const blob = embedding
-    ? embedding instanceof Uint8Array
-      ? embedding
-      : new Uint8Array(new Float32Array(embedding).buffer)
-    : null;
-  const ex = db.prepare("SELECT id FROM gm_communities WHERE id=?").get(id) as any;
-  if (ex) {
-    // A summary/member change invalidates the previous embedding. Persist null
-    // when regeneration is unavailable instead of retaining a stale vector.
-    db.prepare("UPDATE gm_communities SET summary=?, node_count=?, embedding=?, member_signature=?, updated_at=? WHERE id=?")
-      .run(summary, nodeCount, blob, memberSignature ?? null, now, id);
-  } else {
-    db.prepare("INSERT INTO gm_communities (id, summary, node_count, embedding, member_signature, created_at, updated_at) VALUES (?,?,?,?,?,?,?)")
-      .run(id, summary, nodeCount, blob, memberSignature ?? null, now, now);
-  }
-}
-
-export function getCommunitySummary(db: DatabaseSyncInstance, id: string): CommunitySummary | null {
-  const r = db.prepare("SELECT * FROM gm_communities WHERE id=?").get(id) as any;
-  if (!r) return null;
-  return {
-    id: r.id,
-    summary: r.summary,
-    nodeCount: r.node_count,
-    memberSignature: r.member_signature ?? null,
-    createdAt: r.created_at,
-    updatedAt: r.updated_at,
-  };
-}
-
-export function getCommunitySummaryBySignature(
-  db: DatabaseSyncInstance,
-  memberSignature: string,
-): (CommunitySummary & { embedding?: Uint8Array }) | null {
-  const r = db.prepare(`
-    SELECT * FROM gm_communities
-    WHERE member_signature=?
-    ORDER BY updated_at DESC
-    LIMIT 1
-  `).get(memberSignature) as any;
-  if (!r) return null;
-  return {
-    id: r.id,
-    summary: r.summary,
-    nodeCount: r.node_count,
-    memberSignature: r.member_signature ?? null,
-    embedding: r.embedding ? (r.embedding as Uint8Array) : undefined,
-    createdAt: r.created_at,
-    updatedAt: r.updated_at,
-  };
-}
-
-export function getAllCommunitySummaries(db: DatabaseSyncInstance): CommunitySummary[] {
-  return (db.prepare("SELECT * FROM gm_communities ORDER BY node_count DESC").all() as any[])
-    .map(r => ({
-      id: r.id,
-      summary: r.summary,
-      nodeCount: r.node_count,
-      memberSignature: r.member_signature ?? null,
-      createdAt: r.created_at,
-      updatedAt: r.updated_at,
-    }));
-}
-
-export type ScoredCommunity = { id: string; summary: string; score: number; nodeCount: number };
-
-/**
- * 社区向量搜索：用 query 向量匹配社区 embedding，返回按相似度排序的社区
- */
-export function communityVectorSearch(db: DatabaseSyncInstance, queryVec: number[], minScore = 0.15): ScoredCommunity[] {
-  const rows = db.prepare(
-    "SELECT id, summary, node_count, embedding FROM gm_communities WHERE embedding IS NOT NULL"
-  ).all() as any[];
-
-  if (!rows.length) return [];
-
-  const q = new Float32Array(queryVec);
-  const qNorm = Math.sqrt(q.reduce((s, x) => s + x * x, 0));
-  if (qNorm === 0) return [];
-
-  return rows
-    .map(r => {
-      const raw = r.embedding as Uint8Array;
-      const v = new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
-      if (v.length !== q.length) {
-        return { id: r.id as string, summary: r.summary as string, score: Number.NEGATIVE_INFINITY, nodeCount: r.node_count as number };
-      }
-      let dot = 0, vNorm = 0;
-      for (let i = 0; i < q.length; i++) {
-        dot += v[i] * q[i];
-        vNorm += v[i] * v[i];
-      }
-      return {
-        id: r.id as string,
-        summary: r.summary as string,
-        score: dot / (Math.sqrt(vNorm) * qNorm + 1e-9),
-        nodeCount: r.node_count as number,
-      };
-    })
-    .filter(s => s.score > minScore)
-    .sort((a, b) => b.score - a.score);
-}
-
-/**
- * 按社区 ID 列表获取成员节点（按时间倒序）
- */
-export function nodesByCommunityIds(db: DatabaseSyncInstance, communityIds: string[], perCommunity = 3): GmNode[] {
-  if (!communityIds.length) return [];
-  const placeholders = communityIds.map(() => "?").join(",");
-  const rows = db.prepare(`
-    SELECT * FROM gm_nodes
-    WHERE community_id IN (${placeholders}) AND status='active'
-    ORDER BY community_id, updated_at DESC
-  `).all(...communityIds) as any[];
-
-  const byCommunity = new Map<string, GmNode[]>();
-  for (const r of rows) {
-    const node = toNode(r);
-    const cid = r.community_id as string;
-    if (!byCommunity.has(cid)) byCommunity.set(cid, []);
-    const list = byCommunity.get(cid)!;
-    if (list.length < perCommunity) list.push(node);
-  }
-
-  const result: GmNode[] = [];
-  for (const cid of communityIds) {
-    const members = byCommunity.get(cid);
-    if (members) result.push(...members);
-  }
-  return result;
-}
-
-/** 清除已不存在的社区描述 */
-export function pruneCommunitySummaries(db: DatabaseSyncInstance): number {
-  const result = db.prepare(`
-    DELETE FROM gm_communities WHERE id NOT IN (
-      SELECT DISTINCT community_id FROM gm_nodes WHERE community_id IS NOT NULL AND status='active'
-    )
-  `).run();
-  return result.changes;
 }

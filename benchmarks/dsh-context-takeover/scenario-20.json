@@ -1,0 +1,25 @@
+{
+  "id": "release-orchestrator-continuous-development-v1",
+  "turns": [
+    {"id":"T01","prompt":"分析轮：用一次并行读取或一条 shell 命令读取 README.md、package.json、src/orchestrator.js、src/index.js、test/orchestrator.test.js，然后运行 npm test。不要修改文件。最终简短记录当前模块、公开 API、测试入口和三个持续约束：Node.js 零运行时依赖、ESM、所有行为有测试。"},
+    {"id":"T02","prompt":"继续当前项目。为 ReleaseOrchestrator 增加配置规范化：project、owner、port、rollbackMinutes；默认 project=ORBIT-21、owner=林澈、port=43127、rollbackMinutes=42。补测试并运行。保持上一轮约束，最后一行 JSON 汇报。"},
+    {"id":"T03","prompt":"只增加 project 校验：必须是非空字符串，否则抛出 code=INVALID_PROJECT。补两个小测试并运行。不要顺带实现其他字段校验。"},
+    {"id":"T04","prompt":"只增加 owner 校验：必须是非空字符串，否则 code=INVALID_OWNER。补测试并运行。"},
+    {"id":"T05","prompt":"只增加 port 校验：必须是1..65535整数，否则 code=INVALID_PORT。补测试并运行。"},
+    {"id":"T06","prompt":"只增加 rollbackMinutes 校验：必须为正整数，否则 code=INVALID_ROLLBACK。补测试并运行。"},
+    {"id":"T07","prompt":"让 addService 支持 dependencies 数组并保存副本；缺失依赖时抛 code=MISSING_DEPENDENCY。补测试并运行。"},
+    {"id":"T08","prompt":"增加 topologicalOrder()，只处理无环服务并返回依赖优先顺序。补一个三服务测试并运行。"},
+    {"id":"T09","prompt":"为 topologicalOrder() 增加循环检测，循环时抛 code=DEPENDENCY_CYCLE。补测试并运行。"},
+    {"id":"T10","prompt":"增加 buildPlan()：按拓扑顺序返回 serviceId、ordinal、project、port；不得修改服务原对象。补测试并运行。"},
+    {"id":"T11","prompt":"正式变更项目配置：当前 owner 改为唐宁，port 改为43129；林澈和43127成为 revoked 值。增加 updateConfig()，审计必须记录 before/after，当前状态不得继续返回旧值。补测试并运行。"},
+    {"id":"T12","prompt":"增加 exportState()，返回 schemaVersion=1、当前 config、services 和 revoked 的深拷贝。补测试并运行。"},
+    {"id":"T13","prompt":"记录并实现故障策略 I-72：当 adapter 报告 latencyMs 超过900时，建议命令必须精确为 gm repair --scope recall --dry-run；实现 diagnoseFailure(error)，返回 incident、thresholdMs、command、batch。当前 batch 为 B-2048。补测试并运行。"},
+    {"id":"T14","prompt":"增加 getAuditLog()，至少记录 addService 和 updateConfig 的递增 sequence、type；返回深拷贝。补测试并运行。"},
+    {"id":"T15","prompt":"增加 dryRun()，返回 plan、config 和 warnings；无服务时 warnings 包含 EMPTY_PLAN，且不得改变状态。补测试并运行。"},
+    {"id":"T16","prompt":"增加 execute(adapter)，按 buildPlan 顺序调用 adapter.release(step)；失败统一抛 code=RELEASE_FAILED。使用假 adapter 补测试并运行。"},
+    {"id":"T17","prompt":"为 execute 增加 retryLimit=1：第一次失败后允许再试一次，记录 attempts；不要加入真实等待。补测试并运行。"},
+    {"id":"T18","prompt":"增加并导出 redactSecrets(value)，递归遮盖 key、token、secret、password 字段。补测试并运行。"},
+    {"id":"T19","prompt":"最后一次正式变更：rollbackMinutes 从42改为36，42成为 revoked 值。更新当前配置、快照、dryRun 和审计测试，确保任何当前配置都不再返回42。运行全部测试。"},
+    {"id":"T20","prompt":"最终交付：运行语法检查与全部测试，修复失败；更新 README 的 API 和示例；根据仓库当前真实状态生成 release-report.json，必须包含 project=ORBIT-21、owner=唐宁、port=43129、rollbackMinutes=36、incident=I-72、batch=B-2048、command、testSummary、revoked=[林澈,43127,42]。不要凭记忆跳过检查，最后只用一行 JSON 汇报最终测试数量和状态。"}
+  ]
+}

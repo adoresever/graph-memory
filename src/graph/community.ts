@@ -11,28 +11,20 @@
  * 原理：每个节点初始自成一个社区，迭代中每个节点采纳邻居中最频繁的社区标签。
  *       收敛后自然形成社区划分。
  *
- * 为什么选 Label Propagation 而不是 Louvain：
- *   - 实现简单（50 行核心逻辑）
- *   - 不需要外部库
- *   - 对小图（< 10000 节点）效果够好
- *   - O(iterations * edges)，几千节点 < 5ms
+ * 为什么选 Label Propagation：
+ *   - 不需要外部依赖，也不需要预先指定社区数量
+ *   - O(iterations * edges)，适合随对话异步更新的小型导航图
+ *   - 社区仅缩小查询候选范围；查询相关性仍由实时 PPR 决定
  *
  * 用途：
  *   - 发现知识域（Docker 相关技能自动聚成一组）
- *   - recall 时可以拉整个社区的节点
- *   - assemble 时同社区节点放一起，上下文更连贯
+ *   - recall 时把社区作为候选范围，不把整个社区注入提示词
+ *   - PPR 选中 memory 后再回溯其原始问答证据
  *   - kg_stats 展示社区分布
  */
 
-import { createHash } from "node:crypto";
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
-import {
-  getCommunitySummary,
-  getCommunitySummaryBySignature,
-  pruneCommunitySummaries,
-  updateCommunities,
-  upsertCommunitySummary,
-} from "../store/store.ts";
+import { type DatabaseSyncInstance } from "../store/sqlite.ts";
+import { updateCommunities, updateNavigationCommunities } from "../store/store.ts";
 
 export interface CommunityResult {
   labels: Map<string, string>;
@@ -46,7 +38,7 @@ export interface CommunityResult {
  *
  * 把有向边当无向边处理（知识关联不分方向）
  */
-export function detectCommunities(db: DatabaseSyncInstance, maxIter = 50): CommunityResult {
+export function detectCommunities(db: DatabaseSyncInstance, maxIter?: number): CommunityResult {
   // 读取活跃节点
   const nodeRows = db.prepare(
     "SELECT id FROM gm_nodes WHERE status='active'"
@@ -60,33 +52,53 @@ export function detectCommunities(db: DatabaseSyncInstance, maxIter = 50): Commu
 
   // 读取边，构建无向邻接表
   const edgeRows = db.prepare("SELECT from_id, to_id FROM gm_edges").all() as any[];
+  const result = propagateLabels(nodeIds, edgeRows, maxIter);
+
+  // 写回数据库
+  updateCommunities(db, result.labels);
+  return result;
+}
+
+/** Build communities on the generic SPO navigation graph. */
+export function detectNavigationCommunities(
+  db: DatabaseSyncInstance,
+  maxIter?: number,
+): CommunityResult {
+  const nodeIds = (db.prepare("SELECT id FROM gm_navigation_terms ORDER BY id").all() as any[])
+    .map(row => String(row.id));
+  if (!nodeIds.length) return { labels: new Map(), communities: new Map(), count: 0 };
+  const edges = db.prepare(
+    "SELECT subject_id AS from_id, object_id AS to_id FROM gm_navigation_triples",
+  ).all() as any[];
+  const result = propagateLabels(nodeIds, edges, maxIter);
+  updateNavigationCommunities(db, result.labels);
+  return result;
+}
+
+function propagateLabels(
+  nodeIds: string[],
+  edgeRows: Array<{ from_id: string; to_id: string }>,
+  maxIter?: number,
+): CommunityResult {
   const nodeSet = new Set(nodeIds);
   const adj = new Map<string, string[]>();
-
   for (const id of nodeIds) adj.set(id, []);
-
-  for (const e of edgeRows) {
-    if (!nodeSet.has(e.from_id) || !nodeSet.has(e.to_id)) continue;
-    adj.get(e.from_id)!.push(e.to_id);
-    adj.get(e.to_id)!.push(e.from_id);
+  for (const edge of edgeRows) {
+    if (!nodeSet.has(edge.from_id) || !nodeSet.has(edge.to_id)) continue;
+    adj.get(edge.from_id)!.push(edge.to_id);
+    adj.get(edge.to_id)!.push(edge.from_id);
   }
 
   // 初始标签：每个节点 = 自己的 ID
   const label = new Map<string, string>();
   for (const id of nodeIds) label.set(id, id);
 
-  // 迭代
-  for (let iter = 0; iter < maxIter; iter++) {
+  // A graph cannot need more propagation passes than its node count. Sorted
+  // traversal makes identical data produce identical community assignments.
+  const iterationLimit = maxIter ?? nodeIds.length;
+  for (let iter = 0; iter < iterationLimit; iter++) {
     let changed = false;
-
-    // 随机打乱遍历顺序（减少震荡）
-    const shuffled = [...nodeIds];
-    for (let i = shuffled.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-    }
-
-    for (const nodeId of shuffled) {
+    for (const nodeId of nodeIds) {
       const neighbors = adj.get(nodeId) || [];
       if (neighbors.length === 0) continue;
 
@@ -142,9 +154,6 @@ export function detectCommunities(db: DatabaseSyncInstance, maxIter = 50): Commu
     finalCommunities.set(newId, members);
   }
 
-  // 写回数据库
-  updateCommunities(db, finalLabels);
-
   return {
     labels: finalLabels,
     communities: finalCommunities,
@@ -153,8 +162,7 @@ export function detectCommunities(db: DatabaseSyncInstance, maxIter = 50): Commu
 }
 
 /**
- * 获取同社区的节点 ID 列表
- * recall 时用：找到种子节点 → 拉同社区的其他节点作为补充
+ * 获取旧概念图中同社区的节点 ID 列表。
  */
 export function getCommunityPeers(db: DatabaseSyncInstance, nodeId: string, limit = 5): string[] {
   const row = db.prepare(
@@ -169,108 +177,4 @@ export function getCommunityPeers(db: DatabaseSyncInstance, nodeId: string, limi
     ORDER BY validated_count DESC, updated_at DESC
     LIMIT ?
   `).all(row.community_id, nodeId, limit) as any[]).map(r => r.id);
-}
-
-// ─── 社区描述生成 ────────────────────────────────────────────
-
-import type { CompleteFn } from "../engine/llm.ts";
-import type { EmbedFn } from "../engine/embed.ts";
-
-const COMMUNITY_SUMMARY_SYS = `你是知识图谱摘要引擎。根据节点列表，用简短的描述概括这组节点的主题领域。
-要求：
-- 只返回短语本身，不要解释
-- 描述涵盖的工具/技术/任务领域
-- 不要使用"社区"这个词`;
-
-function buildCommunityMemberSignature(memberIds: string[]): string {
-  return createHash("sha1").update([...memberIds].sort().join(",")).digest("hex");
-}
-
-/**
- * 为所有社区生成 LLM 摘要描述 + embedding 向量
- *
- * 调用时机：runMaintenance → detectCommunities 之后
- */
-export async function summarizeCommunities(
-  db: DatabaseSyncInstance,
-  communities: Map<string, string[]>,
-  llm: CompleteFn,
-  embedFn?: EmbedFn,
-): Promise<number> {
-  let generated = 0;
-
-  for (const [communityId, memberIds] of communities) {
-    if (memberIds.length === 0) continue;
-    const memberSignature = buildCommunityMemberSignature(memberIds);
-
-    const current = getCommunitySummary(db, communityId);
-    if (current?.memberSignature === memberSignature && current.summary.trim()) {
-      continue;
-    }
-
-    const reusable = getCommunitySummaryBySignature(db, memberSignature);
-    if (reusable?.summary.trim()) {
-      upsertCommunitySummary(
-        db,
-        communityId,
-        reusable.summary,
-        memberIds.length,
-        reusable.embedding,
-        memberSignature,
-      );
-      continue;
-    }
-
-    const placeholders = memberIds.map(() => "?").join(",");
-    const members = db.prepare(`
-      SELECT name, type, description FROM gm_nodes
-      WHERE id IN (${placeholders}) AND status='active'
-      ORDER BY validated_count DESC
-      LIMIT 10
-    `).all(...memberIds) as any[];
-
-    if (members.length === 0) continue;
-
-    const memberText = members
-      .map((m: any) => `${m.type}:${m.name} — ${m.description}`)
-      .join("\n");
-
-    try {
-      // LLM 生成描述
-      const summary = await llm(
-        COMMUNITY_SUMMARY_SYS,
-        `社区成员：\n${memberText}`,
-      );
-
-      const cleaned = summary.trim()
-        .replace(/<think>[\s\S]*?<\/think>/gi, "")  // 去掉思维链
-        .replace(/<think>[\s\S]*/gi, "")              // 去掉未闭合的 <think>
-        .replace(/^["'「」]|["'「」]$/g, "")
-        .replace(/\n/g, " ")
-        .replace(/\s{2,}/g, " ")
-        .trim()
-        .slice(0, 100);
-
-      if (cleaned.length === 0) continue;
-
-      // 生成社区 embedding（用描述 + 成员名拼接）
-      let embedding: number[] | undefined;
-      if (embedFn) {
-        try {
-          const embedText = `${cleaned}\n${members.map((m: any) => m.name).join(", ")}`;
-          embedding = await embedFn(embedText, "db");
-        } catch { /* embedding is optional; keep the text summary */ }
-      }
-
-      upsertCommunitySummary(db, communityId, cleaned, memberIds.length, embedding, memberSignature);
-      generated++;
-    } catch (err) {
-      console.log(`  [WARN] community summary failed for ${communityId}: ${err}`);
-    }
-  }
-
-  // Keep summaries from previous community ids available during the loop so
-  // an unchanged member set can reuse them. Remove obsolete ids afterwards.
-  pruneCommunitySummaries(db);
-  return generated;
 }

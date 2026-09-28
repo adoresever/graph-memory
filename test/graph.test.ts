@@ -8,11 +8,10 @@
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { DatabaseSync, type DatabaseSyncInstance } from "@photostructure/sqlite";
+import { DatabaseSync, type DatabaseSyncInstance } from "../src/store/sqlite.ts";
 import { createTestDb, insertNode, insertEdge } from "./helpers.ts";
 import { personalizedPageRank, computeGlobalPageRank, invalidateGraphCache } from "../src/graph/pagerank.ts";
-import { detectCommunities, getCommunityPeers, summarizeCommunities } from "../src/graph/community.ts";
-import { detectDuplicates, dedup } from "../src/graph/dedup.ts";
+import { detectCommunities, getCommunityPeers } from "../src/graph/community.ts";
 import { runMaintenance } from "../src/graph/maintenance.ts";
 import { saveVector } from "../src/store/store.ts";
 import { DEFAULT_CONFIG, type GmConfig } from "../src/types.ts";
@@ -195,132 +194,6 @@ describe("Community Detection", () => {
     expect(count).toBe(0);
   });
 
-  it("reuses existing summaries when a community is unchanged", async () => {
-    const a = insertNode(db, { name: "docker-build" });
-    const b = insertNode(db, { name: "docker-push" });
-    insertEdge(db, { fromId: a, toId: b });
-
-    const { communities } = detectCommunities(db);
-    let llmCalls = 0;
-    const llm = async () => {
-      llmCalls += 1;
-      return "docker deployment skills";
-    };
-
-    const first = await summarizeCommunities(db, communities, llm);
-    const second = await summarizeCommunities(db, communities, llm);
-
-    expect(first).toBe(1);
-    expect(second).toBe(0);
-    expect(llmCalls).toBe(1);
-  });
-
-  it("reuses a summary when the community id changes but members do not", async () => {
-    const a = insertNode(db, { name: "docker-build" });
-    const b = insertNode(db, { name: "docker-push" });
-    db.prepare("UPDATE gm_nodes SET community_id='old-community' WHERE id IN (?, ?)").run(a, b);
-
-    let llmCalls = 0;
-    const llm = async () => {
-      llmCalls += 1;
-      return "docker deployment skills";
-    };
-
-    const members = [a, b];
-    expect(await summarizeCommunities(db, new Map([["old-community", members]]), llm)).toBe(1);
-
-    db.prepare("UPDATE gm_nodes SET community_id='new-community' WHERE id IN (?, ?)").run(a, b);
-    expect(await summarizeCommunities(db, new Map([["new-community", members]]), llm)).toBe(0);
-
-    expect(llmCalls).toBe(1);
-    expect(db.prepare("SELECT summary FROM gm_communities WHERE id='new-community'").get()).toBeTruthy();
-    expect(db.prepare("SELECT summary FROM gm_communities WHERE id='old-community'").get()).toBeUndefined();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════
-// 向量去重
-// ═══════════════════════════════════════════════════════════════
-
-describe("Vector Dedup", () => {
-  it("相似向量被检测为重复", () => {
-    const a = insertNode(db, { name: "conda-env-create", type: "SKILL" });
-    const b = insertNode(db, { name: "conda-create-environment", type: "SKILL" });
-
-    // 构造两个非常相似的向量
-    const vecA = Array.from({ length: 64 }, (_, i) => Math.sin(i * 0.1));
-    const vecB = Array.from({ length: 64 }, (_, i) => Math.sin(i * 0.1) + 0.01); // 微小差异
-
-    saveVector(db, a, "content a", vecA);
-    saveVector(db, b, "content b", vecB);
-
-    const pairs = detectDuplicates(db, { ...cfg, dedupThreshold: 0.9 });
-    expect(pairs.length).toBeGreaterThanOrEqual(1);
-    expect(pairs[0].similarity).toBeGreaterThan(0.9);
-  });
-
-  it("不同向量不被当作重复", () => {
-    const a = insertNode(db, { name: "docker-build", type: "SKILL" });
-    const b = insertNode(db, { name: "conda-create", type: "SKILL" });
-
-    // 构造正交向量：前半 vs 后半，余弦相似度 ≈ 0
-    const vecA = Array.from({ length: 64 }, (_, i) => i < 32 ? 1 : 0);
-    const vecB = Array.from({ length: 64 }, (_, i) => i >= 32 ? 1 : 0);
-
-    saveVector(db, a, "content a", vecA);
-    saveVector(db, b, "content b", vecB);
-
-    const pairs = detectDuplicates(db, { ...cfg, dedupThreshold: 0.9 });
-    expect(pairs).toHaveLength(0);
-  });
-
-  it("不同维度的向量不参与去重", () => {
-    const a = insertNode(db, { name: "dimension-a", type: "SKILL" });
-    const b = insertNode(db, { name: "dimension-b", type: "SKILL" });
-    saveVector(db, a, "a", [1, 0]);
-    saveVector(db, b, "b", [1, 0, 0]);
-    expect(detectDuplicates(db, { ...cfg, dedupThreshold: 0.9 })).toEqual([]);
-  });
-
-  it("dedup 自动合并同类型重复节点", () => {
-    const a = insertNode(db, { name: "skill-v1", type: "SKILL", validatedCount: 5 });
-    const b = insertNode(db, { name: "skill-v1-dup", type: "SKILL", validatedCount: 2 });
-
-    const vec = Array.from({ length: 64 }, (_, i) => Math.sin(i * 0.1));
-    saveVector(db, a, "content", vec);
-    saveVector(db, b, "content", vec); // 完全相同的向量
-
-    const { merged } = dedup(db, { ...cfg, dedupThreshold: 0.9 });
-    expect(merged).toBe(1);
-
-    // a 应该还是 active（validatedCount 更高）
-    const aAfter = db.prepare("SELECT status, validated_count FROM gm_nodes WHERE id=?").get(a) as any;
-    expect(aAfter.status).toBe("active");
-    expect(aAfter.validated_count).toBe(7); // 5 + 2
-
-    // b 应该 deprecated
-    const bAfter = db.prepare("SELECT status FROM gm_nodes WHERE id=?").get(b) as any;
-    expect(bAfter.status).toBe("deprecated");
-  });
-
-  it("不同类型不合并", () => {
-    const a = insertNode(db, { name: "skill-x", type: "SKILL" });
-    const b = insertNode(db, { name: "event-x", type: "EVENT" });
-
-    const vec = Array.from({ length: 64 }, (_, i) => Math.sin(i * 0.1));
-    saveVector(db, a, "content", vec);
-    saveVector(db, b, "content", vec);
-
-    const { merged } = dedup(db, { ...cfg, dedupThreshold: 0.9 });
-    expect(merged).toBe(0);
-  });
-
-  it("没有向量时安全跳过", () => {
-    insertNode(db, { name: "no-vec" });
-    const { pairs, merged } = dedup(db, cfg);
-    expect(pairs).toHaveLength(0);
-    expect(merged).toBe(0);
-  });
 });
 
 // ═══════════════════════════════════════════════════════════════

@@ -12,6 +12,6 @@
     "rootDir": ".",
     "baseUrl": "."
   },
-  "include": ["src/**/*.ts", "index.ts", "dsh.ts"],
+  "include": ["src/**/*.ts", "pro/**/*.ts", "index.ts", "dsh.ts"],
   "exclude": ["test/**/*.ts", "dist", "node_modules"]
 }
